@@ -83,8 +83,21 @@ pub fn parseDate(text: []const u8) !Date {
     const y = std.fmt.parseInt(u16, text[0..4], 10) catch return error.InvalidDate;
     const m = std.fmt.parseInt(u8, text[5..7], 10) catch return error.InvalidDate;
     const d = std.fmt.parseInt(u8, text[8..10], 10) catch return error.InvalidDate;
-    if (m < 1 or m > 12 or d < 1 or d > 31) return error.InvalidDate;
+    if (m < 1 or m > 12 or d < 1 or d > daysInMonth(y, m)) return error.InvalidDate;
     return .{ .year = y, .month = m, .day = d };
+}
+
+fn daysInMonth(year: u16, month: u8) u8 {
+    return switch (month) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => if (isLeap(year)) 29 else 28,
+        else => 0,
+    };
+}
+
+fn isLeap(year: u16) bool {
+    return (year % 4 == 0 and year % 100 != 0) or year % 400 == 0;
 }
 
 test "date parse" {
@@ -93,4 +106,7 @@ test "date parse" {
     try std.testing.expectEqual(@as(u8, 11), d.month);
     try std.testing.expectEqual(@as(u8, 11), d.day);
     try std.testing.expectError(error.InvalidDate, parseDate("2026-13-01"));
+    try std.testing.expectError(error.InvalidDate, parseDate("2026-02-29"));
+    _ = try parseDate("2024-02-29");
+    try std.testing.expectError(error.InvalidDate, parseDate("2026-04-31"));
 }

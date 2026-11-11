@@ -512,6 +512,29 @@ pub const Engine = struct {
                         try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: unknown project {s}", .{ lt.task.id, p }));
                     }
                 }
+                if (lt.task.get("contexto")) |ctx| {
+                    if (std.mem.indexOfScalar(u8, p, '/')) |slash| {
+                        if (!std.mem.eql(u8, p[0..slash], ctx)) {
+                            try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: project {s} is outside context {s}", .{ lt.task.id, p, ctx }));
+                        }
+                    }
+                }
+            }
+            if (lt.task.get("capturada")) |captured| {
+                if (platform.parseDate(captured)) |captured_date| {
+                    if (model.parseIdDate(lt.task.id)) |id_date| {
+                        if (id_date.year != captured_date.year or id_date.month != captured_date.month or id_date.day != captured_date.day) {
+                            try warnings.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: capturada does not match id date", .{lt.task.id}));
+                        }
+                    }
+                } else |_| {
+                    try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: invalid capturada date", .{lt.task.id}));
+                }
+            }
+            if (lt.task.get("cerrada")) |closed| {
+                if (platform.parseDate(closed)) |_| {} else |_| {
+                    try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: invalid cerrada date", .{lt.task.id}));
+                }
             }
         }
 

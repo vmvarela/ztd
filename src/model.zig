@@ -155,7 +155,13 @@ pub fn parseLine(alloc: std.mem.Allocator, line_in: []const u8) ParseError!?Task
     var title: std.ArrayList(u8) = .empty;
     errdefer title.deinit(alloc);
     var fields: std.ArrayList(Field) = .empty;
-    errdefer fields.deinit(alloc);
+    errdefer {
+        for (fields.items) |f| {
+            alloc.free(f.key);
+            alloc.free(f.value);
+        }
+        fields.deinit(alloc);
+    }
 
     const body = rest[sep + 3 ..];
     var cursor: usize = 0;
@@ -180,6 +186,9 @@ pub fn parseLine(alloc: std.mem.Allocator, line_in: []const u8) ParseError!?Task
                 var vb: std.ArrayList(u8) = .empty;
                 defer vb.deinit(alloc);
                 try appendUnescaped(&vb, alloc, value);
+                for (fields.items) |existing| {
+                    if (std.mem.eql(u8, existing.key, kb.items)) return error.MalformedTask;
+                }
                 try fields.append(alloc, .{
                     .key = try kb.toOwnedSlice(alloc),
                     .value = try vb.toOwnedSlice(alloc),
@@ -241,4 +250,9 @@ test "round trip" {
     try std.testing.expectEqualStrings(task.id, again.id);
     try std.testing.expectEqualStrings(task.title, again.title);
     try std.testing.expectEqual(task.fields.items.len, again.fields.items.len);
+}
+
+test "duplicate field is malformed" {
+    const line = "- [ ] T-20261111-001 | Title | contexto: trabajo | contexto: personal";
+    try std.testing.expectError(error.MalformedTask, parseLine(std.testing.allocator, line));
 }
