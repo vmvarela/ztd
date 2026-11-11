@@ -1,0 +1,19 @@
+.{
+    .name = .ztd,
+    .version = "0.1.0-dev",
+    .fingerprint = 0xa7ab2d2799ca9806,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "docs",
+        "packaging",
+        "test",
+        "install.sh",
+        "install.ps1",
+        "README.md",
+        "LICENSE",
+    },
+}

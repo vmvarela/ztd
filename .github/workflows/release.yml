@@ -1,0 +1,873 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+env:
+  ZIG_VERSION: "0.17.0"
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux — statically linked via musl, no system dependencies
+          - target: x86_64-linux-musl
+            asset: ztd-x86_64-linux
+            ext: ""
+          - target: aarch64-linux-musl
+            asset: ztd-aarch64-linux
+            ext: ""
+          - target: arm-linux-musleabihf
+            asset: ztd-armv7-linux
+            ext: ""
+          - target: riscv64-linux-musl
+            asset: ztd-riscv64-linux
+            ext: ""
+          - target: x86-linux-musl
+            asset: ztd-x86-linux
+            ext: ""
+          # macOS — Zig bundles the macOS SDK for cross-compilation
+          - target: x86_64-macos
+            asset: ztd-x86_64-macos
+            ext: ""
+          - target: aarch64-macos
+            asset: ztd-aarch64-macos
+            ext: ""
+          # Windows — MinGW ABI, no MSVC required
+          - target: x86_64-windows-gnu
+            asset: ztd-x86_64-windows
+            ext: ".exe"
+          - target: aarch64-windows-gnu
+            asset: ztd-aarch64-windows
+            ext: ".exe"
+          - target: x86-windows-gnu
+            asset: ztd-x86-windows
+            ext: ".exe"
+          # FreeBSD — Zig bundles libc headers for cross-compilation
+          - target: x86_64-freebsd
+            asset: ztd-x86_64-freebsd
+            ext: ""
+          - target: aarch64-freebsd
+            asset: ztd-aarch64-freebsd
+            ext: ""
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          zig build \
+            -Dtarget=${{ matrix.target }} \
+            -Doptimize=ReleaseSafe \
+            -Dversion="$VERSION"
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp zig-out/bin/ztd${{ matrix.ext }} dist/${{ matrix.asset }}${{ matrix.ext }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/
+          if-no-files-found: error
+
+  # Stages the release as a DRAFT. It stays private until publish-release,
+  # which runs only after every asset, package and checksum is in place.
+  release:
+    name: Stage release draft
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Create or reuse draft and upload binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          REPO="${{ github.repository }}"
+          if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
+            gh release edit "$TAG" --draft=true --repo "$REPO"
+            # A retried draft must not keep assets from an earlier attempt.
+            for name in $(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name'); do
+              [ -e "artifacts/$name" ] || gh release delete-asset "$TAG" "$name" --repo "$REPO" --yes
+            done
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              --draft \
+              --repo "$REPO"
+          fi
+          gh release upload "$TAG" artifacts/* --repo "$REPO" --clobber
+
+  # ── Publish to npm ─────────────────────────────────────────────────────
+  # Requires:
+  #   1. Package claimed on npmjs.com: @vmvarela/ztd
+  #   2. Trusted Publishing configured on npmjs.com for repo vmvarela/ztd, workflow release.yml
+  #   3. Repository variable NPM_TRUSTED_PUBLISHING=true set after configuring npm Trusted Publisher
+  #   4. No NPM_TOKEN secret needed — uses OIDC (id-token: write)
+  publish-npm:
+    name: Publish to npm
+    needs: publish-release
+    if: ${{ vars.NPM_TRUSTED_PUBLISHING == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Stage npm binaries
+        run: |
+          mkdir -p npm-pkg/bin
+          cp -r packaging/npm/. npm-pkg/
+          cp LICENSE npm-pkg/LICENSE
+          cp artifacts/ztd-x86_64-linux       npm-pkg/bin/ztd-linux-x64
+          cp artifacts/ztd-aarch64-linux      npm-pkg/bin/ztd-linux-arm64
+          cp artifacts/ztd-armv7-linux        npm-pkg/bin/ztd-linux-arm
+          cp artifacts/ztd-x86_64-macos       npm-pkg/bin/ztd-darwin-x64
+          cp artifacts/ztd-aarch64-macos      npm-pkg/bin/ztd-darwin-arm64
+          cp artifacts/ztd-x86_64-windows.exe npm-pkg/bin/ztd-win32-x64.exe
+          chmod +x npm-pkg/bin/ztd-linux-* npm-pkg/bin/ztd-darwin-*
+
+      - name: Set package version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm version "$VERSION" --no-git-tag-version --workspaces=false --prefix ./npm-pkg
+
+      - name: Publish to npm
+        run: npm publish ./npm-pkg --provenance --access public
+
+  # ── Update Homebrew tap ─────────────────────────────────────────────
+  # Requires:
+  #   1. Repository: vmvarela/homebrew-tap (with a Formula/ directory)
+  #   2. Secret: PACKAGE_DISTRIBUTION_TOKEN (fine-grained PAT with contents:write
+  #      on vmvarela/homebrew-tap, or classic PAT with public_repo scope)
+  update-homebrew:
+    name: Update Homebrew tap
+    needs: publish-release
+    runs-on: ubuntu-latest
+    env:
+      HAS_HOMEBREW_TOKEN: ${{ secrets.PACKAGE_DISTRIBUTION_TOKEN != '' }}
+    steps:
+      - name: Download all artifacts
+        if: ${{ env.HAS_HOMEBREW_TOKEN == 'true' }}
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Generate formula and push to tap
+        if: ${{ env.HAS_HOMEBREW_TOKEN == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGE_DISTRIBUTION_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          SHA_MACOS_ARM64=$(sha256sum artifacts/ztd-aarch64-macos | awk '{print $1}')
+          SHA_MACOS_X64=$(sha256sum artifacts/ztd-x86_64-macos   | awk '{print $1}')
+          SHA_LINUX_ARM64=$(sha256sum artifacts/ztd-aarch64-linux | awk '{print $1}')
+          SHA_LINUX_X64=$(sha256sum artifacts/ztd-x86_64-linux   | awk '{print $1}')
+
+          cat > ztd.rb <<'FORMULA'
+          class Ztd < Formula
+            desc "Markdown task manager for humans and agents"
+            homepage "https://github.com/vmvarela/ztd"
+            version "__VERSION__"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/vmvarela/ztd/releases/download/v__VERSION__/ztd-aarch64-macos"
+                sha256 "__SHA_MACOS_ARM64__"
+              end
+              on_intel do
+                url "https://github.com/vmvarela/ztd/releases/download/v__VERSION__/ztd-x86_64-macos"
+                sha256 "__SHA_MACOS_X64__"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/vmvarela/ztd/releases/download/v__VERSION__/ztd-aarch64-linux"
+                sha256 "__SHA_LINUX_ARM64__"
+              end
+              on_intel do
+                url "https://github.com/vmvarela/ztd/releases/download/v__VERSION__/ztd-x86_64-linux"
+                sha256 "__SHA_LINUX_X64__"
+              end
+            end
+
+            def install
+              bin.install Dir["ztd*"].first => "ztd"
+            end
+
+            test do
+              assert_match "ztd", shell_output("#{bin}/ztd --version 2>&1")
+            end
+          end
+          FORMULA
+
+          # Substitute placeholders with actual values
+          sed -i "s/__VERSION__/${VERSION}/g"               ztd.rb
+          sed -i "s/__SHA_MACOS_ARM64__/${SHA_MACOS_ARM64}/g" ztd.rb
+          sed -i "s/__SHA_MACOS_X64__/${SHA_MACOS_X64}/g"     ztd.rb
+          sed -i "s/__SHA_LINUX_ARM64__/${SHA_LINUX_ARM64}/g" ztd.rb
+          sed -i "s/__SHA_LINUX_X64__/${SHA_LINUX_X64}/g"     ztd.rb
+
+          echo "==> Generated formula for ztd ${VERSION}:"
+          cat ztd.rb
+
+          # Push via GitHub Contents API — no git clone/push needed,
+          # works with fine-grained PATs (contents:write on the tap repo).
+          CURRENT_SHA=$(gh api "repos/vmvarela/homebrew-tap/contents/Formula/ztd.rb" \
+            --jq '.sha' 2>/dev/null || echo "")
+
+          if [ -n "${CURRENT_SHA}" ]; then
+            gh api "repos/vmvarela/homebrew-tap/contents/Formula/ztd.rb" \
+              --method PUT \
+              -f "message=ztd ${VERSION}" \
+              -f "content=$(base64 -w0 ztd.rb)" \
+              -f "sha=${CURRENT_SHA}"
+          else
+            gh api "repos/vmvarela/homebrew-tap/contents/Formula/ztd.rb" \
+              --method PUT \
+              -f "message=ztd ${VERSION}" \
+              -f "content=$(base64 -w0 ztd.rb)"
+          fi
+
+  # ── Update AUR package ──────────────────────────────────────────────
+  # Requires:
+  #   1. AUR package registered: https://aur.archlinux.org/packages/ztd
+  #   2. Secret: PACKAGE_SSH_KEY (SSH private key authorized on AUR)
+  update-aur:
+    name: Update AUR package
+    needs: publish-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Generate PKGBUILD
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          SHA_X86_64=$(sha256sum artifacts/ztd-x86_64-linux  | awk '{print $1}')
+          SHA_AARCH64=$(sha256sum artifacts/ztd-aarch64-linux | awk '{print $1}')
+
+          # Download LICENSE to compute its hash
+          curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${GITHUB_REF_NAME}/LICENSE" -o LICENSE
+          SHA_LICENSE=$(sha256sum LICENSE | awk '{print $1}')
+
+          cat > PKGBUILD <<'PKGEOF'
+          # Maintainer: vmvarela <vmvarela@gmail.com>
+          pkgname=ztd
+          pkgver=__VERSION__
+          pkgrel=1
+          pkgdesc="Read CSV via stdin, run SQL, emit CSV via stdout"
+          arch=('x86_64' 'aarch64')
+          url="https://github.com/vmvarela/ztd"
+          license=('MIT')
+          provides=("${pkgname}")
+          conflicts=("${pkgname}")
+
+          source=("LICENSE::https://raw.githubusercontent.com/vmvarela/ztd/v${pkgver}/LICENSE")
+          sha256sums=('__SHA_LICENSE__')
+
+          source_x86_64=("${pkgname}-${pkgver}-x86_64::https://github.com/vmvarela/ztd/releases/download/v${pkgver}/ztd-x86_64-linux")
+          sha256sums_x86_64=('__SHA_X86_64__')
+
+          source_aarch64=("${pkgname}-${pkgver}-aarch64::https://github.com/vmvarela/ztd/releases/download/v${pkgver}/ztd-aarch64-linux")
+          sha256sums_aarch64=('__SHA_AARCH64__')
+
+          package() {
+              install -Dm755 "${pkgname}-${pkgver}-${CARCH}" "${pkgdir}/usr/bin/${pkgname}"
+              install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+          }
+          PKGEOF
+
+          # Substitute placeholders
+          sed -i "s/__VERSION__/${VERSION}/g"         PKGBUILD
+          sed -i "s/__SHA_LICENSE__/${SHA_LICENSE}/g"  PKGBUILD
+          sed -i "s/__SHA_X86_64__/${SHA_X86_64}/g"   PKGBUILD
+          sed -i "s/__SHA_AARCH64__/${SHA_AARCH64}/g" PKGBUILD
+
+          echo "==> Generated PKGBUILD for ztd ${VERSION}:"
+          cat PKGBUILD
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
+        with:
+          pkgname: ztd
+          pkgbuild: ./PKGBUILD
+          commit_username: vmvarela
+          commit_email: vmvarela@gmail.com
+          ssh_private_key: ${{ secrets.PACKAGE_SSH_KEY }}
+          commit_message: "Update to ${{ github.ref_name }}"
+
+  # ── Build and upload .deb packages ─────────────────────────────────
+  # Generates Debian packages for amd64, arm64, arm7 and 386 using nfpm.
+  # Each arch is independent — one failing arch does not block the others.
+  package-deb:
+    name: Package DEB (${{ matrix.goarch }})
+    needs: release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            asset: ztd-x86_64-linux
+          - goarch: arm64
+            asset: ztd-aarch64-linux
+          - goarch: arm7
+            asset: ztd-armv7-linux
+          - goarch: "386"
+            asset: ztd-x86-linux
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Install nfpm
+        run: |
+          NFPM_VERSION=2.45.1
+          curl -sfL -o /tmp/nfpm.tar.gz \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          tar -xzf /tmp/nfpm.tar.gz -C /usr/local/bin nfpm
+
+      - name: Stage files for packaging
+        run: |
+          mkdir -p pkg-work
+          cp artifacts/${{ matrix.asset }}  pkg-work/ztd
+          chmod +x pkg-work/ztd
+          cp LICENSE                         pkg-work/LICENSE
+
+      - name: Build .deb
+        working-directory: pkg-work
+        env:
+          VERSION: ${{ github.ref_name }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          VERSION="${VERSION#v}"
+          mkdir -p dist
+          VERSION="$VERSION" GOARCH="$GOARCH" \
+            nfpm package -p deb \
+              -f "$GITHUB_WORKSPACE/packaging/nfpm.yaml" \
+              -t dist/
+
+      - name: Upload .deb to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: pkg-work
+        run: |
+          gh release upload "${{ github.ref_name }}" dist/*.deb \
+            --repo "${{ github.repository }}" \
+            --clobber
+
+  # ── Build and upload .rpm packages ─────────────────────────────────
+  # Generates RPM packages for x86_64 and aarch64 using nfpm.
+  # Each arch is independent — one failing arch does not block the other.
+  package-rpm:
+    name: Package RPM (${{ matrix.goarch }})
+    needs: release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            asset: ztd-x86_64-linux
+          - goarch: arm64
+            asset: ztd-aarch64-linux
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Install nfpm
+        run: |
+          NFPM_VERSION=2.45.1
+          curl -sfL -o /tmp/nfpm.tar.gz \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          tar -xzf /tmp/nfpm.tar.gz -C /usr/local/bin nfpm
+
+      - name: Stage files for packaging
+        run: |
+          mkdir -p pkg-work
+          cp artifacts/${{ matrix.asset }}  pkg-work/ztd
+          chmod +x pkg-work/ztd
+          cp LICENSE                         pkg-work/LICENSE
+
+      - name: Build .rpm
+        working-directory: pkg-work
+        env:
+          VERSION: ${{ github.ref_name }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          VERSION="${VERSION#v}"
+          mkdir -p dist
+          VERSION="$VERSION" GOARCH="$GOARCH" \
+            nfpm package -p rpm \
+              -f "$GITHUB_WORKSPACE/packaging/nfpm.yaml" \
+              -t dist/
+
+      - name: Upload .rpm to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: pkg-work
+        run: |
+          gh release upload "${{ github.ref_name }}" dist/*.rpm \
+            --repo "${{ github.repository }}" \
+            --clobber
+
+  # ── Build and upload .apk packages ────────────────────────────────
+  # Generates Alpine Linux packages for x86_64 and aarch64 using nfpm.
+  # Each arch is independent — one failing arch does not block the other.
+  package-apk:
+    name: Package APK (${{ matrix.goarch }})
+    needs: release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            asset: ztd-x86_64-linux
+          - goarch: arm64
+            asset: ztd-aarch64-linux
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Install nfpm
+        run: |
+          NFPM_VERSION=2.45.1
+          curl -sfL -o /tmp/nfpm.tar.gz \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          tar -xzf /tmp/nfpm.tar.gz -C /usr/local/bin nfpm
+
+      - name: Stage files for packaging
+        run: |
+          mkdir -p pkg-work
+          cp artifacts/${{ matrix.asset }}  pkg-work/ztd
+          chmod +x pkg-work/ztd
+          cp LICENSE                         pkg-work/LICENSE
+
+      - name: Build .apk
+        working-directory: pkg-work
+        env:
+          VERSION: ${{ github.ref_name }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          VERSION="${VERSION#v}"
+          mkdir -p dist
+          VERSION="$VERSION" GOARCH="$GOARCH" \
+            nfpm package -p apk \
+              -f "$GITHUB_WORKSPACE/packaging/nfpm.yaml" \
+              -t dist/
+
+      - name: Upload .apk to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: pkg-work
+        run: |
+          gh release upload "${{ github.ref_name }}" dist/*.apk \
+            --repo "${{ github.repository }}" \
+            --clobber
+
+  # ── Update WinGet manifest ────────────────────────────────────────
+  # Submits a PR to microsoft/winget-pkgs with updated manifest files.
+  # Requires:
+  #   1. At least one version already in microsoft/winget-pkgs (initial
+  #      submission must be done manually via wingetcreate or PR)
+  #   2. Fork of microsoft/winget-pkgs under the vmvarela account
+  #   3. Secret: PACKAGE_DISTRIBUTION_TOKEN (classic PAT with public_repo scope)
+  update-winget:
+    name: Update WinGet manifest
+    needs: publish-release
+    runs-on: ubuntu-latest
+    env:
+      HAS_WINGET_TOKEN: ${{ secrets.PACKAGE_DISTRIBUTION_TOKEN != '' }}
+    steps:
+      - name: Submit WinGet manifest
+        if: ${{ env.HAS_WINGET_TOKEN == 'true' }}
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: vmvarela.ztd
+          installers-regex: 'ztd-.*-windows\.exe$'
+          token: ${{ secrets.PACKAGE_DISTRIBUTION_TOKEN }}
+
+  # ── Update Scoop bucket ──────────────────────────────────────────────
+  # Pushes an updated Scoop manifest to the vmvarela/scoop-bucket
+  # centralized bucket repository so Windows users can install via:
+  #   scoop bucket add vmvarela https://github.com/vmvarela/scoop-bucket
+  #   scoop install ztd
+  # Requires:
+  #   1. Repository: vmvarela/scoop-bucket (with bucket/ztd.json)
+  #   2. Secret: PACKAGE_DISTRIBUTION_TOKEN (PAT with contents:write on the target repository)
+  update-scoop:
+    name: Update Scoop bucket
+    needs: publish-release
+    runs-on: ubuntu-latest
+    env:
+      HAS_SCOOP_TOKEN: ${{ secrets.PACKAGE_DISTRIBUTION_TOKEN != '' }}
+    steps:
+      - name: Download Windows artifacts
+        if: ${{ env.HAS_SCOOP_TOKEN == 'true' }}
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Generate manifest and push to bucket
+        if: ${{ env.HAS_SCOOP_TOKEN == 'true' }}
+        env:
+          PACKAGE_DISTRIBUTION_TOKEN: ${{ secrets.PACKAGE_DISTRIBUTION_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          SHA_X64=$(sha256sum artifacts/ztd-x86_64-windows.exe   | awk '{print $1}')
+          SHA_X86=$(sha256sum artifacts/ztd-x86-windows.exe      | awk '{print $1}')
+          SHA_ARM64=$(sha256sum artifacts/ztd-aarch64-windows.exe | awk '{print $1}')
+
+          cat > ztd.json <<MANIFEST
+          {
+              "version": "${VERSION}",
+              "description": "Markdown task manager for humans and agents",
+              "homepage": "https://github.com/vmvarela/ztd",
+              "license": "MIT",
+              "architecture": {
+                  "64bit": {
+                      "url": "https://github.com/vmvarela/ztd/releases/download/v${VERSION}/ztd-x86_64-windows.exe#/ztd.exe",
+                      "hash": "${SHA_X64}"
+                  },
+                  "32bit": {
+                      "url": "https://github.com/vmvarela/ztd/releases/download/v${VERSION}/ztd-x86-windows.exe#/ztd.exe",
+                      "hash": "${SHA_X86}"
+                  },
+                  "arm64": {
+                      "url": "https://github.com/vmvarela/ztd/releases/download/v${VERSION}/ztd-aarch64-windows.exe#/ztd.exe",
+                      "hash": "${SHA_ARM64}"
+                  }
+              },
+              "bin": "ztd.exe",
+              "checkver": "github",
+              "autoupdate": {
+                  "architecture": {
+                      "64bit": {
+                          "url": "https://github.com/vmvarela/ztd/releases/download/v\$version/ztd-x86_64-windows.exe#/ztd.exe"
+                      },
+                      "32bit": {
+                          "url": "https://github.com/vmvarela/ztd/releases/download/v\$version/ztd-x86-windows.exe#/ztd.exe"
+                      },
+                      "arm64": {
+                          "url": "https://github.com/vmvarela/ztd/releases/download/v\$version/ztd-aarch64-windows.exe#/ztd.exe"
+                      }
+                  },
+                  "hash": {
+                      "url": "https://github.com/vmvarela/ztd/releases/download/v\$version/sha256sums.txt"
+                  }
+              }
+          }
+          MANIFEST
+
+          echo "==> Generated Scoop manifest for ztd ${VERSION}:"
+          cat ztd.json
+
+          git clone "https://x-access-token:${PACKAGE_DISTRIBUTION_TOKEN}@github.com/vmvarela/scoop-bucket.git" scoop-repo
+          mkdir -p scoop-repo/bucket
+          cp ztd.json scoop-repo/bucket/ztd.json
+          cd scoop-repo
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bucket/ztd.json
+          git diff --cached --quiet || git commit -m "ztd ${VERSION}"
+          git push
+
+  # ── Generate final SHA256 checksums ────────────────────────────────
+  # Runs after all packaging jobs (all must succeed) so sha256sums.txt covers
+  # all assets: binaries, man page, .deb, .rpm and .apk packages.
+  checksums:
+    name: Generate SHA256 checksums
+    needs: [release, package-deb, package-rpm, package-apk]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p assets
+          gh release download "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --dir assets
+
+      - name: Generate SHA256 checksums
+        working-directory: assets
+        run: |
+          # Fail before signing the list if an expected native asset is missing
+          for name in ztd-x86_64-linux ztd-aarch64-linux ztd-armv7-linux \
+            ztd-riscv64-linux ztd-x86-linux ztd-x86_64-macos \
+            ztd-aarch64-macos ztd-x86_64-windows.exe ztd-aarch64-windows.exe \
+            ztd-x86-windows.exe ztd-x86_64-freebsd ztd-aarch64-freebsd; do
+            [ -f "$name" ] || { echo "::error::missing asset $name" >&2; exit 1; }
+          done
+          # Exclude any pre-existing sha256sums.txt to avoid self-referencing
+          for f in *; do
+            [ "$f" = sha256sums.txt ] || sha256sum "$f"
+          done | tee sha256sums.txt
+
+      - name: Upload sha256sums.txt to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" assets/sha256sums.txt \
+            --repo "${{ github.repository }}" \
+            --clobber
+
+  # ── Publish the GitHub Release ─────────────────────────────────────
+  # The only step that makes the release public. It re-downloads every
+  # asset from the draft and checks bytes and file set against sha256sums.txt.
+  publish-release:
+    name: Publish GitHub Release
+    needs: [release, package-deb, package-rpm, package-apk, checksums]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Verify draft assets against sha256sums.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERIFY_DIR="$(mktemp -d)"
+          gh release download "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --dir "$VERIFY_DIR"
+          cd "$VERIFY_DIR"
+          sha256sum --check sha256sums.txt
+          diff <(find . -maxdepth 1 -type f ! -name sha256sums.txt -exec basename {} \; | sort) \
+               <(awk '{ print $2 }' sha256sums.txt | sort)
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ github.ref_name }}" --draft=false \
+            --repo "${{ github.repository }}"
+
+  # ── Update Nix package versions ────────────────────────────────────
+  # Pushes updated pkgs/ztd/versions.json directly to
+  # vmvarela/nix-packages so `nix run github:vmvarela/nix-packages#ztd`
+  # always points to the latest release.
+  # Requires:
+  #   1. Repository: vmvarela/nix-packages
+  #   2. Secret: PACKAGE_DISTRIBUTION_TOKEN (PAT with contents:write on the target repository)
+  update-nix:
+    name: Update Nix package
+    needs: publish-release
+    runs-on: ubuntu-latest
+    env:
+      HAS_NIX_TOKEN: ${{ secrets.PACKAGE_DISTRIBUTION_TOKEN != '' }}
+    steps:
+      - name: Download sha256sums.txt
+        if: ${{ env.HAS_NIX_TOKEN == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --pattern sha256sums.txt \
+            --dir .
+
+      - name: Push updated versions.json to nix-packages
+        if: ${{ env.HAS_NIX_TOKEN == 'true' }}
+        env:
+          PACKAGE_DISTRIBUTION_TOKEN: ${{ secrets.PACKAGE_DISTRIBUTION_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          SHA_X64_LINUX=$(awk '$2 == "ztd-x86_64-linux"  { print $1 }' sha256sums.txt)
+          SHA_A64_LINUX=$(awk '$2 == "ztd-aarch64-linux" { print $1 }' sha256sums.txt)
+          SHA_X64_MACOS=$(awk '$2 == "ztd-x86_64-macos"  { print $1 }' sha256sums.txt)
+          SHA_A64_MACOS=$(awk '$2 == "ztd-aarch64-macos" { print $1 }' sha256sums.txt)
+
+          cat > versions.json <<EOF
+          {
+            "x86_64-linux": {
+              "url": "https://github.com/vmvarela/ztd/releases/download/v${VERSION}/ztd-x86_64-linux",
+              "sha256": "${SHA_X64_LINUX}",
+              "version": "${VERSION}"
+            },
+            "aarch64-linux": {
+              "url": "https://github.com/vmvarela/ztd/releases/download/v${VERSION}/ztd-aarch64-linux",
+              "sha256": "${SHA_A64_LINUX}",
+              "version": "${VERSION}"
+            },
+            "x86_64-darwin": {
+              "url": "https://github.com/vmvarela/ztd/releases/download/v${VERSION}/ztd-x86_64-macos",
+              "sha256": "${SHA_X64_MACOS}",
+              "version": "${VERSION}"
+            },
+            "aarch64-darwin": {
+              "url": "https://github.com/vmvarela/ztd/releases/download/v${VERSION}/ztd-aarch64-macos",
+              "sha256": "${SHA_A64_MACOS}",
+              "version": "${VERSION}"
+            }
+          }
+          EOF
+
+          echo "==> Updated Nix versions.json for ztd ${VERSION}:"
+          cat versions.json
+
+          git clone \
+            "https://x-access-token:${PACKAGE_DISTRIBUTION_TOKEN}@github.com/vmvarela/nix-packages.git" \
+            nix-repo
+          cp versions.json nix-repo/pkgs/ztd/versions.json
+          cd nix-repo
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pkgs/ztd/versions.json
+          git diff --cached --quiet && echo "No changes to commit." && exit 0
+          git commit -m "chore(ztd): update to ${{ github.ref_name }}"
+          git push
+
+  # ── Update APT repository ──────────────────────────────────────────
+  # Dispatches to vmvarela/apt-packages which rebuilds the signed APT index
+  # and deploys to GitHub Pages so users can install via apt.
+  # Requires:
+  #   1. Repository: vmvarela/apt-packages (GitHub Pages enabled)
+  #   2. Secret: PACKAGE_DISTRIBUTION_TOKEN (PAT with contents:write on the target repository)
+  update-apt:
+    name: Update APT repository
+    needs: publish-release
+    runs-on: ubuntu-latest
+    env:
+      HAS_APT_TOKEN: ${{ secrets.PACKAGE_DISTRIBUTION_TOKEN != '' }}
+    steps:
+      - name: Dispatch to apt-packages
+        if: ${{ env.HAS_APT_TOKEN == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGE_DISTRIBUTION_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh api repos/vmvarela/apt-packages/dispatches \
+            --method POST \
+            -f event_type=update-ztd \
+            -F client_payload[version]="${VERSION}"
+          echo "Dispatched update-ztd v${VERSION} to vmvarela/apt-packages"
+
+  # ── Update RPM repository ──────────────────────────────────────────
+  # Dispatches to vmvarela/rpm-packages which rebuilds the signed RPM index
+  # and deploys to GitHub Pages so users can install via dnf/yum.
+  # Requires:
+  #   1. Repository: vmvarela/rpm-packages (GitHub Pages enabled)
+  #   2. Secret: PACKAGE_DISTRIBUTION_TOKEN (PAT with contents:write on the target repository)
+  update-rpm:
+    name: Update RPM repository
+    needs: publish-release
+    runs-on: ubuntu-latest
+    env:
+      HAS_RPM_TOKEN: ${{ secrets.PACKAGE_DISTRIBUTION_TOKEN != '' }}
+    steps:
+      - name: Dispatch to rpm-packages
+        if: ${{ env.HAS_RPM_TOKEN == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGE_DISTRIBUTION_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh api repos/vmvarela/rpm-packages/dispatches \
+            --method POST \
+            -f event_type=update-ztd \
+            -F client_payload[version]="${VERSION}"
+          echo "Dispatched update-ztd v${VERSION} to vmvarela/rpm-packages"
+
+  # ── Update APK repository ──────────────────────────────────────────
+  # Dispatches to vmvarela/apk-packages which rebuilds the signed APK index
+  # and deploys to GitHub Pages so Alpine Linux users can install via apk.
+  # Requires:
+  #   1. Repository: vmvarela/apk-packages (GitHub Pages enabled)
+  #   2. Secret: PACKAGE_DISTRIBUTION_TOKEN (PAT with contents:write on the target repository)
+  update-apk:
+    name: Update APK repository
+    needs: publish-release
+    runs-on: ubuntu-latest
+    env:
+      HAS_APK_TOKEN: ${{ secrets.PACKAGE_DISTRIBUTION_TOKEN != '' }}
+    steps:
+      - name: Dispatch to apk-packages
+        if: ${{ env.HAS_APK_TOKEN == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGE_DISTRIBUTION_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh api repos/vmvarela/apk-packages/dispatches \
+            --method POST \
+            -f event_type=update-ztd \
+            -F client_payload[version]="${VERSION}"
+          echo "Dispatched update-ztd v${VERSION} to vmvarela/apk-packages"

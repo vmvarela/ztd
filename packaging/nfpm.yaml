@@ -1,0 +1,20 @@
+# nfpm configuration for ztd. VERSION and GOARCH are injected by CI.
+name: ztd
+arch: "${GOARCH}"
+version: "${VERSION}"
+maintainer: vmvarela <vmvarela@gmail.com>
+description: Markdown task manager for humans and agents
+homepage: https://github.com/vmvarela/ztd
+license: MIT
+
+contents:
+  - src: ./ztd
+    dst: /usr/bin/ztd
+    file_info:
+      mode: 0755
+  - src: ./LICENSE
+    dst: /usr/share/doc/ztd/copyright
+    packager: deb
+  - src: ./LICENSE
+    dst: /usr/share/licenses/ztd/LICENSE
+    packager: rpm

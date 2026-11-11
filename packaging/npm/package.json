@@ -1,0 +1,25 @@
+{
+  "name": "@vmvarela/ztd",
+  "version": "0.0.0",
+  "description": "Markdown task manager for humans and agents",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vmvarela/ztd.git"
+  },
+  "homepage": "https://github.com/vmvarela/ztd",
+  "bugs": "https://github.com/vmvarela/ztd/issues",
+  "bin": {
+    "ztd": "bin/ztd.js"
+  },
+  "files": [
+    "bin/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "tasks", "todo", "ztd", "markdown", "cli", "agents", "mcp"
+  ],
+  "author": "vmvarela <vmvarela@gmail.com>"
+}
