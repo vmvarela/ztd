@@ -52,6 +52,9 @@ ztd/
   plans/weekly/
   templates/
   .state/            # lock, journal; ignored by Git
+  .gitignore
+  .gitattributes
+  README.md
 ```
 
 The binary only edits files. Commit them with your own Git workflow.

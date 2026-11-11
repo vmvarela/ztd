@@ -21,6 +21,11 @@ const files = [_]File{
     .{ .path = "lists/archive.md", .content = "# Archivo\n\n" },
     .{ .path = "lists/projects/index.md", .content = "# Proyectos\n\n" },
     .{ .path = ".gitignore", .content = ".state/\n" },
+    .{ .path = ".gitattributes", .content = "* text eol=lf\n" },
+    .{ .path = "plans/daily/.gitkeep", .content = "" },
+    .{ .path = "plans/weekly/.gitkeep", .content = "" },
+    .{ .path = "templates/.gitkeep", .content = "" },
+    .{ .path = "README.md", .content = "# ZTD workspace\n\nTasks are Markdown. Use `ztd` to edit them; commit the files with Git.\n\nSee `ztd --help` and the ztd project documentation.\n" },
 };
 
 const dirs = [_][]const u8{

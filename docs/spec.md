@@ -21,9 +21,13 @@ ztd/
   plans/weekly/
   templates/
   .state/              # lock, pending.json, last-transaction.json
+  .gitignore           # .state/
+  .gitattributes       # * text eol=lf
+  README.md
 ```
 
-`ztd/.gitignore` contains `.state/`. The binary never runs Git.
+`ztd/.gitignore` contains `.state/`. `.gitattributes` keeps the Markdown LF
+across platforms. The binary never runs Git.
 
 Root resolution:
 
