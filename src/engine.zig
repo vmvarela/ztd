@@ -256,6 +256,7 @@ pub const Engine = struct {
         const data = (try self.store.readOptional(".state/pending.json")) orelse return false;
         const parsed = std.json.parseFromSlice(Journal, self.alloc, data, .{}) catch return error.CorruptJournal;
         for (parsed.value.files) |f| {
+            if (!store_mod.safeRel(f.path)) return error.CorruptJournal;
             const current = (try self.store.readOptional(f.path)) orelse "";
             if (std.mem.eql(u8, current, f.after)) continue;
             if (std.mem.eql(u8, current, f.before)) {
@@ -758,4 +759,12 @@ test "recover applies the journal and refuses an external edit" {
 
     try std.testing.expectError(error.ExternalEdit, eng.recover());
     try std.testing.expect(eng.pending());
+
+    // Journal paths cannot escape the workspace.
+    var unsafe_files = [_]JournalFile{.{ .path = "../escape", .before = "", .after = "x" }};
+    const unsafe = try std.json.Stringify.valueAlloc(a, Journal{
+        .files = &unsafe_files,
+    }, .{});
+    try eng.store.writeAtomic(".state/pending.json", unsafe);
+    try std.testing.expectError(error.CorruptJournal, eng.recover());
 }

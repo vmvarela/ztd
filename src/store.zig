@@ -3,6 +3,17 @@ const builtin = @import("builtin");
 
 pub const max_file_bytes: usize = 16 * 1024 * 1024;
 
+/// A journal path must stay inside the workspace and use `/` separators.
+pub fn safeRel(rel: []const u8) bool {
+    if (rel.len == 0 or std.fs.path.isAbsolute(rel)) return false;
+    if (std.mem.indexOfScalar(u8, rel, '\\') != null) return false;
+    var it = std.mem.splitScalar(u8, rel, '/');
+    while (it.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return false;
+    }
+    return true;
+}
+
 pub const Store = struct {
     io: std.Io,
     alloc: std.mem.Allocator,
