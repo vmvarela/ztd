@@ -677,3 +677,85 @@ test "capture, move, archive and list" {
     const result = try eng.check(false);
     try std.testing.expectEqual(@as(usize, 0), result.errors.len);
 }
+
+test "capture continues after the maximum suffix and dry-run writes nothing" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+
+    const init_mod = @import("init.zig");
+    _ = try init_mod.initWorkspace(io, a, base, false);
+    const root = try std.fs.path.join(a, &.{ base, "ztd" });
+    const today = try platform.parseDate("2026-11-11");
+
+    var eng = try Engine.init(io, a, root, today, true);
+    defer eng.deinit();
+
+    // A gap does not get reused: the next ID is max + 1.
+    try eng.store.writeAtomic("inbox.md", "- [ ] T-20261111-004 | Gap | capturada: 2026-11-11\n");
+    const created = try eng.capture(&.{"Next"}, false);
+    try std.testing.expectEqualStrings("T-20261111-005", created[0].task.id);
+
+    const before = try eng.store.read("inbox.md");
+    const dry = try eng.capture(&.{"Dry"}, true);
+    try std.testing.expectEqualStrings("T-20261111-006", dry[0].task.id);
+    try std.testing.expectEqualStrings(before, try eng.store.read("inbox.md"));
+}
+
+test "recover applies the journal and refuses an external edit" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+
+    const init_mod = @import("init.zig");
+    _ = try init_mod.initWorkspace(io, a, base, false);
+    const root = try std.fs.path.join(a, &.{ base, "ztd" });
+    const today = try platform.parseDate("2026-11-11");
+
+    var eng = try Engine.init(io, a, root, today, true);
+    defer eng.deinit();
+
+    const before = try eng.store.read("inbox.md");
+    const after = try std.fmt.allocPrint(a, "{s}- [ ] T-20261111-001 | Recovered | capturada: 2026-11-11\n", .{before});
+    var files = [_]JournalFile{.{ .path = "inbox.md", .before = before, .after = after }};
+    const journal = try std.json.Stringify.valueAlloc(a, Journal{ .files = &files }, .{});
+    try eng.store.writeAtomic(".state/pending.json", journal);
+
+    try std.testing.expect(try eng.recover());
+    try std.testing.expectEqualStrings(after, try eng.store.read("inbox.md"));
+    try std.testing.expect(!eng.pending());
+
+    // A later edit outside ztd must not be overwritten.
+    const current = try eng.store.read("inbox.md");
+    const intended = try std.fmt.allocPrint(a, "{s}- [ ] T-20261111-002 | Intended | capturada: 2026-11-11\n", .{current});
+    const outside = try std.fmt.allocPrint(a, "{s}external edit\n", .{current});
+    files = [_]JournalFile{.{ .path = "inbox.md", .before = current, .after = intended }};
+    const journal2 = try std.json.Stringify.valueAlloc(a, Journal{ .files = &files }, .{});
+    try eng.store.writeAtomic(".state/pending.json", journal2);
+    try eng.store.writeAtomic("inbox.md", outside);
+
+    try std.testing.expectError(error.ExternalEdit, eng.recover());
+    try std.testing.expect(eng.pending());
+}
