@@ -30,6 +30,7 @@ Both download the release asset for the current platform, verify it against
 | Windows x86 | `ztd-x86-windows.exe` |
 | FreeBSD x86_64 | `ztd-x86_64-freebsd` |
 | FreeBSD aarch64 | `ztd-aarch64-freebsd` |
+| Manual page | `ztd.1` |
 
 ## Homebrew
 
@@ -60,21 +61,22 @@ The npm package selects the right binary for Linux, macOS or Windows.
 
 ## Debian / Ubuntu
 
+Download the `.deb` for your architecture from the release and install it:
+
 ```bash
-sudo add-apt-repository ppa:vmvarela/ztd
-sudo apt install ztd
+sudo apt install ./ztd_<version>_amd64.deb
 ```
 
 ## Fedora / RHEL
 
 ```bash
-sudo dnf install ztd
+sudo dnf install ./ztd-<version>-1.x86_64.rpm
 ```
 
 ## Alpine
 
 ```bash
-sudo apk add ztd
+sudo apk add --allow-untrusted ./ztd_<version>_x86_64.apk
 ```
 
 ## Arch

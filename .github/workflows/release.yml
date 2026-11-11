@@ -85,11 +85,35 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  # Build the man page once and upload it as a release asset.
+  man:
+    name: Build man page
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install scdoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y scdoc
+
+      - name: Build ztd.1
+        run: |
+          mkdir -p dist
+          scdoc < docs/ztd.1.scd > dist/ztd.1
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ztd-man
+          path: dist/
+          if-no-files-found: error
+
   # Stages the release as a DRAFT. It stays private until publish-release,
   # which runs only after every asset, package and checksum is in place.
   release:
     name: Stage release draft
-    needs: build
+    needs: [build, man]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -387,6 +411,7 @@ jobs:
           cp artifacts/${{ matrix.asset }}  pkg-work/ztd
           chmod +x pkg-work/ztd
           cp LICENSE                         pkg-work/LICENSE
+          cp artifacts/ztd.1                 pkg-work/ztd.1
 
       - name: Build .deb
         working-directory: pkg-work
@@ -451,6 +476,7 @@ jobs:
           cp artifacts/${{ matrix.asset }}  pkg-work/ztd
           chmod +x pkg-work/ztd
           cp LICENSE                         pkg-work/LICENSE
+          cp artifacts/ztd.1                 pkg-work/ztd.1
 
       - name: Build .rpm
         working-directory: pkg-work
@@ -515,6 +541,7 @@ jobs:
           cp artifacts/${{ matrix.asset }}  pkg-work/ztd
           chmod +x pkg-work/ztd
           cp LICENSE                         pkg-work/LICENSE
+          cp artifacts/ztd.1                 pkg-work/ztd.1
 
       - name: Build .apk
         working-directory: pkg-work
@@ -674,7 +701,7 @@ jobs:
           for name in ztd-x86_64-linux ztd-aarch64-linux ztd-armv7-linux \
             ztd-riscv64-linux ztd-x86-linux ztd-x86_64-macos \
             ztd-aarch64-macos ztd-x86_64-windows.exe ztd-aarch64-windows.exe \
-            ztd-x86-windows.exe ztd-x86_64-freebsd ztd-aarch64-freebsd; do
+            ztd-x86-windows.exe ztd-x86_64-freebsd ztd-aarch64-freebsd ztd.1; do
             [ -f "$name" ] || { echo "::error::missing asset $name" >&2; exit 1; }
           done
           # Exclude any pre-existing sha256sums.txt to avoid self-referencing

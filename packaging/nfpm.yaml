@@ -12,6 +12,10 @@ contents:
     dst: /usr/bin/ztd
     file_info:
       mode: 0755
+  - src: ./ztd.1
+    dst: /usr/share/man/man1/ztd.1
+    file_info:
+      mode: 0644
   - src: ./LICENSE
     dst: /usr/share/doc/ztd/copyright
     packager: deb
