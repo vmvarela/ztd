@@ -243,7 +243,7 @@ fn handleTool(ctx: *Ctx, name: []const u8, args: std.json.ObjectMap) !std.json.V
         const client = getString(args, "client");
         const project = getString(args, "project");
         const list_name = getString(args, "list");
-        try checkScopeOpt(ctx, context);
+        if (context) |c| try checkScopeOpt(ctx, c);
         var eng = try engine.Engine.init(ctx.io, ctx.alloc, try store_mod.resolveRoot(ctx.io, ctx.alloc, ctx.root), ctx.today, false);
         defer eng.deinit();
         const only = if (list_name) |l| engine.List.parse(l) orelse return error.BadParams else null;

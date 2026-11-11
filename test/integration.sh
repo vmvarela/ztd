@@ -27,4 +27,9 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ztd_list","arguments":{}}}' \
   | "$BIN" --root "$TMP" mcp | grep -q '"tools"'
 
+# A scoped list uses the scope when the request omits context.
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ztd_list","arguments":{}}}' \
+  | "$BIN" --root "$TMP" mcp --scope personal --read-only | grep -q 'T-20261111-001'
+
 echo "integration ok"
