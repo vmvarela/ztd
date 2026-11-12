@@ -150,7 +150,7 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
         return 0;
     }
     if (std.mem.eql(u8, cmd, "init")) {
-        const target = if (rest.len > 0) rest[0] else ".";
+        const target = if (rest.len > 0) rest[0] else if (root) |r| r else ".";
         const res = try init_mod.initWorkspace(ctx.io, ctx.alloc, target, dry_run);
         if (ctx.json) {
             try success(ctx, "init", .{ .dry_run = dry_run, .root = res.root, .created = res.created });

@@ -8,6 +8,8 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 "$BIN" init "$TMP" >/dev/null
+"$BIN" init --root "$TMP/alt" >/dev/null
+"$BIN" --root "$TMP/alt" check >/dev/null
 "$BIN" --root "$TMP" --today 2026-11-11 capture "Primera" "Segunda" >/dev/null
 "$BIN" --root "$TMP" list --json | grep -q 'T-'
 "$BIN" --root "$TMP" move T-20261111-001 next --field contexto:personal >/dev/null
