@@ -116,18 +116,84 @@ fn toolsList(ctx: *Ctx) std.json.Value {
         .{ .name = "ztd_check", .desc = "Validate the workspace." },
     };
     for (defs) |d| {
-        var schema: std.json.ObjectMap = .empty;
-        schema.put(ctx.alloc, "type", .{ .string = "object" }) catch {};
-        schema.put(ctx.alloc, "additionalProperties", .{ .bool = true }) catch {};
         var tool: std.json.ObjectMap = .empty;
         tool.put(ctx.alloc, "name", .{ .string = d.name }) catch {};
         tool.put(ctx.alloc, "description", .{ .string = d.desc }) catch {};
-        tool.put(ctx.alloc, "inputSchema", .{ .object = schema }) catch {};
+        tool.put(ctx.alloc, "inputSchema", toolSchema(ctx, d.name)) catch {};
         arr.append(.{ .object = tool }) catch {};
     }
     var out: std.json.ObjectMap = .empty;
     out.put(ctx.alloc, "tools", .{ .array = arr }) catch {};
     return .{ .object = out };
+}
+
+fn prop(ctx: *Ctx, type_name: []const u8, desc: []const u8) std.json.Value {
+    var m: std.json.ObjectMap = .empty;
+    m.put(ctx.alloc, "type", .{ .string = type_name }) catch {};
+    if (desc.len > 0) m.put(ctx.alloc, "description", .{ .string = desc }) catch {};
+    return .{ .object = m };
+}
+
+fn stringListProp(ctx: *Ctx, desc: []const u8) std.json.Value {
+    var m: std.json.ObjectMap = .empty;
+    m.put(ctx.alloc, "type", .{ .string = "array" }) catch {};
+    m.put(ctx.alloc, "items", prop(ctx, "string", "")) catch {};
+    if (desc.len > 0) m.put(ctx.alloc, "description", .{ .string = desc }) catch {};
+    return .{ .object = m };
+}
+
+fn enumProp(ctx: *Ctx, values: []const []const u8) std.json.Value {
+    var m: std.json.ObjectMap = .empty;
+    m.put(ctx.alloc, "type", .{ .string = "string" }) catch {};
+    var arr = std.json.Array.init(ctx.alloc);
+    for (values) |v| arr.append(.{ .string = v }) catch {};
+    m.put(ctx.alloc, "enum", .{ .array = arr }) catch {};
+    return .{ .object = m };
+}
+
+fn toolSchema(ctx: *Ctx, name: []const u8) std.json.Value {
+    const lists = [_][]const u8{ "inbox", "next", "waiting", "someday", "archive" };
+    var props: std.json.ObjectMap = .empty;
+    var required = std.json.Array.init(ctx.alloc);
+    if (std.mem.eql(u8, name, "ztd_capture")) {
+        props.put(ctx.alloc, "texts", stringListProp(ctx, "One or more capture texts.")) catch {};
+        required.append(.{ .string = "texts" }) catch {};
+    } else if (std.mem.eql(u8, name, "ztd_list")) {
+        props.put(ctx.alloc, "context", prop(ctx, "string", "")) catch {};
+        props.put(ctx.alloc, "client", prop(ctx, "string", "")) catch {};
+        props.put(ctx.alloc, "project", prop(ctx, "string", "")) catch {};
+        props.put(ctx.alloc, "list", enumProp(ctx, &lists)) catch {};
+    } else if (std.mem.eql(u8, name, "ztd_show")) {
+        props.put(ctx.alloc, "id", prop(ctx, "string", "Task id, e.g. T-20261112-001.")) catch {};
+        required.append(.{ .string = "id" }) catch {};
+    } else if (std.mem.eql(u8, name, "ztd_move")) {
+        props.put(ctx.alloc, "id", prop(ctx, "string", "Task id.")) catch {};
+        props.put(ctx.alloc, "to", enumProp(ctx, &lists)) catch {};
+        var fields_prop: std.json.ObjectMap = .empty;
+        fields_prop.put(ctx.alloc, "type", .{ .string = "object" }) catch {};
+        fields_prop.put(ctx.alloc, "additionalProperties", prop(ctx, "string", "")) catch {};
+        fields_prop.put(ctx.alloc, "description", .{ .string = "Fields to set, e.g. contexto, espera, resolución." }) catch {};
+        props.put(ctx.alloc, "fields", .{ .object = fields_prop }) catch {};
+        props.put(ctx.alloc, "unset", stringListProp(ctx, "Field names to remove.")) catch {};
+        props.put(ctx.alloc, "text", prop(ctx, "string", "Replace the task title.")) catch {};
+        var line_prop: std.json.ObjectMap = .empty;
+        line_prop.put(ctx.alloc, "type", .{ .string = "integer" }) catch {};
+        line_prop.put(ctx.alloc, "minimum", .{ .integer = 1 }) catch {};
+        line_prop.put(ctx.alloc, "description", .{ .string = "Fail unless the task is still on this line." }) catch {};
+        props.put(ctx.alloc, "expect_line", .{ .object = line_prop }) catch {};
+        required.append(.{ .string = "id" }) catch {};
+        required.append(.{ .string = "to" }) catch {};
+    } else if (std.mem.eql(u8, name, "ztd_plan")) {
+        props.put(ctx.alloc, "context", prop(ctx, "string", "Context whose daily plan is read.")) catch {};
+        props.put(ctx.alloc, "client", prop(ctx, "string", "")) catch {};
+        props.put(ctx.alloc, "date", prop(ctx, "string", "YYYY-MM-DD; defaults to today.")) catch {};
+        required.append(.{ .string = "context" }) catch {};
+    }
+    var schema: std.json.ObjectMap = .empty;
+    schema.put(ctx.alloc, "type", .{ .string = "object" }) catch {};
+    schema.put(ctx.alloc, "properties", .{ .object = props }) catch {};
+    if (required.items.len > 0) schema.put(ctx.alloc, "required", .{ .array = required }) catch {};
+    return .{ .object = schema };
 }
 
 fn resourcesList(ctx: *Ctx) std.json.Value {
@@ -446,4 +512,53 @@ test "tool error names" {
     try std.testing.expectEqualStrings("read_only", toolErrorName(error.ReadOnly));
     try std.testing.expectEqualStrings("scope_denied", toolErrorName(error.ScopeDenied));
     try std.testing.expectEqualStrings("unknown_id", toolErrorName(error.UnknownId));
+}
+
+test "tool schemas declare the arguments the handlers read" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var ctx = Ctx{
+        .io = undefined,
+        .alloc = arena_state.allocator(),
+        .root = null,
+        .today = .{ .year = 2026, .month = 11, .day = 12 },
+    };
+    const listed = toolsList(&ctx);
+    const tools = listed.object.get("tools").?.array;
+
+    const Case = struct {
+        name: []const u8,
+        props: []const []const u8,
+        required: []const []const u8,
+    };
+    const cases = [_]Case{
+        .{ .name = "ztd_capture", .props = &.{"texts"}, .required = &.{"texts"} },
+        .{ .name = "ztd_list", .props = &.{ "context", "client", "project", "list" }, .required = &.{} },
+        .{ .name = "ztd_show", .props = &.{"id"}, .required = &.{"id"} },
+        .{ .name = "ztd_move", .props = &.{ "id", "to", "fields", "unset", "text", "expect_line" }, .required = &.{ "id", "to" } },
+        .{ .name = "ztd_plan", .props = &.{ "context", "client", "date" }, .required = &.{"context"} },
+        .{ .name = "ztd_check", .props = &.{}, .required = &.{} },
+    };
+    try std.testing.expectEqual(cases.len, tools.items.len);
+    for (tools.items) |t| {
+        const tool_name = t.object.get("name").?.string;
+        var expected: ?Case = null;
+        for (cases) |c| {
+            if (std.mem.eql(u8, c.name, tool_name)) expected = c;
+        }
+        const c = expected orelse return error.UnknownTool;
+        const schema = t.object.get("inputSchema").?.object;
+        const props = schema.get("properties").?.object;
+        try std.testing.expectEqual(c.props.len, props.count());
+        for (c.props) |p| try std.testing.expect(props.get(p) != null);
+        const required: []const std.json.Value = if (schema.get("required")) |r| r.array.items else &.{};
+        try std.testing.expectEqual(c.required.len, required.len);
+        for (c.required) |p| {
+            var found = false;
+            for (required) |r| {
+                if (std.mem.eql(u8, r.string, p)) found = true;
+            }
+            try std.testing.expect(found);
+        }
+    }
 }
