@@ -302,14 +302,18 @@ jobs:
     name: Update AUR package
     needs: publish-release
     runs-on: ubuntu-latest
+    env:
+      HAS_AUR_KEY: ${{ secrets.PACKAGE_SSH_KEY != '' }}
     steps:
       - name: Download all artifacts
+        if: ${{ env.HAS_AUR_KEY == 'true' }}
         uses: actions/download-artifact@v8
         with:
           path: artifacts/
           merge-multiple: true
 
       - name: Generate PKGBUILD
+        if: ${{ env.HAS_AUR_KEY == 'true' }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
 
@@ -325,7 +329,7 @@ jobs:
           pkgname=ztd
           pkgver=__VERSION__
           pkgrel=1
-          pkgdesc="Read CSV via stdin, run SQL, emit CSV via stdout"
+          pkgdesc="Markdown task manager for humans and agents"
           arch=('x86_64' 'aarch64')
           url="https://github.com/vmvarela/ztd"
           license=('MIT')
@@ -357,6 +361,7 @@ jobs:
           cat PKGBUILD
 
       - name: Publish to AUR
+        if: ${{ env.HAS_AUR_KEY == 'true' }}
         uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
         with:
           pkgname: ztd
