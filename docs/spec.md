@@ -227,8 +227,12 @@ human-facing task lists.
 
 Schema version 1 (`PRAGMA user_version`): tables `scope`, `assignment`,
 `checkpoint` and `op_log`. Any other version fails with `db_incompatible`.
-The database path is `--db` > `ZTD_AGENT_DB` > a per-OS default under the user
-data directory, never inside a workspace `ztd/`.
+A zero-version database is initialised only when it has no tables, indexes,
+views or triggers of its own; any other database is rejected, never adopted.
+The default database path is `--db` > `ZTD_AGENT_DB` > a per-OS default under
+the user data directory. Only the default is guaranteed to stay outside a
+workspace `ztd/`; an explicit path or environment variable can point anywhere
+the caller chooses.
 
 Operations, exposed as `ztd agent-capture`, `ztd agent-checkpoint`,
 `ztd agent-prepare` and as the three `ztd_agent_*` MCP tools:
@@ -248,12 +252,15 @@ Errors: `scope_denied` (assignment belongs to another scope),
   not a blind retry.
 - Idempotency keys are retained indefinitely; the dedup window is all retained
   `op_log` rows. The same key with the same payload replays the stored result;
-  with a different payload it is `idempotency_conflict`.
+  with a different payload it is `idempotency_conflict`. Replay is checked
+  before `expect_rev`, so an identical retry succeeds even if the assignment
+  has moved on since; a different payload still conflicts.
 - Scope is enforced outside tool arguments: the CLI takes `--scope`, MCP takes
   it from server configuration (`--agent-scope`), and the store checks it on
   every operation.
-- Single writer process at a time: writes take a brief `BEGIN IMMEDIATE`
-  transaction (after a 5 s busy timeout); a concurrent writer gets `db_busy`.
+- Writes take a brief `BEGIN IMMEDIATE` transaction after a 5 s busy timeout.
+  A competing writer waits and usually proceeds; only a lock still held after
+  the timeout returns `db_busy`.
 - WAL mode requires a local filesystem on one host; the database must not live
   on a network filesystem.
 

@@ -83,12 +83,6 @@ pub const Store = struct {
         return .{ .alloc = alloc, .io = io, .db = try db.Db.open(io, alloc, path) };
     }
 
-    pub fn openDefault(alloc: std.mem.Allocator, io: std.Io) !Store {
-        const path = try db.resolvePath(io, alloc, null);
-        defer alloc.free(path);
-        return open(alloc, io, path);
-    }
-
     pub fn close(self: *Store) void {
         self.db.close();
     }

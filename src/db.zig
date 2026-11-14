@@ -200,9 +200,10 @@ pub const Db = struct {
     pub fn open(io: std.Io, alloc: std.mem.Allocator, path: []const u8) !Db {
         var db = try connect(io, alloc, path);
         errdefer db.close();
-        try db.exec("PRAGMA journal_mode=WAL");
         try db.exec("PRAGMA trusted_schema=OFF");
         try db.gate();
+        // Persistent and only set once the database is accepted.
+        try db.exec("PRAGMA journal_mode=WAL");
         return db;
     }
 
@@ -265,26 +266,39 @@ pub const Db = struct {
         return .{ .stmt = stmt orelse return error.InvalidArgument };
     }
 
-    /// Version gate: create schema 1 on an empty database, accept version 1
-    /// with every object present, reject anything else. Never downgrades or
-    /// silently recreates a database that does not match.
+    /// Version gate: create schema 1 on a database with no user objects of its
+    /// own, accept version 1 with every object present, reject anything else.
+    /// Never downgrades, adopts or silently recreates another database.
     fn gate(self: *Db) !void {
+        // Take the write lock first so two first opens cannot both initialise.
+        try self.beginImmediate();
+        var committed = false;
+        defer if (!committed) self.rollback();
+
         const version = try self.userVersion();
-        const objects = try self.objectCount();
-        if (version == 0) {
-            if (objects != 0) return error.DbIncompatible;
-            try self.exec("BEGIN IMMEDIATE");
-            var committed = false;
-            defer if (!committed) self.rollback();
-            try self.exec(schema_sql);
-            try self.exec("PRAGMA user_version = 1");
+        if (version == schema_version) {
+            if (try self.objectCount() != expected_objects) return error.DbIncompatible;
             try self.commit();
             committed = true;
-        } else if (version == schema_version) {
-            if (objects != expected_objects) return error.DbIncompatible;
-        } else {
-            return error.DbIncompatible;
+            return;
         }
+        if (version != 0) return error.DbIncompatible;
+        if (try self.userObjectCount() != 0) return error.DbIncompatible;
+        try self.exec(schema_sql);
+        try self.exec("PRAGMA user_version = 1");
+        try self.commit();
+        committed = true;
+    }
+
+    /// Any table, index, view or trigger the user created; SQLite internals excluded.
+    fn userObjectCount(self: *Db) !i64 {
+        var stmt = try self.prepare(
+            \\SELECT count(*) FROM sqlite_master
+            \\WHERE name NOT LIKE 'sqlite_%' AND type IN ('table', 'index', 'view', 'trigger')
+        );
+        defer stmt.deinit();
+        if (!try stmt.step()) return 0;
+        return stmt.columnInt64(0);
     }
 
     fn userVersion(self: *Db) !i64 {
@@ -396,6 +410,26 @@ test "future user_version is rejected" {
 
     var raw = try Db.connect(io, alloc, path);
     try raw.exec("PRAGMA user_version = 2");
+    raw.close();
+
+    try std.testing.expectError(error.DbIncompatible, Db.open(io, alloc, path));
+}
+
+test "an unrelated database is not adopted" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const path = try std.fs.path.join(alloc, &.{ path_buf[0..n], "other.db" });
+    defer alloc.free(path);
+
+    var raw = try Db.connect(io, alloc, path);
+    try raw.exec("CREATE TABLE other (x TEXT)");
     raw.close();
 
     try std.testing.expectError(error.DbIncompatible, Db.open(io, alloc, path));

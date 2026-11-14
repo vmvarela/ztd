@@ -253,6 +253,7 @@ fn runAgent(ctx: *Ctx, cmd: []const u8, args: []const [:0]const u8) !u8 {
             return usage(ctx, "agent commands do not accept global options");
         if (std.mem.startsWith(u8, a, "--")) {
             if (!agentValueFlag(a)) return usage(ctx, "unknown agent option");
+            if (!agentFlagAllowed(cmd, a)) return usage(ctx, "option not accepted by this command");
             if (i + 1 >= args.len) return usage(ctx, "option needs a value");
             const v = args[i + 1];
             i += 1;
@@ -339,6 +340,21 @@ fn agentValueFlag(a: []const u8) bool {
         "--next",        "--result",          "--kind",    "--expect-rev",
     };
     for (names) |n| if (std.mem.eql(u8, a, n)) return true;
+    return false;
+}
+
+/// Each agent command accepts only the options it uses, so a misplaced flag is
+/// rejected instead of silently discarded.
+fn agentFlagAllowed(cmd: []const u8, flag: []const u8) bool {
+    if (std.mem.eql(u8, flag, "--scope") or std.mem.eql(u8, flag, "--db")) return true;
+    if (std.mem.eql(u8, cmd, "agent-capture"))
+        return std.mem.eql(u8, flag, "--request") or std.mem.eql(u8, flag, "--project") or
+            std.mem.eql(u8, flag, "--objective") or std.mem.eql(u8, flag, "--constraints") or
+            std.mem.eql(u8, flag, "--idempotency-key");
+    if (std.mem.eql(u8, cmd, "agent-checkpoint"))
+        return std.mem.eql(u8, flag, "--expect-rev") or std.mem.eql(u8, flag, "--result") or
+            std.mem.eql(u8, flag, "--kind") or std.mem.eql(u8, flag, "--evidence") or
+            std.mem.eql(u8, flag, "--next") or std.mem.eql(u8, flag, "--idempotency-key");
     return false;
 }
 

@@ -511,11 +511,11 @@ fn handleAgentTool(ctx: *Ctx, name: []const u8, args: std.json.ObjectMap) !std.j
     if (capture) {
         const r = try store.capture(.{
             .scope = scope,
-            .project = getString(args, "project"),
-            .request = getString(args, "request") orelse return error.BadParams,
-            .objective = getString(args, "objective"),
-            .constraints = getString(args, "constraints"),
-            .idempotency_key = getString(args, "idempotency_key"),
+            .project = try optString(args, "project"),
+            .request = (try optString(args, "request")) orelse return error.BadParams,
+            .objective = try optString(args, "objective"),
+            .constraints = try optString(args, "constraints"),
+            .idempotency_key = try optString(args, "idempotency_key"),
         });
         defer store.deinitCaptureResult(r);
         return agentJsonValue(ctx, r);
@@ -526,19 +526,19 @@ fn handleAgentTool(ctx: *Ctx, name: []const u8, args: std.json.ObjectMap) !std.j
             else => return error.BadParams,
         };
         const r = try store.checkpoint(.{
-            .assignment_id = getString(args, "assignment_id") orelse return error.BadParams,
+            .assignment_id = (try optString(args, "assignment_id")) orelse return error.BadParams,
             .scope = scope,
             .expect_rev = expect_rev,
-            .kind = getString(args, "kind") orelse "progress",
-            .result = getString(args, "result") orelse return error.BadParams,
-            .evidence = getString(args, "evidence"),
-            .next_action = getString(args, "next_action"),
-            .idempotency_key = getString(args, "idempotency_key"),
+            .kind = (try optString(args, "kind")) orelse "progress",
+            .result = (try optString(args, "result")) orelse return error.BadParams,
+            .evidence = try optString(args, "evidence"),
+            .next_action = try optString(args, "next_action"),
+            .idempotency_key = try optString(args, "idempotency_key"),
         });
         defer store.deinitCheckpointResult(r);
         return agentJsonValue(ctx, r);
     }
-    const r = try store.prepare(getString(args, "assignment_id") orelse return error.BadParams, scope);
+    const r = try store.prepare((try optString(args, "assignment_id")) orelse return error.BadParams, scope);
     defer store.deinitPrepareResult(r);
     return agentJsonValue(ctx, r);
 }
@@ -643,7 +643,19 @@ fn getString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     const v = obj.get(key) orelse return null;
     return switch (v) {
         .string => |s| s,
+        .null => null,
         else => null,
+    };
+}
+
+/// Optional agent argument: absent or null is null, but a present value of the
+/// wrong type is an error rather than a silent drop.
+fn optString(obj: std.json.ObjectMap, key: []const u8) !?[]const u8 {
+    const v = obj.get(key) orelse return null;
+    return switch (v) {
+        .string => |s| s,
+        .null => null,
+        else => error.BadParams,
     };
 }
 
@@ -732,4 +744,20 @@ test "agent mode exposes only the three agent tools and no resources" {
     const instructions = initializeResult(&ctx).object.get("instructions").?.string;
     try std.testing.expect(std.mem.indexOf(u8, instructions, "not proof of completeness") != null);
     try std.testing.expect(std.mem.indexOf(u8, instructions, "re-read") != null);
+}
+
+test "agent arguments of the wrong type are rejected, not dropped" {
+    var parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        "{\"constraints\":1,\"evidence\":true,\"kind\":3,\"objective\":null}",
+        .{},
+    );
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectError(error.BadParams, optString(obj, "constraints"));
+    try std.testing.expectError(error.BadParams, optString(obj, "evidence"));
+    try std.testing.expectError(error.BadParams, optString(obj, "kind"));
+    try std.testing.expectEqual(@as(?[]const u8, null), try optString(obj, "objective"));
+    try std.testing.expectEqual(@as(?[]const u8, null), try optString(obj, "absent"));
 }

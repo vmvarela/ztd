@@ -83,4 +83,14 @@ n_all="$(printf '%s\n' "$mcp_agent" | grep -o '"name":"ztd_[a-z_]*"' | wc -l | t
 [ "$n_all" -eq 3 ]
 printf '%s\n' "$mcp_agent" | grep -qF '"resources":[]'
 
+# Flags a command does not use are rejected, not silently discarded.
+if "$BIN" agent-capture --scope demo --request probe --evidence now --db "$TMP/agent.db" >/dev/null 2>&1; then
+    echo "expected capture --evidence to fail" >&2
+    exit 1
+fi
+if "$BIN" agent-checkpoint A-19700101-001 --scope demo --expect-rev 1 --result r --constraints c --db "$TMP/agent.db" >/dev/null 2>&1; then
+    echo "expected checkpoint --constraints to fail" >&2
+    exit 1
+fi
+
 echo "integration ok"

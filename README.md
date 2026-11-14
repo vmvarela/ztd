@@ -109,9 +109,9 @@ Global flags: `--root PATH`, `--json`, `--today YYYY-MM-DD`, `--dry-run`.
 
 The three `agent-*` commands record assignments and checkpoints in a local
 SQLite store (`--db` > `ZTD_AGENT_DB` > per-OS default). They need no Markdown
-workspace, reject the global options above, and print the JSON envelope by
-default. The store is independent of the Markdown lists; it does not replace
-them. Details and error codes: [docs/spec.md](docs/spec.md).
+workspace, reject `--root`, `--today` and `--dry-run`, accept `--json`, and
+print the JSON envelope by default. The store is independent of the Markdown
+lists; it does not replace them. Details and error codes: [docs/spec.md](docs/spec.md).
 
 ## JSON
 
@@ -156,7 +156,12 @@ OpenCode:
 
 The server starts even without a workspace; tools return `invalid_workspace`.
 
+With `--agent-scope`, the server exposes only the three `ztd_agent_*` tools and
+no resources; the Markdown tools are not listed in that mode.
+
 ## Guarantees
+
+These apply to the Markdown task lists, not to the agent store.
 
 - Mutations take an exclusive lock; reads take a shared lock.
 - Every write is atomic: readers see the old or the new file, never a partial one.
