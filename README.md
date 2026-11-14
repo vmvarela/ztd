@@ -91,7 +91,10 @@ ztd check [--strict]
 ztd recover
 ztd agent-capture --scope S --request TEXT [--project P] [--objective T] [--constraints T] [--idempotency-key K] [--db PATH]
 ztd agent-checkpoint ID --scope S --expect-rev N --result TEXT [--kind progress|done] [--evidence T] [--next T] [--idempotency-key K] [--db PATH]
-ztd agent-prepare ID --scope S [--db PATH]
+ztd agent-prepare ID --scope S [--history N] [--db PATH]
+ztd agent-backup --out FILE [--db PATH]
+ztd agent-export --out FILE [--db PATH]
+ztd agent-restore --from FILE [--db PATH]
 ztd mcp [--read-only] [--scope C] [--agent-scope S] [--agent-db PATH]
 ztd version
 ```
@@ -107,11 +110,22 @@ Global flags: `--root PATH`, `--json`, `--today YYYY-MM-DD`, `--dry-run`.
 
 ### Agent store
 
-The three `agent-*` commands record assignments and checkpoints in a local
+The `agent-*` commands record assignments and checkpoints in a local
 SQLite store (`--db` > `ZTD_AGENT_DB` > per-OS default). They need no Markdown
 workspace, reject `--root`, `--today` and `--dry-run`, accept `--json`, and
 print the JSON envelope by default. The store is independent of the Markdown
 lists; it does not replace them. Details and error codes: [docs/spec.md](docs/spec.md).
+
+Durability: `agent-export --out FILE` writes every scope, assignment,
+checkpoint and idempotency row as a versioned JSON export
+(`format` `ztd-agent-export`, `version` 1); `agent-restore --from FILE`
+imports it into an empty store, refusing a non-empty target or a malformed
+file with `invalid_argument` and verifying counts and revisions before the
+commit, so a failed restore writes nothing; `agent-backup --out FILE` makes a
+consistent single-file copy (`VACUUM INTO`) that never overwrites an existing
+file and opens through the schema gate. `agent-prepare ID --scope S
+--history N` returns up to `N` checkpoints newest-first alongside the latest
+one. These are operator actions and have no MCP tools.
 
 ## JSON
 
