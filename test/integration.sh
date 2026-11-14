@@ -83,6 +83,14 @@ n_all="$(printf '%s\n' "$mcp_agent" | grep -o '"name":"ztd_[a-z_]*"' | wc -l | t
 [ "$n_all" -eq 3 ]
 printf '%s\n' "$mcp_agent" | grep -qF '"resources":[]'
 
+# A wrong-typed optional argument is an error, not a silently dropped field.
+mcp_typed="$(printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ztd_agent_capture","arguments":{"scope":"demo","request":"x","constraints":1}}}' \
+  | "$BIN" mcp --agent-scope demo --agent-db "$ADB")"
+printf '%s\n' "$mcp_typed" | grep -qF '"isError":true'
+printf '%s\n' "$mcp_typed" | grep -qF 'invalid_field'
+
 # Flags a command does not use are rejected, not silently discarded.
 if "$BIN" agent-capture --scope demo --request probe --evidence now --db "$TMP/agent.db" >/dev/null 2>&1; then
     echo "expected capture --evidence to fail" >&2
