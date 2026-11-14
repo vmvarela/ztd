@@ -110,7 +110,8 @@ Stable codes: `usage`, `invalid_workspace`, `unsupported_format`, `unknown_id`,
 `duplicate_id`, `unknown_list`, `invalid_transition`, `stale_task`,
 `pending_transaction`, `recover_conflict`, `unknown_context`, `invalid_client`,
 `unknown_project`, `invalid_field`, `id_exhausted`, `scope_denied`, `read_only`,
-`io_error`.
+`io_error`, plus the agent-store codes of section 10: `unknown_assignment`,
+`revision_conflict`, `idempotency_conflict`, `db_busy`, `db_incompatible`.
 
 Exit: `0` success, `1` domain error, `2` usage.
 
@@ -216,3 +217,53 @@ The server starts without a workspace. Every tool then returns
 
 `--read-only` rejects mutations with `read_only`. `--scope C` rejects access to
 another context with `scope_denied`.
+
+## 10. Agent store
+
+The agent-continuity store is a SQLite database that records what an agent was
+asked to do and how far it got: assignments and checkpoints. It is independent
+of the Markdown lists and does not replace them — `ztd/` stays the
+human-facing task lists.
+
+Schema version 1 (`PRAGMA user_version`): tables `scope`, `assignment`,
+`checkpoint` and `op_log`. Any other version fails with `db_incompatible`.
+A zero-version database is initialised only when it has no tables, indexes,
+views or triggers of its own; any other database is rejected, never adopted.
+The default database path is `--db` > `ZTD_AGENT_DB` > a per-OS default under
+the user data directory. Only the default is guaranteed to stay outside a
+workspace `ztd/`; an explicit path or environment variable can point anywhere
+the caller chooses.
+
+Operations, exposed as `ztd agent-capture`, `ztd agent-checkpoint`,
+`ztd agent-prepare` and as the three `ztd_agent_*` MCP tools:
+
+- `capture` inserts an assignment at rev 1 in its scope.
+- `checkpoint` records a checkpoint and increments the assignment rev;
+  `kind` is `progress` or `done`.
+- `prepare` reads an assignment and its newest checkpoint.
+
+Errors: `scope_denied` (assignment belongs to another scope),
+`unknown_assignment`, `revision_conflict`, `idempotency_conflict`, `db_busy`,
+`db_incompatible`.
+
+- `expect_rev` is optimistic concurrency: a checkpoint whose `expect_rev` does
+  not match the stored rev fails with `revision_conflict` and writes nothing.
+  Recovery then means re-reading with `prepare` and retrying with the new rev,
+  not a blind retry.
+- Idempotency keys are retained indefinitely; the dedup window is all retained
+  `op_log` rows. The same key with the same payload replays the stored result;
+  with a different payload it is `idempotency_conflict`. Replay is checked
+  before `expect_rev`, so an identical retry succeeds even if the assignment
+  has moved on since; a different payload still conflicts.
+- Scope is enforced outside tool arguments: the CLI takes `--scope`, MCP takes
+  it from server configuration (`--agent-scope`), and the store checks it on
+  every operation.
+- Writes take a brief `BEGIN IMMEDIATE` transaction after a 5 s busy timeout.
+  A competing writer waits and usually proceeds; only a lock still held after
+  the timeout returns `db_busy`.
+- WAL mode requires a local filesystem on one host; the database must not live
+  on a network filesystem.
+
+The agent MCP mode (`ztd mcp --agent-scope S [--agent-db PATH]`) exposes only
+these three tools and no resources; `--read-only` rejects `capture` and
+`checkpoint` and allows `prepare`.

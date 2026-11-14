@@ -15,6 +15,18 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     root_module.addOptions("build_options", options);
+    root_module.addIncludePath(b.path("vendor/sqlite"));
+    root_module.addCSourceFile(.{
+        .file = b.path("vendor/sqlite/sqlite3.c"),
+        .flags = &.{
+            "-std=c99",
+            "-DSQLITE_THREADSAFE=0", // single-threaded entry points only; see vendor/sqlite/PIN.md
+            "-DSQLITE_OMIT_LOAD_EXTENSION",
+            "-DSQLITE_DQS=0",
+            "-DSQLITE_DEFAULT_FOREIGN_KEYS=1",
+            "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
+        },
+    });
 
     const exe = b.addExecutable(.{
         .name = "ztd",
