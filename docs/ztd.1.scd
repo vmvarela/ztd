@@ -56,8 +56,22 @@ Tasks are stored in *inbox.md*, *lists/next.md*, *lists/waiting.md*,
 *recover*
 	Finish or reject an interrupted transaction.
 
-*mcp* [*--read-only*] [*--scope* C]
-	Run the stdio MCP server.
+*agent-capture* *--scope* S *--request* TEXT [*--project* P] [*--objective* T] [*--constraints* T] [*--idempotency-key* K] [*--db* PATH]
+	Create an assignment in the agent store. Needs no Markdown workspace,
+	rejects the global options and prints the JSON envelope by default.
+
+*agent-checkpoint* ID *--scope* S *--expect-rev* N *--result* TEXT [*--kind* progress|done] [*--evidence* T] [*--next* T] [*--idempotency-key* K] [*--db* PATH]
+	Record a checkpoint. A stale *--expect-rev* is *revision_conflict*; the
+	same idempotency key with a different payload is *idempotency_conflict*.
+
+*agent-prepare* ID *--scope* S [*--db* PATH]
+	Read an assignment and its latest checkpoint; another scope is
+	*scope_denied*.
+
+*mcp* [*--read-only*] [*--scope* C] [*--agent-scope* S] [*--agent-db* PATH]
+	Run the stdio MCP server. With *--agent-scope* only the three
+	*ztd_agent_* tools are exposed and there are no resources; the scope is
+	enforced server-side and is never a tool argument.
 
 *version*
 	Print version.

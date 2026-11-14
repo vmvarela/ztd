@@ -3,6 +3,8 @@ const engine = @import("engine.zig");
 const platform = @import("platform.zig");
 const store_mod = @import("store.zig");
 const model = @import("model.zig");
+const agent = @import("agent.zig");
+const db = @import("db.zig");
 
 const Ctx = struct {
     io: std.Io,
@@ -11,6 +13,9 @@ const Ctx = struct {
     today: platform.Date,
     read_only: bool = false,
     scope: ?[]const u8 = null,
+    agent_mode: bool = false,
+    agent_scope: ?[]const u8 = null,
+    agent_db: ?[]const u8 = null,
 };
 
 const ToolError = error{
@@ -36,8 +41,23 @@ pub fn serve(io: std.Io, alloc: std.mem.Allocator, args: []const []const u8, roo
             i += 1;
             continue;
         }
+        if (std.mem.eql(u8, a, "--agent-scope")) {
+            if (i + 1 >= args.len) return error.BadParams;
+            ctx.agent_mode = true;
+            ctx.agent_scope = args[i + 1];
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, a, "--agent-db")) {
+            if (i + 1 >= args.len) return error.BadParams;
+            ctx.agent_db = args[i + 1];
+            i += 1;
+            continue;
+        }
         return error.BadParams;
     }
+    // --agent-db only makes sense in agent mode, which requires --agent-scope.
+    if (ctx.agent_db != null and ctx.agent_scope == null) return error.BadParams;
 
     var buf: [64 * 1024]u8 = undefined;
     var reader = std.Io.File.stdin().reader(io, &buf);
@@ -80,6 +100,8 @@ fn handleLine(ctx: *Ctx, line: []const u8) !void {
         return sendResult(ctx, id.?, resourcesList(ctx));
     }
     if (std.mem.eql(u8, method, "resources/read")) {
+        // Agent mode exposes no resources at all.
+        if (ctx.agent_mode) return sendError(ctx, id.?, -32601, "method not found");
         return resourcesRead(ctx, id.?, params);
     }
     return sendError(ctx, id.?, -32601, "method not found");
@@ -88,7 +110,7 @@ fn handleLine(ctx: *Ctx, line: []const u8) !void {
 fn initializeResult(ctx: *Ctx) std.json.Value {
     var caps: std.json.ObjectMap = .empty;
     caps.put(ctx.alloc, "tools", .{ .object = .empty }) catch {};
-    caps.put(ctx.alloc, "resources", .{ .object = .empty }) catch {};
+    if (!ctx.agent_mode) caps.put(ctx.alloc, "resources", .{ .object = .empty }) catch {};
     var info: std.json.ObjectMap = .empty;
     info.put(ctx.alloc, "name", .{ .string = "ztd" }) catch {};
     info.put(ctx.alloc, "version", .{ .string = @import("build_options").version }) catch {};
@@ -96,17 +118,44 @@ fn initializeResult(ctx: *Ctx) std.json.Value {
     out.put(ctx.alloc, "protocolVersion", .{ .string = "2025-06-18" }) catch {};
     out.put(ctx.alloc, "capabilities", .{ .object = caps }) catch {};
     out.put(ctx.alloc, "serverInfo", .{ .object = info }) catch {};
-    out.put(ctx.alloc, "instructions", .{ .string =
-        \\ZTD task manager. Tasks live in Markdown under ztd/.
-        \\Use ztd_capture to add, ztd_list/ztd_show to inspect, ztd_move to change list or fields, ztd_plan for a daily plan.
-        \\IDs look like T-YYYYMMDD-NNN. Lists: inbox, next, waiting, someday, archive.
-        \\The binary only edits Markdown; commit changes yourself.
-    }) catch {};
+    out.put(ctx.alloc, "instructions", .{ .string = if (ctx.agent_mode) agent_instructions else legacy_instructions }) catch {};
     return .{ .object = out };
 }
 
+const legacy_instructions =
+    \\ZTD task manager. Tasks live in Markdown under ztd/.
+    \\Use ztd_capture to add, ztd_list/ztd_show to inspect, ztd_move to change list or fields, ztd_plan for a daily plan.
+    \\IDs look like T-YYYYMMDD-NNN. Lists: inbox, next, waiting, someday, archive.
+    \\The binary only edits Markdown; commit changes yourself.
+;
+
+const agent_instructions =
+    \\ZTD agent store. The store is the agent record: assignments (capture) and checkpoints (checkpoint).
+    \\Markdown lists under ztd/ remain the human-facing task lists; this server does not expose them.
+    \\prepare reads back stored state for recovery; it is not proof of completeness.
+    \\A revision conflict means the assignment moved on: re-read with prepare and retry with the new rev, never a blind retry.
+    \\Scope is configured on the server and enforced there; it is never a tool argument.
+;
+
 fn toolsList(ctx: *Ctx) std.json.Value {
     var arr = std.json.Array.init(ctx.alloc);
+    if (ctx.agent_mode) {
+        const defs = [_]struct { name: []const u8, desc: []const u8 }{
+            .{ .name = "ztd_agent_capture", .desc = "Record a new assignment in the agent store." },
+            .{ .name = "ztd_agent_checkpoint", .desc = "Record a checkpoint against an assignment." },
+            .{ .name = "ztd_agent_prepare", .desc = "Read an assignment and its latest checkpoint." },
+        };
+        for (defs) |d| {
+            var tool: std.json.ObjectMap = .empty;
+            tool.put(ctx.alloc, "name", .{ .string = d.name }) catch {};
+            tool.put(ctx.alloc, "description", .{ .string = d.desc }) catch {};
+            tool.put(ctx.alloc, "inputSchema", agentToolSchema(ctx, d.name)) catch {};
+            arr.append(.{ .object = tool }) catch {};
+        }
+        var out: std.json.ObjectMap = .empty;
+        out.put(ctx.alloc, "tools", .{ .array = arr }) catch {};
+        return .{ .object = out };
+    }
     const defs = [_]struct { name: []const u8, desc: []const u8 }{
         .{ .name = "ztd_capture", .desc = "Capture one or more texts into the inbox." },
         .{ .name = "ztd_list", .desc = "List active tasks, optionally filtered by context, client, project or list." },
@@ -196,18 +245,57 @@ fn toolSchema(ctx: *Ctx, name: []const u8) std.json.Value {
     return .{ .object = schema };
 }
 
+/// Agent-mode schemas stay small: the scope comes from server configuration
+/// and is never a tool argument.
+fn agentToolSchema(ctx: *Ctx, name: []const u8) std.json.Value {
+    var props: std.json.ObjectMap = .empty;
+    var required = std.json.Array.init(ctx.alloc);
+    if (std.mem.eql(u8, name, "ztd_agent_capture")) {
+        props.put(ctx.alloc, "request", prop(ctx, "string", "What was asked for.")) catch {};
+        props.put(ctx.alloc, "objective", prop(ctx, "string", "Intended outcome.")) catch {};
+        props.put(ctx.alloc, "constraints", prop(ctx, "string", "Limits to respect.")) catch {};
+        props.put(ctx.alloc, "project", prop(ctx, "string", "Related project.")) catch {};
+        props.put(ctx.alloc, "idempotency_key", prop(ctx, "string", "Repeat with the same key to replay.")) catch {};
+        required.append(.{ .string = "request" }) catch {};
+    } else if (std.mem.eql(u8, name, "ztd_agent_checkpoint")) {
+        props.put(ctx.alloc, "assignment_id", prop(ctx, "string", "Assignment id, e.g. A-20261114-001.")) catch {};
+        var rev: std.json.ObjectMap = .empty;
+        rev.put(ctx.alloc, "type", .{ .string = "integer" }) catch {};
+        rev.put(ctx.alloc, "description", .{ .string = "Assignment rev expected; a mismatch is revision_conflict." }) catch {};
+        props.put(ctx.alloc, "expect_rev", .{ .object = rev }) catch {};
+        props.put(ctx.alloc, "kind", enumProp(ctx, &.{ "progress", "done" })) catch {};
+        props.put(ctx.alloc, "result", prop(ctx, "string", "What happened.")) catch {};
+        props.put(ctx.alloc, "evidence", prop(ctx, "string", "Link or reference proving it.")) catch {};
+        props.put(ctx.alloc, "next_action", prop(ctx, "string", "What to do next.")) catch {};
+        props.put(ctx.alloc, "idempotency_key", prop(ctx, "string", "Repeat with the same key to replay.")) catch {};
+        required.append(.{ .string = "assignment_id" }) catch {};
+        required.append(.{ .string = "expect_rev" }) catch {};
+        required.append(.{ .string = "result" }) catch {};
+    } else if (std.mem.eql(u8, name, "ztd_agent_prepare")) {
+        props.put(ctx.alloc, "assignment_id", prop(ctx, "string", "Assignment id, e.g. A-20261114-001.")) catch {};
+        required.append(.{ .string = "assignment_id" }) catch {};
+    }
+    var schema: std.json.ObjectMap = .empty;
+    schema.put(ctx.alloc, "type", .{ .string = "object" }) catch {};
+    schema.put(ctx.alloc, "properties", .{ .object = props }) catch {};
+    if (required.items.len > 0) schema.put(ctx.alloc, "required", .{ .array = required }) catch {};
+    return .{ .object = schema };
+}
+
 fn resourcesList(ctx: *Ctx) std.json.Value {
     var arr = std.json.Array.init(ctx.alloc);
-    const defs = [_]struct { uri: []const u8, name: []const u8, mime: []const u8 }{
-        .{ .uri = "ztd://contexts", .name = "Contexts", .mime = "text/markdown" },
-        .{ .uri = "ztd://config", .name = "Config", .mime = "application/json" },
-    };
-    for (defs) |d| {
-        var r: std.json.ObjectMap = .empty;
-        r.put(ctx.alloc, "uri", .{ .string = d.uri }) catch {};
-        r.put(ctx.alloc, "name", .{ .string = d.name }) catch {};
-        r.put(ctx.alloc, "mimeType", .{ .string = d.mime }) catch {};
-        arr.append(.{ .object = r }) catch {};
+    if (!ctx.agent_mode) {
+        const defs = [_]struct { uri: []const u8, name: []const u8, mime: []const u8 }{
+            .{ .uri = "ztd://contexts", .name = "Contexts", .mime = "text/markdown" },
+            .{ .uri = "ztd://config", .name = "Config", .mime = "application/json" },
+        };
+        for (defs) |d| {
+            var r: std.json.ObjectMap = .empty;
+            r.put(ctx.alloc, "uri", .{ .string = d.uri }) catch {};
+            r.put(ctx.alloc, "name", .{ .string = d.name }) catch {};
+            r.put(ctx.alloc, "mimeType", .{ .string = d.mime }) catch {};
+            arr.append(.{ .object = r }) catch {};
+        }
     }
     var out: std.json.ObjectMap = .empty;
     out.put(ctx.alloc, "resources", .{ .array = arr }) catch {};
@@ -290,6 +378,7 @@ fn toolsCall(ctx: *Ctx, id: std.json.Value, params: std.json.Value) !void {
 }
 
 fn handleTool(ctx: *Ctx, name: []const u8, args: std.json.ObjectMap) !std.json.Value {
+    if (ctx.agent_mode) return handleAgentTool(ctx, name, args);
     if (std.mem.eql(u8, name, "ztd_capture")) {
         if (ctx.read_only) return error.ReadOnly;
         const texts_val = args.get("texts") orelse return error.BadParams;
@@ -403,6 +492,60 @@ fn handleTool(ctx: *Ctx, name: []const u8, args: std.json.ObjectMap) !std.json.V
         return .{ .object = out };
     }
     return error.UnknownTool;
+}
+
+/// Agent mode: the scope comes from server configuration and is enforced on
+/// every call, never from tool arguments.
+fn handleAgentTool(ctx: *Ctx, name: []const u8, args: std.json.ObjectMap) !std.json.Value {
+    const capture = std.mem.eql(u8, name, "ztd_agent_capture");
+    const checkpoint = std.mem.eql(u8, name, "ztd_agent_checkpoint");
+    const prepare = std.mem.eql(u8, name, "ztd_agent_prepare");
+    if (!capture and !checkpoint and !prepare) return error.UnknownTool;
+    if ((capture or checkpoint) and ctx.read_only) return error.ReadOnly;
+    const scope = ctx.agent_scope orelse return error.BadParams;
+
+    const path = try db.resolvePath(ctx.io, ctx.alloc, ctx.agent_db);
+    var store = try agent.Store.open(ctx.alloc, ctx.io, path);
+    defer store.close();
+
+    if (capture) {
+        const r = try store.capture(.{
+            .scope = scope,
+            .project = getString(args, "project"),
+            .request = getString(args, "request") orelse return error.BadParams,
+            .objective = getString(args, "objective"),
+            .constraints = getString(args, "constraints"),
+            .idempotency_key = getString(args, "idempotency_key"),
+        });
+        defer store.deinitCaptureResult(r);
+        return agentJsonValue(ctx, r);
+    }
+    if (checkpoint) {
+        const expect_rev: i64 = switch (args.get("expect_rev") orelse return error.BadParams) {
+            .integer => |n| n,
+            else => return error.BadParams,
+        };
+        const r = try store.checkpoint(.{
+            .assignment_id = getString(args, "assignment_id") orelse return error.BadParams,
+            .scope = scope,
+            .expect_rev = expect_rev,
+            .kind = getString(args, "kind") orelse "progress",
+            .result = getString(args, "result") orelse return error.BadParams,
+            .evidence = getString(args, "evidence"),
+            .next_action = getString(args, "next_action"),
+            .idempotency_key = getString(args, "idempotency_key"),
+        });
+        defer store.deinitCheckpointResult(r);
+        return agentJsonValue(ctx, r);
+    }
+    const r = try store.prepare(getString(args, "assignment_id") orelse return error.BadParams, scope);
+    defer store.deinitPrepareResult(r);
+    return agentJsonValue(ctx, r);
+}
+
+fn agentJsonValue(ctx: *Ctx, result: anytype) !std.json.Value {
+    const text = try std.json.Stringify.valueAlloc(ctx.alloc, result, .{});
+    return std.json.parseFromSliceLeaky(std.json.Value, ctx.alloc, text, .{});
 }
 
 fn createdData(ctx: *Ctx, tasks: []const engine.LoadedTask) !std.json.ObjectMap {
@@ -561,4 +704,32 @@ test "tool schemas declare the arguments the handlers read" {
             try std.testing.expect(found);
         }
     }
+}
+
+test "agent mode exposes only the three agent tools and no resources" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var ctx = Ctx{
+        .io = undefined,
+        .alloc = arena_state.allocator(),
+        .root = null,
+        .today = .{ .year = 2026, .month = 11, .day = 12 },
+        .agent_mode = true,
+        .agent_scope = "demo",
+    };
+
+    const tools = toolsList(&ctx).object.get("tools").?.array;
+    const expected = [_][]const u8{ "ztd_agent_capture", "ztd_agent_checkpoint", "ztd_agent_prepare" };
+    try std.testing.expectEqual(expected.len, tools.items.len);
+    for (tools.items, expected) |t, name| {
+        try std.testing.expectEqualStrings(name, t.object.get("name").?.string);
+        // scope is server configuration, never a tool argument
+        const props = t.object.get("inputSchema").?.object.get("properties").?.object;
+        try std.testing.expect(props.get("scope") == null);
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), resourcesList(&ctx).object.get("resources").?.array.items.len);
+    const instructions = initializeResult(&ctx).object.get("instructions").?.string;
+    try std.testing.expect(std.mem.indexOf(u8, instructions, "not proof of completeness") != null);
+    try std.testing.expect(std.mem.indexOf(u8, instructions, "re-read") != null);
 }

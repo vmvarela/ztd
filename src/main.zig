@@ -5,6 +5,8 @@ const platform = @import("platform.zig");
 const model = @import("model.zig");
 const store_mod = @import("store.zig");
 const mcp = @import("mcp.zig");
+const agent = @import("agent.zig");
+const db = @import("db.zig");
 
 const builtin = @import("builtin");
 const build_options = @import("build_options");
@@ -76,6 +78,14 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
+    // Agent commands are resolved from raw argv before the global parser
+    // strips flags: they never reach resolveRoot and reject legacy globals.
+    if (agentDispatch(args)) |d| {
+        ctx.json = true; // the JSON envelope is the default output
+        ctx.command = args[d.idx];
+        if (d.legacy) return usage(ctx, "agent commands do not accept global options");
+        return runAgent(ctx, args[d.idx], args[d.idx + 1 ..]);
+    }
     var root: ?[]const u8 = ctx.root_env;
     var today_arg: ?[]const u8 = null;
     var dry_run = false;
@@ -186,6 +196,150 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
     if (std.mem.eql(u8, cmd, "recover")) return cmdRecover(ctx, &eng, rest);
 
     return usage(ctx, "unknown command");
+}
+
+/// Finds an agent command in raw argv: only leading `--json` is skipped, and
+/// `--root`/`--today`/`--dry-run` before the command are flagged for rejection
+/// instead of being silently stripped by the global parser.
+fn agentDispatch(args: []const [:0]const u8) ?struct { idx: usize, legacy: bool } {
+    var i: usize = 0;
+    var legacy = false;
+    while (i < args.len) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--json")) {
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--dry-run")) {
+            legacy = true;
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--root") or std.mem.eql(u8, a, "--today")) {
+            legacy = true;
+            i += 2;
+        } else if (isAgentCommand(a)) {
+            return .{ .idx = i, .legacy = legacy };
+        } else {
+            return null;
+        }
+    }
+    return null;
+}
+
+fn isAgentCommand(a: []const u8) bool {
+    return std.mem.eql(u8, a, "agent-capture") or
+        std.mem.eql(u8, a, "agent-checkpoint") or
+        std.mem.eql(u8, a, "agent-prepare");
+}
+
+/// Local parser for the agent commands; the global option parser is not used.
+fn runAgent(ctx: *Ctx, cmd: []const u8, args: []const [:0]const u8) !u8 {
+    var scope: ?[]const u8 = null;
+    var id: ?[]const u8 = null;
+    var request: ?[]const u8 = null;
+    var project: ?[]const u8 = null;
+    var objective: ?[]const u8 = null;
+    var constraints: ?[]const u8 = null;
+    var idempotency_key: ?[]const u8 = null;
+    var db_opt: ?[]const u8 = null;
+    var expect_rev: ?i64 = null;
+    var kind: []const u8 = "progress";
+    var result: ?[]const u8 = null;
+    var evidence: ?[]const u8 = null;
+    var next_action: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--json")) continue;
+        if (std.mem.eql(u8, a, "--root") or std.mem.eql(u8, a, "--today") or std.mem.eql(u8, a, "--dry-run"))
+            return usage(ctx, "agent commands do not accept global options");
+        if (std.mem.startsWith(u8, a, "--")) {
+            if (!agentValueFlag(a)) return usage(ctx, "unknown agent option");
+            if (i + 1 >= args.len) return usage(ctx, "option needs a value");
+            const v = args[i + 1];
+            i += 1;
+            if (std.mem.eql(u8, a, "--scope")) scope = v //
+            else if (std.mem.eql(u8, a, "--request")) request = v //
+            else if (std.mem.eql(u8, a, "--project")) project = v //
+            else if (std.mem.eql(u8, a, "--objective")) objective = v //
+            else if (std.mem.eql(u8, a, "--constraints")) constraints = v //
+            else if (std.mem.eql(u8, a, "--idempotency-key")) idempotency_key = v //
+            else if (std.mem.eql(u8, a, "--db")) db_opt = v //
+            else if (std.mem.eql(u8, a, "--evidence")) evidence = v //
+            else if (std.mem.eql(u8, a, "--next")) next_action = v //
+            else if (std.mem.eql(u8, a, "--result")) result = v //
+            else if (std.mem.eql(u8, a, "--kind")) {
+                if (!std.mem.eql(u8, v, "progress") and !std.mem.eql(u8, v, "done"))
+                    return usage(ctx, "--kind must be progress or done");
+                kind = v;
+            } else if (std.mem.eql(u8, a, "--expect-rev")) {
+                expect_rev = std.fmt.parseInt(i64, v, 10) catch return usage(ctx, "--expect-rev needs a number");
+            } else return usage(ctx, "unknown agent option");
+            continue;
+        }
+        if (std.mem.startsWith(u8, a, "-")) return usage(ctx, "unknown agent option");
+        if (id != null) return usage(ctx, "unexpected argument");
+        id = a;
+    }
+
+    if (std.mem.eql(u8, cmd, "agent-capture")) {
+        if (id != null) return usage(ctx, "agent-capture takes no id");
+        if (scope == null) return usage(ctx, "agent-capture needs --scope");
+        if (request == null) return usage(ctx, "agent-capture needs --request");
+    } else {
+        if (id == null) return usage(ctx, "agent command needs an id");
+        if (scope == null) return usage(ctx, "agent command needs --scope");
+        if (std.mem.eql(u8, cmd, "agent-checkpoint")) {
+            if (expect_rev == null) return usage(ctx, "agent-checkpoint needs --expect-rev");
+            if (result == null) return usage(ctx, "agent-checkpoint needs --result");
+        }
+    }
+
+    const db_path = try db.resolvePath(ctx.io, ctx.alloc, db_opt);
+    defer ctx.alloc.free(db_path);
+    var store = try agent.Store.open(ctx.alloc, ctx.io, db_path);
+    defer store.close();
+
+    if (std.mem.eql(u8, cmd, "agent-capture")) {
+        const r = try store.capture(.{
+            .scope = scope.?,
+            .project = project,
+            .request = request.?,
+            .objective = objective,
+            .constraints = constraints,
+            .idempotency_key = idempotency_key,
+        });
+        defer store.deinitCaptureResult(r);
+        try success(ctx, cmd, r);
+        return 0;
+    }
+    if (std.mem.eql(u8, cmd, "agent-checkpoint")) {
+        const r = try store.checkpoint(.{
+            .assignment_id = id.?,
+            .scope = scope.?,
+            .expect_rev = expect_rev.?,
+            .kind = kind,
+            .result = result.?,
+            .evidence = evidence,
+            .next_action = next_action,
+            .idempotency_key = idempotency_key,
+        });
+        defer store.deinitCheckpointResult(r);
+        try success(ctx, cmd, r);
+        return 0;
+    }
+    const r = try store.prepare(id.?, scope.?);
+    defer store.deinitPrepareResult(r);
+    try success(ctx, cmd, r);
+    return 0;
+}
+
+fn agentValueFlag(a: []const u8) bool {
+    const names = [_][]const u8{
+        "--scope",       "--request",         "--project", "--objective",
+        "--constraints", "--idempotency-key", "--db",      "--evidence",
+        "--next",        "--result",          "--kind",    "--expect-rev",
+    };
+    for (names) |n| if (std.mem.eql(u8, a, n)) return true;
+    return false;
 }
 
 fn cmdCapture(ctx: *Ctx, eng: *engine.Engine, args: []const []const u8, dry_run: bool) !u8 {
@@ -533,6 +687,9 @@ fn printHelp(ctx: *Ctx) !void {
         \\  plan --context C [--client X] [--date YYYY-MM-DD]
         \\  check [--strict]            validate the workspace
         \\  recover                     finish an interrupted transaction
+        \\  agent-capture --scope S --request T [--project P] [--idempotency-key K] [--db PATH]
+        \\  agent-checkpoint ID --scope S --expect-rev N --result T [--db PATH]
+        \\  agent-prepare ID --scope S [--db PATH]
         \\  version
         \\
         \\global: --root PATH --json --today YYYY-MM-DD --dry-run
@@ -548,4 +705,6 @@ test {
     _ = @import("engine.zig");
     _ = @import("init.zig");
     _ = @import("mcp.zig");
+    _ = @import("db.zig");
+    _ = @import("agent.zig");
 }

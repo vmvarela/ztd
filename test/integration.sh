@@ -34,4 +34,53 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ztd_list","arguments":{}}}' \
   | "$BIN" --root "$TMP" mcp --scope personal --read-only | grep -q 'T-20261111-001'
 
+# Agent store flow: temp DB only, no Markdown workspace involved.
+ADB="$TMP/agent.db"
+out1="$("$BIN" agent-capture --scope demo --request 'hola' --objective 'terminar el flujo' --idempotency-key k1 --db "$ADB")"
+id1="$(printf '%s' "$out1" | grep -o '"id":"A-[^"]*"' | cut -d'"' -f4)"
+[ -n "$id1" ]
+
+# Same key and identical payload replays the same assignment.
+out2="$("$BIN" agent-capture --scope demo --request 'hola' --objective 'terminar el flujo' --idempotency-key k1 --db "$ADB")"
+printf '%s' "$out2" | grep -q '"replayed":true'
+id2="$(printf '%s' "$out2" | grep -o '"id":"A-[^"]*"' | cut -d'"' -f4)"
+[ "$id1" = "$id2" ]
+
+# Same key with a different payload is a conflict, exit 1.
+rc=0
+out3="$("$BIN" agent-capture --scope demo --request 'otra cosa' --idempotency-key k1 --db "$ADB")" || rc=$?
+[ "$rc" -eq 1 ]
+printf '%s' "$out3" | grep -q '"code":"idempotency_conflict"'
+
+# Checkpoint at rev 1, then a stale expect-rev conflicts.
+out4="$("$BIN" agent-checkpoint "$id1" --scope demo --expect-rev 1 --result 'avance' --db "$ADB")"
+printf '%s' "$out4" | grep -q '"assignment_rev":2'
+rc=0
+out5="$("$BIN" agent-checkpoint "$id1" --scope demo --expect-rev 1 --result 'otro avance' --db "$ADB")" || rc=$?
+[ "$rc" -eq 1 ]
+printf '%s' "$out5" | grep -q '"code":"revision_conflict"'
+
+# prepare returns the objective and the latest checkpoint.
+out6="$("$BIN" agent-prepare "$id1" --scope demo --db "$ADB")"
+printf '%s' "$out6" | grep -q '"objective":"terminar el flujo"'
+printf '%s' "$out6" | grep -q '"latest":{"id":"C-'
+
+# Another scope cannot read the assignment.
+rc=0
+out7="$("$BIN" agent-prepare "$id1" --scope other --db "$ADB")" || rc=$?
+[ "$rc" -eq 1 ]
+printf '%s' "$out7" | grep -q '"code":"scope_denied"'
+
+# Agent-mode MCP: exactly the three agent tools, no legacy tools, no resources.
+mcp_agent="$(printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  '{"jsonrpc":"2.0","id":3,"method":"resources/list"}' \
+  | "$BIN" mcp --agent-scope demo --agent-db "$ADB")"
+n_agent="$(printf '%s\n' "$mcp_agent" | grep -o '"name":"ztd_agent_[a-z_]*"' | wc -l | tr -d ' ')"
+n_all="$(printf '%s\n' "$mcp_agent" | grep -o '"name":"ztd_[a-z_]*"' | wc -l | tr -d ' ')"
+[ "$n_agent" -eq 3 ]
+[ "$n_all" -eq 3 ]
+printf '%s\n' "$mcp_agent" | grep -qF '"resources":[]'
+
 echo "integration ok"

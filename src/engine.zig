@@ -649,6 +649,12 @@ pub fn errorName(err: anyerror) []const u8 {
         error.StaleTask => "stale_task",
         error.InvalidConfig => "unsupported_format",
         error.OutOfMemory => "out_of_memory",
+        error.ScopeDenied => "scope_denied",
+        error.UnknownAssignment => "unknown_assignment",
+        error.RevisionConflict => "revision_conflict",
+        error.IdempotencyConflict => "idempotency_conflict",
+        error.DbBusy => "db_busy",
+        error.DbIncompatible => "db_incompatible",
         else => "io_error",
     };
 }

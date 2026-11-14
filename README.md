@@ -4,7 +4,7 @@ A small task manager for humans and agents. Tasks are plain Markdown in a Git
 repository; `ztd` reads and edits them with atomic writes, file locking and a
 recoverable journal.
 
-One static binary, no runtime, no database.
+One static binary, no runtime.
 
 ## Install
 
@@ -89,7 +89,10 @@ ztd move <id> <list> [--text T] [--field k:v] [--unset k] [--expect-line N]
 ztd plan --context C [--client X] [--date YYYY-MM-DD]
 ztd check [--strict]
 ztd recover
-ztd mcp [--read-only] [--scope C]
+ztd agent-capture --scope S --request TEXT [--project P] [--objective T] [--constraints T] [--idempotency-key K] [--db PATH]
+ztd agent-checkpoint ID --scope S --expect-rev N --result TEXT [--kind progress|done] [--evidence T] [--next T] [--idempotency-key K] [--db PATH]
+ztd agent-prepare ID --scope S [--db PATH]
+ztd mcp [--read-only] [--scope C] [--agent-scope S] [--agent-db PATH]
 ztd version
 ```
 
@@ -101,6 +104,14 @@ Global flags: `--root PATH`, `--json`, `--today YYYY-MM-DD`, `--dry-run`.
 
 `move --expect-line N` is optimistic concurrency: if the task is not on line
 `N` of its source file, `ztd` returns `stale_task` and writes nothing.
+
+### Agent store
+
+The three `agent-*` commands record assignments and checkpoints in a local
+SQLite store (`--db` > `ZTD_AGENT_DB` > per-OS default). They need no Markdown
+workspace, reject the global options above, and print the JSON envelope by
+default. The store is independent of the Markdown lists; it does not replace
+them. Details and error codes: [docs/spec.md](docs/spec.md).
 
 ## JSON
 
@@ -121,6 +132,13 @@ Exit codes: `0` success, `1` domain error, `2` usage.
 - Resources: `ztd://contexts`, `ztd://config`, `ztd://plan/YYYY-MM-DD`.
 - `--read-only` rejects `ztd_capture` and `ztd_move`.
 - `--scope C` limits context-scoped operations to `C`.
+
+`ztd mcp --agent-scope S [--agent-db PATH]` runs the agent-mode server instead:
+only `ztd_agent_capture`, `ztd_agent_checkpoint` and `ztd_agent_prepare`, and no
+resources, because the legacy handlers resolve a Markdown workspace that the
+agent scope does not constrain. The scope comes from server configuration and
+is never a tool argument; `--read-only` rejects capture and checkpoint and
+allows prepare.
 
 OpenCode:
 
