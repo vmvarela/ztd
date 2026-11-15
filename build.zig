@@ -25,6 +25,7 @@ pub fn build(b: *std.Build) void {
             "-DSQLITE_DQS=0",
             "-DSQLITE_DEFAULT_FOREIGN_KEYS=1",
             "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
+            "-DSQLITE_ENABLE_FTS5", // knowledge_fts; see vendor/sqlite/PIN.md
         },
     });
 

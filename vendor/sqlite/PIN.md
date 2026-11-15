@@ -23,7 +23,8 @@ second thread ever touches the DB, switch to `=1` and recompile; no data migrati
 
 `SQLITE_OMIT_LOAD_EXTENSION`, `SQLITE_DQS=0`, `SQLITE_DEFAULT_FOREIGN_KEYS=1`,
 `SQLITE_DEFAULT_WAL_SYNCHRONOUS=1` (WAL + NORMAL: a power loss may lose recent
-commits but cannot corrupt).
+commits but cannot corrupt), `SQLITE_ENABLE_FTS5` (the amalgamation ships FTS5
+compiled out by default; the `knowledge_fts` index needs it).
 
 ## Upgrade rule
 

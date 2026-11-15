@@ -75,14 +75,27 @@ Tasks are stored in *inbox.md*, *lists/next.md*, *lists/waiting.md*,
 	*scope_denied*. With *--history* N also return up to N checkpoints
 	newest-first by revision; N is a positive integer.
 
+*agent-remember* *--scope* S *--kind* fact|decision|constraint|procedure *--text* TEXT [*--source* T] [*--idempotency-key* K] [*--db* PATH]
+	Store one knowledge record in its scope at revision 1. An unknown
+	*--kind* is *invalid_argument*; the idempotency key replays like
+	*agent-capture*.
+
+*agent-recall* *--scope* S *--query* TEXT [*--limit* N] [*--db* PATH]
+	Full-text search over the knowledge of one scope, best match first
+	(bm25), at most N records (default 20; N must be a positive integer,
+	*--limit* 0 is a usage error). Another scope returns an empty list; a
+	malformed query is *invalid_argument*.
+
 *agent-export* *--out* FILE [*--db* PATH]
-	Write every scope, assignment, checkpoint and idempotency log entry
-	as a versioned JSON export (*format* *ztd-agent-export*, *version* 1).
+	Write every scope, assignment, checkpoint, idempotency log entry and
+	knowledge record as a versioned JSON export (*format*
+	*ztd-agent-export*, *version* 2).
 
 *agent-restore* *--from* FILE [*--db* PATH]
-	Import an export into an empty store. A non-empty store, a different
-	format or version, or a corrupted file is *invalid_argument*; counts
-	and revisions are verified in one transaction, so a refusal writes
+	Import an export (version 1 or 2; version 1 carries no knowledge) into
+	an empty store. A non-empty store, a different format, an unknown
+	version, or a corrupted file is *invalid_argument*; counts and
+	revisions are verified in one transaction, so a refusal writes
 	nothing. Returns the inserted counts.
 
 *agent-backup* *--out* FILE [*--db* PATH]

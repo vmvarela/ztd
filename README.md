@@ -94,6 +94,8 @@ ztd routine done <id>
 ztd agent-capture --scope S --request TEXT [--project P] [--objective T] [--constraints T] [--idempotency-key K] [--db PATH]
 ztd agent-checkpoint ID --scope S --expect-rev N --result TEXT [--kind progress|done] [--evidence T] [--next T] [--idempotency-key K] [--db PATH]
 ztd agent-prepare ID --scope S [--history N] [--db PATH]
+ztd agent-remember --scope S --kind K --text T [--source SRC] [--idempotency-key K] [--db PATH]
+ztd agent-recall --scope S --query Q [--limit N] [--db PATH]
 ztd agent-backup --out FILE [--db PATH]
 ztd agent-export --out FILE [--db PATH]
 ztd agent-restore --from FILE [--db PATH]
@@ -119,8 +121,9 @@ print the JSON envelope by default. The store is independent of the Markdown
 lists; it does not replace them. Details and error codes: [docs/spec.md](docs/spec.md).
 
 Durability: `agent-export --out FILE` writes every scope, assignment,
-checkpoint and idempotency row as a versioned JSON export
-(`format` `ztd-agent-export`, `version` 1); `agent-restore --from FILE`
+checkpoint, idempotency and knowledge row as a versioned JSON export
+(`format` `ztd-agent-export`, `version` 2; version-1 documents still
+restore); `agent-restore --from FILE`
 imports it into an empty store, refusing a non-empty target or a malformed
 file with `invalid_argument` and verifying counts and revisions before the
 commit, so a failed restore writes nothing; `agent-backup --out FILE` makes a
@@ -128,6 +131,11 @@ consistent single-file copy (`VACUUM INTO`) that never overwrites an existing
 file and opens through the schema gate. `agent-prepare ID --scope S
 --history N` returns up to `N` checkpoints newest-first alongside the latest
 one. These are operator actions and have no MCP tools.
+
+`agent-remember --scope S --kind K --text T` stores one knowledge record
+(`fact`, `decision`, `constraint` or `procedure`) and `agent-recall --scope S
+--query Q` finds the records of that one scope by full text, best match
+first.
 
 ## JSON
 

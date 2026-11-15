@@ -12,7 +12,8 @@ const builtin = @import("builtin");
 
 /// Schema version stored in `PRAGMA user_version`. Bump only with a migration;
 /// opening a newer or mismatched database fails with `error.DbIncompatible`.
-pub const schema_version = 1;
+/// Version 2 adds the knowledge tables (see `gate` for the 1 -> 2 upgrade).
+pub const schema_version = 2;
 
 pub const sqlite3 = opaque {};
 pub const sqlite3_stmt = opaque {};
@@ -36,8 +37,10 @@ pub extern fn sqlite3_column_int64(stmt: *sqlite3_stmt, col: c_int) i64;
 pub extern fn sqlite3_column_type(stmt: *sqlite3_stmt, col: c_int) c_int;
 pub extern fn sqlite3_libversion_number() c_int;
 pub extern fn sqlite3_threadsafe() c_int;
+pub extern fn sqlite3_errcode(db: *sqlite3) c_int;
 
 const SQLITE_OK = 0;
+const SQLITE_ERROR = 1;
 const SQLITE_PERM = 3;
 const SQLITE_BUSY = 5;
 const SQLITE_LOCKED = 6;
@@ -152,7 +155,7 @@ fn envAlloc(alloc: std.mem.Allocator, comptime name: [:0]const u8) !?[]u8 {
     return @as(?[]u8, owned);
 }
 
-const schema_sql =
+const schema_v1_sql =
     \\CREATE TABLE scope (id TEXT PRIMARY KEY) WITHOUT ROWID;
     \\CREATE TABLE assignment (
     \\  id TEXT PRIMARY KEY,
@@ -186,13 +189,43 @@ const schema_sql =
     \\) WITHOUT ROWID;
 ;
 
+// Version 2: `knowledge` plus its standalone (not external-content) FTS5
+// index. Every write to `knowledge_fts` happens in the same transaction as the
+// `knowledge` row it mirrors, keyed by `knowledge.rowid`, so the index cannot
+// drift from the table.
+const schema_v2_sql =
+    \\CREATE VIRTUAL TABLE knowledge_fts USING fts5(text, source, id UNINDEXED, tokenize='unicode61 remove_diacritics 2');
+    \\CREATE TABLE knowledge (
+    \\  id TEXT PRIMARY KEY,
+    \\  scope_id TEXT NOT NULL REFERENCES scope(id),
+    \\  kind TEXT NOT NULL,            -- 'fact' | 'decision' | 'constraint' | 'procedure'
+    \\  text TEXT NOT NULL,
+    \\  source TEXT,
+    \\  rev INTEGER NOT NULL,
+    \\  created_at TEXT NOT NULL
+    \\);
+    \\CREATE INDEX knowledge_scope ON knowledge(scope_id);
+;
+
+/// Fresh databases are created at the current version in one shot.
+const schema_sql = schema_v1_sql ++ "\n" ++ schema_v2_sql;
+
 /// Tables plus indexes a version-1 database must have.
-const expected_objects_sql =
+const expected_objects_v1_sql =
     \\SELECT count(*) FROM sqlite_master
     \\WHERE (type = 'table' AND name IN ('scope', 'assignment', 'checkpoint', 'op_log'))
     \\   OR (type = 'index' AND name IN ('assignment_scope', 'checkpoint_assignment'))
 ;
-const expected_objects = 6;
+const expected_objects_v1 = 6;
+
+/// Tables plus indexes a version-2 database must have. FTS5's own shadow
+/// tables (`knowledge_fts_*`) are its implementation detail, not ours to pin.
+const expected_objects_sql =
+    \\SELECT count(*) FROM sqlite_master
+    \\WHERE (type = 'table' AND name IN ('scope', 'assignment', 'checkpoint', 'op_log', 'knowledge', 'knowledge_fts'))
+    \\   OR (type = 'index' AND name IN ('assignment_scope', 'checkpoint_assignment', 'knowledge_scope'))
+;
+const expected_objects = 9;
 
 pub const Db = struct {
     handle: *sqlite3,
@@ -266,9 +299,18 @@ pub const Db = struct {
         return .{ .stmt = stmt orelse return error.InvalidArgument };
     }
 
-    /// Version gate: create schema 1 on a database with no user objects of its
-    /// own, accept version 1 with every object present, reject anything else.
-    /// Never downgrades, adopts or silently recreates another database.
+    /// True when the most recent API failure was SQLite's generic
+    /// `SQLITE_ERROR` (result-code class 1) — the way FTS5 reports a malformed
+    /// MATCH query — rather than an I/O, busy or corruption error, which keep
+    /// their own result codes.
+    pub fn lastWasGenericError(self: *Db) bool {
+        return (sqlite3_errcode(self.handle) & 0xff) == SQLITE_ERROR;
+    }
+
+    /// Version gate: create schema 2 on a database with no user objects of its
+    /// own, upgrade a version-1 database inside this same transaction, accept
+    /// version 2 with every object present, reject anything else. Never
+    /// downgrades, adopts or silently recreates another database.
     fn gate(self: *Db) !void {
         // Take the write lock first so two first opens cannot both initialise.
         try self.beginImmediate();
@@ -276,16 +318,17 @@ pub const Db = struct {
         defer if (!committed) self.rollback();
 
         const version = try self.userVersion();
-        if (version == schema_version) {
-            if (try self.objectCount() != expected_objects) return error.DbIncompatible;
-            try self.commit();
-            committed = true;
-            return;
-        }
-        if (version != 0) return error.DbIncompatible;
-        if (try self.userObjectCount() != 0) return error.DbIncompatible;
-        try self.exec(schema_sql);
-        try self.exec("PRAGMA user_version = 1");
+        if (version == 0) {
+            if (try self.userObjectCount() != 0) return error.DbIncompatible;
+            try self.exec(schema_sql);
+        } else if (version == 1) {
+            // A v1 store is upgraded in place: only the knowledge objects are
+            // created here, then user_version moves to 2.
+            if (try self.objectCount(expected_objects_v1_sql) != expected_objects_v1) return error.DbIncompatible;
+            try self.exec(schema_v2_sql);
+        } else if (version != schema_version) return error.DbIncompatible;
+        if (try self.objectCount(expected_objects_sql) != expected_objects) return error.DbIncompatible;
+        if (version != schema_version) try self.exec("PRAGMA user_version = 2");
         try self.commit();
         committed = true;
     }
@@ -308,8 +351,8 @@ pub const Db = struct {
         return stmt.columnInt64(0);
     }
 
-    fn objectCount(self: *Db) !i64 {
-        var stmt = try self.prepare(expected_objects_sql);
+    fn objectCount(self: *Db, sql: []const u8) !i64 {
+        var stmt = try self.prepare(sql);
         defer stmt.deinit();
         if (!try stmt.step()) return 0;
         return stmt.columnInt64(0);
@@ -409,10 +452,54 @@ test "future user_version is rejected" {
     created.close();
 
     var raw = try Db.connect(io, alloc, path);
-    try raw.exec("PRAGMA user_version = 2");
+    try raw.exec("PRAGMA user_version = 3");
     raw.close();
 
     try std.testing.expectError(error.DbIncompatible, Db.open(io, alloc, path));
+}
+
+test "a version-1 database upgrades to version 2 keeping its rows" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const path = try std.fs.path.join(alloc, &.{ path_buf[0..n], "v1.db" });
+    defer alloc.free(path);
+
+    // Built by hand: the binary only creates version 2 now.
+    var raw = try Db.connect(io, alloc, path);
+    try raw.exec(schema_v1_sql);
+    try raw.exec(
+        \\INSERT INTO scope (id) VALUES ('demo');
+        \\INSERT INTO assignment (id, scope_id, request, status, rev, created_at, updated_at)
+        \\VALUES ('A-20260101-001', 'demo', 'tarea antigua', 'open', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+        \\PRAGMA user_version = 1;
+    );
+    raw.close();
+
+    var upgraded = try Db.open(io, alloc, path);
+    defer upgraded.close();
+    try std.testing.expectEqual(@as(i64, schema_version), try upgraded.userVersion());
+
+    var kept = try upgraded.prepare("SELECT request, rev FROM assignment WHERE id = 'A-20260101-001'");
+    defer kept.deinit();
+    try std.testing.expect(try kept.step());
+    const request = (try kept.columnText(alloc, 0)).?;
+    defer alloc.free(request);
+    try std.testing.expectEqualStrings("tarea antigua", request);
+    try std.testing.expectEqual(@as(i64, 1), kept.columnInt64(1));
+
+    var objects = try upgraded.prepare(
+        "SELECT count(*) FROM sqlite_master WHERE name IN ('knowledge', 'knowledge_fts', 'knowledge_scope')",
+    );
+    defer objects.deinit();
+    try std.testing.expect(try objects.step());
+    try std.testing.expectEqual(@as(i64, 3), objects.columnInt64(0));
 }
 
 test "an unrelated database is not adopted" {
