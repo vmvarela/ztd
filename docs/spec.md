@@ -19,6 +19,7 @@ ztd/
   lists/projects/<contexto>[/<cliente>]/<proyecto>.md
   plans/daily/YYYY-MM-DD.md
   plans/weekly/
+  routines/state.md    # recurring routines and their last run date
   templates/
   .state/              # lock, pending.json, last-transaction.json
   .gitignore           # .state/
@@ -110,7 +111,7 @@ Stable codes: `usage`, `invalid_workspace`, `unsupported_format`, `unknown_id`,
 `duplicate_id`, `unknown_list`, `invalid_transition`, `stale_task`,
 `pending_transaction`, `recover_conflict`, `unknown_context`, `invalid_client`,
 `unknown_project`, `invalid_field`, `id_exhausted`, `scope_denied`, `read_only`,
-`io_error`, plus the agent-store codes of section 10: `unknown_assignment`,
+`io_error`, plus the agent-store codes of section 11: `unknown_assignment`,
 `revision_conflict`, `idempotency_conflict`, `db_busy`, `db_incompatible`,
 `invalid_argument`.
 
@@ -201,7 +202,41 @@ included if referenced.
 
 The plan file is a human document; `ztd` does not rewrite it.
 
-## 9. MCP
+## 9. Routines
+
+`routines/state.md` is a Markdown table with one row per recurring routine:
+
+```text
+| rutina | cadencia | última |
+| --- | --- | --- |
+| inbox | diaria | 2026-11-14 |
+| review | semanal:sab | 2026-11-07 |
+```
+
+`cadencia` is `diaria` or `semanal:` followed by a day (`lun`, `mar`, `mie`,
+`jue`, `vie`, `sab`, `dom`); `última` is the date of the last run. Each row is
+validated: an unknown cadence, a bad date or a duplicate id fails with
+`invalid_field`. Monthly and yearly reviews are dated entries in `calendar.md`,
+not routines.
+
+`due` lists the rows whose cadence has elapsed. A daily routine is due when
+`última` is before today. A weekly routine is due when the latest occurrence of
+its day, counting back from today, is later than `última`. Text output is one
+line per routine, `id | cadencia | N day(s)`, where N is the number of days
+since `última`; an empty result prints `nothing due`. JSON:
+
+```json
+{"ok":true,"command":"due","data":{"routines":[{"id":"inbox","cadence":"diaria","last":"2026-11-14","days":1}]}}
+```
+
+`routine done <id>` sets that row's `última` to `--today`, preserving every
+other byte of the file, and commits through the journal. An unknown id fails
+with `unknown_id`. With `--dry-run` it reports the change and writes nothing.
+
+`init` seeds `inbox`, `plan` and `review` dated at creation, so a new workspace
+starts with nothing due.
+
+## 10. MCP
 
 Transport: JSON-RPC 2.0 over stdio, one object per line, UTF-8. stdout carries
 only protocol objects; diagnostics go to stderr.
@@ -219,7 +254,7 @@ The server starts without a workspace. Every tool then returns
 `--read-only` rejects mutations with `read_only`. `--scope C` rejects access to
 another context with `scope_denied`.
 
-## 10. Agent store
+## 11. Agent store
 
 The agent-continuity store is a SQLite database that records what an agent was
 asked to do and how far it got: assignments and checkpoints. It is independent
