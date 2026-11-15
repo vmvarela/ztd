@@ -394,10 +394,10 @@ fn handleTool(ctx: *Ctx, name: []const u8, args: std.json.ObjectMap) !std.json.V
         return .{ .object = try createdData(ctx, created) };
     }
     if (std.mem.eql(u8, name, "ztd_list")) {
-        const context = getString(args, "context");
-        const client = getString(args, "client");
-        const project = getString(args, "project");
-        const list_name = getString(args, "list");
+        const context = try optString(args, "context");
+        const client = try optString(args, "client");
+        const project = try optString(args, "project");
+        const list_name = try optString(args, "list");
         if (context) |c| try checkScopeOpt(ctx, c);
         var eng = try engine.Engine.init(ctx.io, ctx.alloc, try store_mod.resolveRoot(ctx.io, ctx.alloc, ctx.root), ctx.today, false);
         defer eng.deinit();
@@ -408,7 +408,7 @@ fn handleTool(ctx: *Ctx, name: []const u8, args: std.json.ObjectMap) !std.json.V
         return .{ .object = out };
     }
     if (std.mem.eql(u8, name, "ztd_show")) {
-        const id = getString(args, "id") orelse return error.BadParams;
+        const id = try optString(args, "id") orelse return error.BadParams;
         var eng = try engine.Engine.init(ctx.io, ctx.alloc, try store_mod.resolveRoot(ctx.io, ctx.alloc, ctx.root), ctx.today, false);
         defer eng.deinit();
         const all = try eng.loadAll();
@@ -422,8 +422,8 @@ fn handleTool(ctx: *Ctx, name: []const u8, args: std.json.ObjectMap) !std.json.V
     }
     if (std.mem.eql(u8, name, "ztd_move")) {
         if (ctx.read_only) return error.ReadOnly;
-        const id = getString(args, "id") orelse return error.BadParams;
-        const to = getString(args, "to") orelse return error.BadParams;
+        const id = try optString(args, "id") orelse return error.BadParams;
+        const to = try optString(args, "to") orelse return error.BadParams;
         const dest = engine.List.parse(to) orelse return error.BadParams;
         var eng = try engine.Engine.init(ctx.io, ctx.alloc, try store_mod.resolveRoot(ctx.io, ctx.alloc, ctx.root), ctx.today, true);
         defer eng.deinit();
@@ -458,7 +458,7 @@ fn handleTool(ctx: *Ctx, name: []const u8, args: std.json.ObjectMap) !std.json.V
             .integer => |n| if (n > 0) @intCast(n) else return error.BadParams,
             else => return error.BadParams,
         } else null;
-        const moved = try eng.move(id, dest, getString(args, "text"), set_fields.items, unset_fields.items, expect_line, false);
+        const moved = try eng.move(id, dest, try optString(args, "text"), set_fields.items, unset_fields.items, expect_line, false);
         var out: std.json.ObjectMap = .empty;
         out.put(ctx.alloc, "task", try taskValue(ctx, moved)) catch {};
         out.put(ctx.alloc, "from", .{ .string = if (moved.previous) |p| p.name() else "" }) catch {};
@@ -466,10 +466,10 @@ fn handleTool(ctx: *Ctx, name: []const u8, args: std.json.ObjectMap) !std.json.V
         return .{ .object = out };
     }
     if (std.mem.eql(u8, name, "ztd_plan")) {
-        const context = getString(args, "context") orelse return error.BadParams;
+        const context = try optString(args, "context") orelse return error.BadParams;
         try checkScopeOpt(ctx, context);
-        const client = getString(args, "client");
-        const date = if (getString(args, "date")) |d| platform.parseDate(d) catch return error.BadParams else ctx.today;
+        const client = try optString(args, "client");
+        const date = if (try optString(args, "date")) |d| platform.parseDate(d) catch return error.BadParams else ctx.today;
         var eng = try engine.Engine.init(ctx.io, ctx.alloc, try store_mod.resolveRoot(ctx.io, ctx.alloc, ctx.root), ctx.today, false);
         defer eng.deinit();
         const tasks = try eng.planTasks(date, context, client);

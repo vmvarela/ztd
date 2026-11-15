@@ -43,6 +43,13 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ztd_list","arguments":{}}}' \
   | "$BIN" --root "$TMP" mcp | grep -q '"tools"'
 
+# A wrong-typed optional argument is an error, not a silent drop: a numeric
+# context must not silently list every context.
+out_bad="$(printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ztd_list","arguments":{"context":123}}}' \
+  | "$BIN" --root "$TMP" mcp)"
+printf '%s' "$out_bad" | grep -q '"isError":true' || { echo "numeric context accepted: $out_bad" >&2; exit 1; }
+
 # A scoped list uses the scope when the request omits context.
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ztd_list","arguments":{}}}' \
