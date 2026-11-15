@@ -176,4 +176,54 @@ if "$BIN" agent-prepare A-19700101-001 --scope demo --out x --db "$TMP/agent.db"
     exit 1
 fi
 
+# Two processes opening a fresh database at once both succeed.
+CONC="$TMP/conc.db"
+race_pids=""
+for n in 1 2; do
+    (
+        rc=0
+        "$BIN" agent-capture --scope demo --request "race $n" --db "$CONC" >"$TMP/race$n.out" 2>&1 || rc=$?
+        printf '%s' "$rc" >"$TMP/race$n.rc"
+    ) &
+    race_pids="$race_pids $!"
+done
+for p in $race_pids; do wait "$p" || true; done
+for n in 1 2; do
+    rc="$(cat "$TMP/race$n.rc")"
+    if [ "$rc" -ne 0 ]; then
+        echo "concurrent first open $n exited $rc: $(cat "$TMP/race$n.out")" >&2
+        exit 1
+    fi
+done
+"$BIN" agent-export --out "$TMP/race-export.json" --db "$CONC" >/dev/null
+race_json="$(cat "$TMP/race-export.json")"
+[ "$(printf '%s' "$race_json" | grep -o '"request":"race ' | wc -l | tr -d ' ')" -eq 2 ] || {
+    echo "concurrent first open lost an assignment" >&2
+    exit 1
+}
+
+# Of two checkpoints competing for the same revision, exactly one wins.
+cid="$(printf '%s' "$race_json" | grep -o 'A-[0-9]\{8\}-[0-9]\{3\}' | head -1)"
+win_pids=""
+for n in 1 2; do
+    (
+        rc=0
+        "$BIN" agent-checkpoint "$cid" --scope demo --expect-rev 1 --result "competing $n" --db "$CONC" >"$TMP/win$n.out" 2>&1 || rc=$?
+        printf '%s' "$rc" >"$TMP/win$n.rc"
+    ) &
+    win_pids="$win_pids $!"
+done
+for p in $win_pids; do wait "$p" || true; done
+wins=0
+for n in 1 2; do
+    rc="$(cat "$TMP/win$n.rc")"
+    if [ "$rc" -eq 0 ]; then
+        wins=$((wins + 1))
+    else
+        printf '%s' "$(cat "$TMP/win$n.out")" | grep -q '"code":"revision_conflict"'
+    fi
+done
+[ "$wins" -eq 1 ] || { echo "competing checkpoints: $wins winners" >&2; exit 1; }
+"$BIN" agent-prepare "$cid" --scope demo --db "$CONC" | grep -q '"rev":2'
+
 echo "integration ok"
