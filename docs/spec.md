@@ -19,6 +19,7 @@ ztd/
   lists/projects/<contexto>[/<cliente>]/<proyecto>.md
   plans/daily/YYYY-MM-DD.md
   plans/weekly/
+  routines/state.md    # recurring routines and their last run date
   templates/
   .state/              # lock, pending.json, last-transaction.json
   .gitignore           # .state/
@@ -110,7 +111,7 @@ Stable codes: `usage`, `invalid_workspace`, `unsupported_format`, `unknown_id`,
 `duplicate_id`, `unknown_list`, `invalid_transition`, `stale_task`,
 `pending_transaction`, `recover_conflict`, `unknown_context`, `invalid_client`,
 `unknown_project`, `invalid_field`, `id_exhausted`, `scope_denied`, `read_only`,
-`io_error`, plus the agent-store codes of section 10: `unknown_assignment`,
+`io_error`, plus the agent-store codes of section 11: `unknown_assignment`,
 `revision_conflict`, `idempotency_conflict`, `db_busy`, `db_incompatible`,
 `invalid_argument`.
 
@@ -201,7 +202,41 @@ included if referenced.
 
 The plan file is a human document; `ztd` does not rewrite it.
 
-## 9. MCP
+## 9. Routines
+
+`routines/state.md` is a Markdown table with one row per recurring routine:
+
+```text
+| rutina | cadencia | última |
+| --- | --- | --- |
+| inbox | diaria | 2026-11-14 |
+| review | semanal:sab | 2026-11-07 |
+```
+
+`cadencia` is `diaria` or `semanal:` followed by a day (`lun`, `mar`, `mie`,
+`jue`, `vie`, `sab`, `dom`); `última` is the date of the last run. Each row is
+validated: an unknown cadence, a bad date or a duplicate id fails with
+`invalid_field`. Monthly and yearly reviews are dated entries in `calendar.md`,
+not routines.
+
+`due` lists the rows whose cadence has elapsed. A daily routine is due when
+`última` is before today. A weekly routine is due when the latest occurrence of
+its day, counting back from today, is later than `última`. Text output is one
+line per routine, `id | cadencia | N day(s)`, where N is the number of days
+since `última`; an empty result prints `nothing due`. JSON:
+
+```json
+{"ok":true,"command":"due","data":{"routines":[{"id":"inbox","cadence":"diaria","last":"2026-11-14","days":1}]}}
+```
+
+`routine done <id>` sets that row's `última` to `--today`, preserving every
+other byte of the file, and commits through the journal. An unknown id fails
+with `unknown_id`. With `--dry-run` it reports the change and writes nothing.
+
+`init` seeds `inbox`, `plan` and `review` dated at creation, so a new workspace
+starts with nothing due.
+
+## 10. MCP
 
 Transport: JSON-RPC 2.0 over stdio, one object per line, UTF-8. stdout carries
 only protocol objects; diagnostics go to stderr.
@@ -219,15 +254,19 @@ The server starts without a workspace. Every tool then returns
 `--read-only` rejects mutations with `read_only`. `--scope C` rejects access to
 another context with `scope_denied`.
 
-## 10. Agent store
+## 11. Agent store
 
 The agent-continuity store is a SQLite database that records what an agent was
 asked to do and how far it got: assignments and checkpoints. It is independent
 of the Markdown lists and does not replace them — `ztd/` stays the
 human-facing task lists.
 
-Schema version 1 (`PRAGMA user_version`): tables `scope`, `assignment`,
-`checkpoint` and `op_log`. Any other version fails with `db_incompatible`.
+Schema version 2 (`PRAGMA user_version`): tables `scope`, `assignment`,
+`checkpoint`, `op_log` and `knowledge`, plus the FTS5 index `knowledge_fts`.
+A version-1 database is upgraded to version 2 inside the same initialisation
+transaction, creating only the knowledge objects; a version-2 database is
+verified against the version-2 object set, and any other version fails with
+`db_incompatible`.
 A zero-version database is initialised only when it has no tables, indexes,
 views or triggers of its own; any other database is rejected, never adopted.
 The default database path is `--db` > `ZTD_AGENT_DB` > a per-OS default under
@@ -246,7 +285,8 @@ Operations, exposed as `ztd agent-capture`, `ztd agent-checkpoint`,
 Errors: `scope_denied` (assignment belongs to another scope),
 `unknown_assignment`, `revision_conflict`, `idempotency_conflict`, `db_busy`,
 `db_incompatible`, and `invalid_argument` for a refused restore or backup
-target or a malformed export (durability commands only).
+target, a malformed export, or a knowledge refusal (unknown `kind`, a
+non-positive `limit`, a malformed FTS5 query).
 
 - `expect_rev` is optimistic concurrency: a checkpoint whose `expect_rev` does
   not match the stored rev fails with `revision_conflict` and writes nothing.
@@ -275,25 +315,62 @@ target or a malformed export (durability commands only).
   increments the rev, but the status stays `done`. There is no reopen
   operation.
 
+### Knowledge
+
+Scoped knowledge records with full-text recall, exposed as `ztd
+agent-remember` and `ztd agent-recall` (CLI only, no MCP tools):
+
+- `knowledge` rows: `id` (`K-YYYYMMDD-NNN`), `scope_id`, `kind` (`fact`,
+  `decision`, `constraint` or `procedure`), `text`, optional `source`, `rev`
+  and `created_at`. Records are append-only: `remember` inserts at rev 1 and
+  there is no update or delete operation.
+- `knowledge_fts` is a standalone (not external-content) FTS5 index over
+  `text`, `source` and `id`, tokenized with `unicode61 remove_diacritics 2`.
+  Its row is written in the same transaction as the `knowledge` row it
+  mirrors, keyed by `knowledge.rowid`, so the index cannot drift from the
+  table; a fresh database builds both in one initialisation transaction and a
+  version-1 database gains them through the migration described above.
+- `agent-remember --scope S --kind K --text T [--source SRC]` upserts the
+  scope and stores one record; a `kind` outside the four values is
+  `invalid_argument`. Idempotency keys follow the `capture` contract: the
+  same key with the same payload replays the stored record, with a different
+  payload it is `idempotency_conflict`.
+- `agent-recall --scope S --query Q [--limit N]` is read-only: the SQL
+  filters `knowledge.scope_id` before any ranking, joins `knowledge_fts` on
+  `knowledge.rowid` and orders by `bm25(knowledge_fts)` (ascending: best
+  match first), returning at most `N` rows (`N` is a positive integer at the
+  CLI — `--limit 0` is a usage error; the store's `recall` rejects a
+  non-positive limit with `invalid_argument` — and without `--limit` the top
+  20). An unknown scope returns an empty list; a malformed FTS5 query is
+  `invalid_argument`, never `io_error`, while an I/O failure stays
+  `io_error`.
+
 Durability, exposed only as `ztd agent-backup`, `ztd agent-export` and
 `ztd agent-restore` — operator actions, deliberately without MCP tools:
 
 - `agent-export --out FILE` writes one JSON object
-  `{"format":"ztd-agent-export","version":1,"scopes":[...],"assignments":[...],"checkpoints":[...],"operations":[...]}`.
-  Field names are the schema columns, rows are ordered by id (`op_log` by
-  key), null columns are JSON `null` — never `""` — and `request_sha256` is
-  lowercase hex. The file is overwritten if it exists.
+  `{"format":"ztd-agent-export","version":2,"scopes":[...],"assignments":[...],"checkpoints":[...],"operations":[...],"knowledge":[...]}`.
+  Field names are the schema columns — knowledge rows carry the record field
+  names `id`, `scope`, `kind`, `text`, `source`, `rev`, `created_at` — rows
+  are ordered by id (`op_log` by `key`, `knowledge` by `id`), null columns
+  are JSON `null` — never `""` — and `request_sha256` is lowercase hex. The
+  file is overwritten if it exists.
 - `agent-restore --from FILE` accepts only `format` `ztd-agent-export` with
-  `version` 1 and refuses everything else with `invalid_argument`: a
-  malformed or partial document, unknown or missing fields, duplicate ids, a
-  reference to a missing row, bad hex (exactly 64 hex digits; either case is
-  accepted, export always writes lowercase), a `status` or `kind` outside the
-  stored set, checkpoints whose rev is not between 2 and their assignment's
-  rev or that repeat a rev within one assignment, and any non-empty target
-  store (a row in any of the four tables). All rows are inserted in one
-  transaction; the row counts must equal the document's and every assignment
-  rev must equal `1 + its checkpoint count`, otherwise the transaction rolls
-  back and the store stays untouched. The command returns the inserted counts.
+  `version` 1 or 2 — a version-1 document carries no knowledge array and
+  restores no knowledge rows — and refuses everything else with
+  `invalid_argument`: a malformed or partial document, unknown or missing
+  fields, duplicate ids, a reference to a missing row, bad hex (exactly 64
+  hex digits; either case is accepted, export always writes lowercase), a
+  `status` or `kind` outside the stored set, checkpoints whose rev is not
+  between 2 and their assignment's rev or that repeat a rev within one
+  assignment, a knowledge row whose `kind` is outside the four knowledge
+  kinds, whose `rev` is not 1, whose `id` is empty or repeated, or whose
+  scope is not a scope row of the document, and any non-empty target store
+  (a row in any of the tables). All rows are inserted in one transaction —
+  each knowledge row together with its `knowledge_fts` row — and the row
+  counts (knowledge included) and every assignment rev (`1 + its checkpoint
+  count`) are verified before the commit, so a refusal rolls back and the
+  store stays untouched. The command returns the inserted counts.
 - `agent-backup --out FILE` copies the store with
   `VACUUM INTO '<absolute path>'` (any single quote in the path is doubled).
   An existing file is never overwritten. The copy carries `user_version` and

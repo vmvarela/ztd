@@ -22,6 +22,20 @@ BEFORE="$(sha256sum "$TMP/ztd/inbox.md" 2>/dev/null || shasum -a 256 "$TMP/ztd/i
 AFTER="$(sha256sum "$TMP/ztd/inbox.md" 2>/dev/null || shasum -a 256 "$TMP/ztd/inbox.md")"
 [ "$BEFORE" = "$AFTER" ]
 
+# Routines: `due` follows the cadence and `routine done` stamps the run date.
+for r in inbox plan review; do
+  "$BIN" --root "$TMP" --today 2026-11-14 routine done "$r" >/dev/null
+done
+"$BIN" --root "$TMP" --today 2026-11-14 due | grep -q 'nothing due'
+due15="$("$BIN" --root "$TMP" --today 2026-11-15 due)"
+[[ "$due15" == *"inbox | diaria | 1 day"* ]]
+[[ "$due15" != *review* ]]
+[[ "$("$BIN" --root "$TMP" --today 2026-11-21 due)" == *"review | semanal:sab | 7 days"* ]]
+[[ "$("$BIN" --root "$TMP" --today 2026-11-15 due --json)" == *'"days":1'* ]]
+"$BIN" --root "$TMP" --today 2026-11-15 --dry-run routine done inbox >/dev/null
+[[ "$("$BIN" --root "$TMP" --today 2026-11-15 due)" == *inbox* ]]
+if "$BIN" --root "$TMP" routine done nope >/dev/null 2>&1; then exit 1; fi
+
 # MCP handshake and one tool call
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
@@ -175,6 +189,10 @@ if "$BIN" agent-prepare A-19700101-001 --scope demo --out x --db "$TMP/agent.db"
     echo "expected prepare --out to fail" >&2
     exit 1
 fi
+if "$BIN" agent-recall --scope demo --query build --limit 0 --db "$TMP/agent.db" >/dev/null 2>&1; then
+    echo "expected recall --limit 0 to fail" >&2
+    exit 1
+fi
 
 # Two processes opening a fresh database at once both succeed.
 CONC="$TMP/conc.db"
@@ -225,5 +243,103 @@ for n in 1 2; do
 done
 [ "$wins" -eq 1 ] || { echo "competing checkpoints: $wins winners" >&2; exit 1; }
 "$BIN" agent-prepare "$cid" --scope demo --db "$CONC" | grep -q '"rev":2'
+
+# Knowledge: remember two records in demo, recall ranks them, another scope sees none.
+outk1="$("$BIN" agent-remember --scope demo --kind fact --text 'el build cache vive en zig-out' --db "$ADB")"
+kid1="$(printf '%s' "$outk1" | grep -o '"id":"K-[^"]*"' | cut -d'"' -f4)"
+[ -n "$kid1" ]
+printf '%s' "$outk1" | grep -q '"rev":1'
+outk2="$("$BIN" agent-remember --scope demo --kind decision --text 'build cache' --db "$ADB")"
+kid2="$(printf '%s' "$outk2" | grep -o '"id":"K-[^"]*"' | cut -d'"' -f4)"
+[ -n "$kid2" ]
+[ "$kid1" != "$kid2" ]
+
+# recall finds both, the newer (and better matching) record ranked first
+outk3="$("$BIN" agent-recall --scope demo --query 'build cache' --db "$ADB")"
+case "$outk3" in
+    *"$kid2"*"$kid1"*) ;;
+    *) echo "recall is not bm25-ranked newest first: $outk3" >&2; exit 1 ;;
+esac
+n_k="$(printf '%s' "$outk3" | grep -o '"id":"K-' | wc -l | tr -d ' ')"
+[ "$n_k" -eq 2 ]
+
+# another scope finds nothing
+outk4="$("$BIN" agent-recall --scope other --query 'build cache' --db "$ADB")"
+printf '%s' "$outk4" | grep -q '"knowledge":\[\]'
+
+# an unknown kind is a domain error, not a usage error
+rc=0
+outk5="$("$BIN" agent-remember --scope demo --kind banana --text 'x' --db "$ADB")" || rc=$?
+[ "$rc" -eq 1 ]
+printf '%s' "$outk5" | grep -q '"code":"invalid_argument"'
+
+# export keeps knowledge; restoring into a fresh store answers recall
+"$BIN" agent-export --out "$TMP/kexport.json" --db "$ADB" >/dev/null
+grep -q '"version":2' "$TMP/kexport.json"
+grep -q '"knowledge":\[' "$TMP/kexport.json"
+grep -q "$kid1" "$TMP/kexport.json"
+KREST="$TMP/krestored.db"
+"$BIN" agent-restore --from "$TMP/kexport.json" --db "$KREST" >/dev/null
+outk6="$("$BIN" agent-recall --scope demo --query 'build cache' --db "$KREST")"
+n_kr="$(printf '%s' "$outk6" | grep -o '"id":"K-' | wc -l | tr -d ' ')"
+[ "$n_kr" -eq 2 ]
+printf '%s' "$outk6" | grep -q "$kid1"
+printf '%s' "$outk6" | grep -q "$kid2"
+
+# Version-1 upgrade: the binary only writes version 2, so build a v1 store by
+# hand and open it through the CLI. The db.zig unit test always covers the
+# migration; this exercises it end to end when python3 is available.
+if command -v python3 >/dev/null 2>&1; then
+    V1DB="$TMP/v1.db"
+    python3 - "$V1DB" <<'PYEOF'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.executescript("""
+CREATE TABLE scope (id TEXT PRIMARY KEY) WITHOUT ROWID;
+CREATE TABLE assignment (
+  id TEXT PRIMARY KEY,
+  scope_id TEXT NOT NULL REFERENCES scope(id),
+  request TEXT NOT NULL,
+  objective TEXT,
+  constraints TEXT,
+  project TEXT,
+  status TEXT NOT NULL,
+  rev INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX assignment_scope ON assignment(scope_id);
+CREATE TABLE checkpoint (
+  id TEXT PRIMARY KEY,
+  assignment_id TEXT NOT NULL REFERENCES assignment(id),
+  kind TEXT NOT NULL,
+  result TEXT NOT NULL,
+  evidence TEXT,
+  next_action TEXT,
+  rev INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX checkpoint_assignment ON checkpoint(assignment_id);
+CREATE TABLE op_log (
+  key TEXT PRIMARY KEY,
+  request_sha256 BLOB NOT NULL,
+  result_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+) WITHOUT ROWID;
+INSERT INTO scope (id) VALUES ('demo');
+INSERT INTO assignment (id, scope_id, request, status, rev, created_at, updated_at)
+VALUES ('A-20260101-001', 'demo', 'legacy assignment', 'open', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+PRAGMA user_version = 1;
+""")
+db.commit()
+db.close()
+PYEOF
+    outv1="$("$BIN" agent-prepare A-20260101-001 --scope demo --db "$V1DB")"
+    printf '%s' "$outv1" | grep -q '"request":"legacy assignment"'
+    uv1="$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("PRAGMA user_version").fetchone()[0])' "$V1DB")"
+    [ "$uv1" = "2" ] || { echo "v1 upgrade ended at user_version $uv1" >&2; exit 1; }
+else
+    echo "note: version-1 upgrade exercised by the db.zig unit test only (no python3)" >&2
+fi
 
 echo "integration ok"

@@ -15,7 +15,28 @@ pub const Date = struct {
     pub fn eql(a: Date, b: Date) bool {
         return a.year == b.year and a.month == b.month and a.day == b.day;
     }
+
+    /// Días desde 1970-01-01 (Howard Hinnant); sin tablas ni zona horaria.
+    pub fn civilDays(self: Date) i64 {
+        const y: i64 = @as(i64, self.year) - @as(i64, if (self.month <= 2) 1 else 0);
+        const era = @divFloor(y, 400);
+        const yoe = y - era * 400;
+        const m: i64 = self.month;
+        const doy = @divFloor(153 * (m + @as(i64, if (m > 2) -3 else 9)) + 2, 5) +
+            @as(i64, self.day) - 1;
+        const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
+        return era * 146097 + doe - 719468;
+    }
+
+    /// 0 = lunes … 6 = domingo.
+    pub fn weekday(self: Date) u3 {
+        return @intCast(@mod(self.civilDays() + 3, 7));
+    }
 };
+
+pub fn diff(a: Date, b: Date) i64 {
+    return a.civilDays() - b.civilDays();
+}
 
 const Tm = extern struct {
     tm_sec: c_int,
@@ -109,4 +130,13 @@ test "date parse" {
     try std.testing.expectError(error.InvalidDate, parseDate("2026-02-29"));
     _ = try parseDate("2024-02-29");
     try std.testing.expectError(error.InvalidDate, parseDate("2026-04-31"));
+}
+
+test "weekday and day difference" {
+    try std.testing.expectEqual(@as(u3, 3), (try parseDate("1970-01-01")).weekday());
+    try std.testing.expectEqual(@as(u3, 6), (try parseDate("2026-11-15")).weekday());
+    try std.testing.expectEqual(@as(u3, 3), (try parseDate("2024-02-29")).weekday());
+    try std.testing.expectEqual(@as(i64, 1), diff(try parseDate("2026-11-15"), try parseDate("2026-11-14")));
+    try std.testing.expectEqual(@as(i64, 366), diff(try parseDate("2024-03-01"), try parseDate("2023-03-01")));
+    try std.testing.expectEqual(@as(i64, 0), diff(try parseDate("2026-11-15"), try parseDate("2026-11-15")));
 }

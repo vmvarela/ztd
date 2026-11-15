@@ -1,6 +1,7 @@
 const std = @import("std");
 const model = @import("model.zig");
 const platform = @import("platform.zig");
+const routine = @import("routine.zig");
 const store_mod = @import("store.zig");
 const config_mod = @import("config.zig");
 
@@ -250,6 +251,30 @@ pub const Engine = struct {
 
     pub fn pending(self: *Engine) bool {
         return self.store.exists(".state/pending.json");
+    }
+
+    pub fn routines(self: *Engine) ![]routine.Row {
+        const text = (try self.store.readOptional(routine.path)) orelse return error.InvalidWorkspace;
+        return routine.parse(self.alloc, text);
+    }
+
+    pub fn routineDone(self: *Engine, id: []const u8, dry_run: bool) !routine.Row {
+        if (self.store.exists(".state/pending.json")) return error.PendingTransaction;
+        const text = (try self.store.readOptional(routine.path)) orelse return error.InvalidWorkspace;
+        const rows = try routine.parse(self.alloc, text);
+        var previous: ?routine.Row = null;
+        for (rows) |r| {
+            if (std.mem.eql(u8, r.id, id)) previous = r;
+        }
+        const prev = previous orelse return error.UnknownId;
+        const after = try routine.stamp(self.alloc, text, id, self.today);
+        if (!dry_run) try self.commit(&.{.{ .path = routine.path, .before = text, .after = after }});
+        return .{
+            .id = prev.id,
+            .cadence = prev.cadence,
+            .last = self.today,
+            .weekday = prev.weekday,
+        };
     }
 
     pub fn recover(self: *Engine) !bool {

@@ -1,4 +1,6 @@
 const std = @import("std");
+const platform = @import("platform.zig");
+const routine = @import("routine.zig");
 const Store = @import("store.zig").Store;
 
 pub const Result = struct {
@@ -35,6 +37,7 @@ const dirs = [_][]const u8{
     "plans",
     "plans/daily",
     "plans/weekly",
+    "routines",
     "templates",
 };
 
@@ -55,6 +58,7 @@ pub fn initWorkspace(io: std.Io, alloc: std.mem.Allocator, target: []const u8, d
         var created: std.ArrayList([]const u8) = .empty;
         for (dirs) |dir| try created.append(alloc, try alloc.dupe(u8, dir));
         for (files) |f| try created.append(alloc, try alloc.dupe(u8, f.path));
+        try created.append(alloc, try alloc.dupe(u8, routine.path));
         return .{ .root = try alloc.dupe(u8, ztd_path), .created = try created.toOwnedSlice(alloc) };
     }
 
@@ -85,7 +89,33 @@ pub fn initWorkspace(io: std.Io, alloc: std.mem.Allocator, target: []const u8, d
         try created.append(alloc, try alloc.dupe(u8, f.path));
     }
 
+    if (!store.exists(routine.path)) {
+        if (!dry_run) {
+            const text = try seedRoutines(io, alloc);
+            defer alloc.free(text);
+            _ = try store.createIfMissing(routine.path, text);
+        }
+        try created.append(alloc, try alloc.dupe(u8, routine.path));
+    }
+
     return .{ .root = try alloc.dupe(u8, ztd_path), .created = try created.toOwnedSlice(alloc) };
+}
+
+/// Una rutina sembrada con la fecha de creación no vence en el acto; el
+/// workspace nuevo empieza sin deuda.
+fn seedRoutines(io: std.Io, alloc: std.mem.Allocator) ![]u8 {
+    var buf: [10]u8 = undefined;
+    const date = platform.today(io).format(&buf);
+    return std.fmt.allocPrint(alloc,
+        \\# Estado de rutinas
+        \\
+        \\| rutina | cadencia | última |
+        \\| --- | --- | --- |
+        \\| inbox | diaria | {s} |
+        \\| plan | diaria | {s} |
+        \\| review | semanal:sab | {s} |
+        \\
+    , .{ date, date, date });
 }
 
 fn pathExists(io: std.Io, path: []const u8) bool {

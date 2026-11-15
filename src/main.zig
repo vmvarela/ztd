@@ -3,6 +3,7 @@ const engine = @import("engine.zig");
 const init_mod = @import("init.zig");
 const platform = @import("platform.zig");
 const model = @import("model.zig");
+const routine_mod = @import("routine.zig");
 const store_mod = @import("store.zig");
 const mcp = @import("mcp.zig");
 const agent = @import("agent.zig");
@@ -61,6 +62,18 @@ const CheckData = struct {
     warnings: []const []const u8,
 };
 const RecoverData = struct { recovered: bool };
+const RoutineView = struct {
+    id: []const u8,
+    cadence: []const u8,
+    last: []const u8,
+    days: i64,
+};
+const DueData = struct { routines: []RoutineView };
+const RoutineData = struct {
+    action: []const u8,
+    dry_run: bool,
+    routine: RoutineView,
+};
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.arena.allocator();
@@ -183,7 +196,7 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
         return 0;
     }
     const root_path = try store_mod.resolveRoot(ctx.io, ctx.alloc, root);
-    const mutating = !dry_run and (std.mem.eql(u8, cmd, "capture") or std.mem.eql(u8, cmd, "move") or std.mem.eql(u8, cmd, "recover"));
+    const mutating = !dry_run and (std.mem.eql(u8, cmd, "capture") or std.mem.eql(u8, cmd, "move") or std.mem.eql(u8, cmd, "recover") or std.mem.eql(u8, cmd, "routine"));
     var eng = try engine.Engine.init(ctx.io, ctx.alloc, root_path, today, mutating);
     defer eng.deinit();
 
@@ -194,6 +207,8 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
     if (std.mem.eql(u8, cmd, "plan")) return cmdPlan(ctx, &eng, rest);
     if (std.mem.eql(u8, cmd, "check")) return cmdCheck(ctx, &eng, rest);
     if (std.mem.eql(u8, cmd, "recover")) return cmdRecover(ctx, &eng, rest);
+    if (std.mem.eql(u8, cmd, "due")) return cmdDue(ctx, &eng, rest);
+    if (std.mem.eql(u8, cmd, "routine")) return cmdRoutine(ctx, &eng, rest, dry_run);
 
     return usage(ctx, "unknown command");
 }
@@ -227,10 +242,15 @@ fn isAgentCommand(a: []const u8) bool {
     return std.mem.eql(u8, a, "agent-capture") or
         std.mem.eql(u8, a, "agent-checkpoint") or
         std.mem.eql(u8, a, "agent-prepare") or
+        std.mem.eql(u8, a, "agent-remember") or
+        std.mem.eql(u8, a, "agent-recall") or
         std.mem.eql(u8, a, "agent-backup") or
         std.mem.eql(u8, a, "agent-export") or
         std.mem.eql(u8, a, "agent-restore");
 }
+
+/// `agent-recall` without `--limit`: how many ranked matches to return.
+const recall_default_limit: i64 = 20;
 
 /// Local parser for the agent commands; the global option parser is not used.
 fn runAgent(ctx: *Ctx, cmd: []const u8, args: []const [:0]const u8) !u8 {
@@ -243,13 +263,17 @@ fn runAgent(ctx: *Ctx, cmd: []const u8, args: []const [:0]const u8) !u8 {
     var idempotency_key: ?[]const u8 = null;
     var db_opt: ?[]const u8 = null;
     var expect_rev: ?i64 = null;
-    var kind: []const u8 = "progress";
+    var kind: ?[]const u8 = null;
     var result: ?[]const u8 = null;
     var evidence: ?[]const u8 = null;
     var next_action: ?[]const u8 = null;
     var out: ?[]const u8 = null;
     var from: ?[]const u8 = null;
     var history_limit: ?usize = null;
+    var text: ?[]const u8 = null;
+    var source: ?[]const u8 = null;
+    var query: ?[]const u8 = null;
+    var limit: ?i64 = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -275,14 +299,19 @@ fn runAgent(ctx: *Ctx, cmd: []const u8, args: []const [:0]const u8) !u8 {
             else if (std.mem.eql(u8, a, "--result")) result = v //
             else if (std.mem.eql(u8, a, "--out")) out = v //
             else if (std.mem.eql(u8, a, "--from")) from = v //
+            else if (std.mem.eql(u8, a, "--text")) text = v //
+            else if (std.mem.eql(u8, a, "--source")) source = v //
+            else if (std.mem.eql(u8, a, "--query")) query = v //
             else if (std.mem.eql(u8, a, "--history")) {
                 const n = std.fmt.parseInt(usize, v, 10) catch return usage(ctx, "--history needs a number");
                 if (n == 0) return usage(ctx, "--history must be positive");
                 history_limit = n;
             } else if (std.mem.eql(u8, a, "--kind")) {
-                if (!std.mem.eql(u8, v, "progress") and !std.mem.eql(u8, v, "done"))
-                    return usage(ctx, "--kind must be progress or done");
-                kind = v;
+                kind = v; // the accepted set differs per command; checked below
+            } else if (std.mem.eql(u8, a, "--limit")) {
+                const n = std.fmt.parseInt(i64, v, 10) catch return usage(ctx, "--limit needs a number");
+                if (n <= 0) return usage(ctx, "--limit must be positive");
+                limit = n;
             } else if (std.mem.eql(u8, a, "--expect-rev")) {
                 expect_rev = std.fmt.parseInt(i64, v, 10) catch return usage(ctx, "--expect-rev needs a number");
             } else return usage(ctx, "unknown agent option");
@@ -303,12 +332,24 @@ fn runAgent(ctx: *Ctx, cmd: []const u8, args: []const [:0]const u8) !u8 {
     } else if (std.mem.eql(u8, cmd, "agent-restore")) {
         if (id != null) return usage(ctx, "agent-restore takes no id");
         if (from == null) return usage(ctx, "agent-restore needs --from");
+    } else if (std.mem.eql(u8, cmd, "agent-remember")) {
+        if (id != null) return usage(ctx, "agent-remember takes no id");
+        if (scope == null) return usage(ctx, "agent-remember needs --scope");
+        if (text == null) return usage(ctx, "agent-remember needs --text");
+        if (kind == null) return usage(ctx, "agent-remember needs --kind");
+    } else if (std.mem.eql(u8, cmd, "agent-recall")) {
+        if (id != null) return usage(ctx, "agent-recall takes no id");
+        if (scope == null) return usage(ctx, "agent-recall needs --scope");
+        if (query == null) return usage(ctx, "agent-recall needs --query");
     } else {
         if (id == null) return usage(ctx, "agent command needs an id");
         if (scope == null) return usage(ctx, "agent command needs --scope");
         if (std.mem.eql(u8, cmd, "agent-checkpoint")) {
             if (expect_rev == null) return usage(ctx, "agent-checkpoint needs --expect-rev");
             if (result == null) return usage(ctx, "agent-checkpoint needs --result");
+            const k = kind orelse "progress";
+            if (!std.mem.eql(u8, k, "progress") and !std.mem.eql(u8, k, "done"))
+                return usage(ctx, "--kind must be progress or done");
         }
     }
 
@@ -335,7 +376,7 @@ fn runAgent(ctx: *Ctx, cmd: []const u8, args: []const [:0]const u8) !u8 {
             .assignment_id = id.?,
             .scope = scope.?,
             .expect_rev = expect_rev.?,
-            .kind = kind,
+            .kind = kind orelse "progress",
             .result = result.?,
             .evidence = evidence,
             .next_action = next_action,
@@ -376,6 +417,34 @@ fn runAgent(ctx: *Ctx, cmd: []const u8, args: []const [:0]const u8) !u8 {
         try success(ctx, cmd, counts);
         return 0;
     }
+    if (std.mem.eql(u8, cmd, "agent-remember")) {
+        const r = store.remember(.{
+            .scope = scope.?,
+            .kind = kind.?,
+            .text = text.?,
+            .source = source,
+            .idempotency_key = idempotency_key,
+        }) catch |err| switch (err) {
+            error.InvalidArgument => return invalidArgument(ctx),
+            else => return err,
+        };
+        defer store.deinitRememberResult(r);
+        try success(ctx, cmd, r);
+        return 0;
+    }
+    if (std.mem.eql(u8, cmd, "agent-recall")) {
+        const items = store.recall(.{
+            .scope = scope.?,
+            .query = query.?,
+            .limit = limit orelse recall_default_limit,
+        }) catch |err| switch (err) {
+            error.InvalidArgument => return invalidArgument(ctx),
+            else => return err,
+        };
+        defer store.deinitRecall(items);
+        try success(ctx, cmd, .{ .knowledge = items });
+        return 0;
+    }
     const r = try store.prepare(id.?, scope.?);
     defer store.deinitPrepareResult(r);
     if (history_limit) |n| {
@@ -392,7 +461,8 @@ fn agentValueFlag(a: []const u8) bool {
         "--scope",       "--request",         "--project", "--objective",
         "--constraints", "--idempotency-key", "--db",      "--evidence",
         "--next",        "--result",          "--kind",    "--expect-rev",
-        "--out",         "--from",            "--history",
+        "--out",         "--from",            "--history", "--text",
+        "--source",      "--query",           "--limit",
     };
     for (names) |n| if (std.mem.eql(u8, a, n)) return true;
     return false;
@@ -408,6 +478,13 @@ fn agentFlagAllowed(cmd: []const u8, flag: []const u8) bool {
         return std.mem.eql(u8, flag, "--from");
     if (std.mem.eql(u8, cmd, "agent-prepare"))
         return std.mem.eql(u8, flag, "--scope") or std.mem.eql(u8, flag, "--history");
+    if (std.mem.eql(u8, cmd, "agent-remember"))
+        return std.mem.eql(u8, flag, "--scope") or std.mem.eql(u8, flag, "--kind") or
+            std.mem.eql(u8, flag, "--text") or std.mem.eql(u8, flag, "--source") or
+            std.mem.eql(u8, flag, "--idempotency-key");
+    if (std.mem.eql(u8, cmd, "agent-recall"))
+        return std.mem.eql(u8, flag, "--scope") or std.mem.eql(u8, flag, "--query") or
+            std.mem.eql(u8, flag, "--limit");
     if (std.mem.eql(u8, cmd, "agent-capture"))
         return std.mem.eql(u8, flag, "--scope") or std.mem.eql(u8, flag, "--request") or
             std.mem.eql(u8, flag, "--project") or std.mem.eql(u8, flag, "--objective") or
@@ -420,9 +497,10 @@ fn agentFlagAllowed(cmd: []const u8, flag: []const u8) bool {
     return false;
 }
 
-/// The durability commands report a store-level `error.InvalidArgument`
-/// refusal (non-empty restore target, existing backup file, malformed export)
-/// as `invalid_argument`; `engine.errorName` has no entry for it and would
+/// Commands report a store-level `error.InvalidArgument` refusal (durability:
+/// non-empty restore target, existing backup file, malformed export; knowledge:
+/// unknown kind, non-positive limit, malformed FTS5 query) as
+/// `invalid_argument`; `engine.errorName` has no entry for it and would
 /// otherwise hide the refusal behind `io_error`.
 fn invalidArgument(ctx: *Ctx) !u8 {
     try writeJson(ctx, ErrOut{
@@ -674,6 +752,65 @@ fn cmdRecover(ctx: *Ctx, eng: *engine.Engine, args: []const []const u8) !u8 {
     return 0;
 }
 
+fn cmdDue(ctx: *Ctx, eng: *engine.Engine, args: []const []const u8) !u8 {
+    if (args.len != 0) return usage(ctx, "due takes no arguments");
+    const rows = try eng.routines();
+    var due: std.ArrayList(RoutineView) = .empty;
+    for (rows) |r| {
+        if (!routine_mod.isDue(r, eng.today)) continue;
+        try due.append(ctx.alloc, try routineView(ctx, eng.today, r));
+    }
+    if (ctx.json) {
+        try success(ctx, "due", DueData{ .routines = due.items });
+        return 0;
+    }
+    if (due.items.len == 0) {
+        try stdout(ctx, "nothing due\n");
+        return 0;
+    }
+    for (due.items) |v| {
+        try stdout(ctx, v.id);
+        try stdout(ctx, " | ");
+        try stdout(ctx, v.cadence);
+        try stdout(ctx, " | ");
+        var buf: [32]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{d} day{s}\n", .{
+            v.days,
+            if (v.days == 1) "" else "s",
+        }) catch "";
+        try stdout(ctx, line);
+    }
+    return 0;
+}
+
+fn cmdRoutine(ctx: *Ctx, eng: *engine.Engine, args: []const []const u8, dry_run: bool) !u8 {
+    if (args.len != 2 or !std.mem.eql(u8, args[0], "done")) return usage(ctx, "routine done <id>");
+    const row = try eng.routineDone(args[1], dry_run);
+    const v = try routineView(ctx, eng.today, row);
+    if (ctx.json) {
+        try success(ctx, "routine", RoutineData{ .action = "done", .dry_run = dry_run, .routine = v });
+        return 0;
+    }
+    try stdout(ctx, if (dry_run) "would mark done " else "done ");
+    try stdout(ctx, v.id);
+    try stdout(ctx, " | ");
+    try stdout(ctx, v.cadence);
+    try stdout(ctx, " | ");
+    try stdout(ctx, v.last);
+    try stdout(ctx, "\n");
+    return 0;
+}
+
+fn routineView(ctx: *Ctx, today: platform.Date, r: routine_mod.Row) !RoutineView {
+    var buf: [10]u8 = undefined;
+    return .{
+        .id = r.id,
+        .cadence = r.cadence,
+        .last = try ctx.alloc.dupe(u8, r.last.format(&buf)),
+        .days = platform.diff(today, r.last),
+    };
+}
+
 fn view(lt: engine.LoadedTask) TaskView {
     return .{
         .id = lt.task.id,
@@ -777,9 +914,13 @@ fn printHelp(ctx: *Ctx) !void {
         \\  plan --context C [--client X] [--date YYYY-MM-DD]
         \\  check [--strict]            validate the workspace
         \\  recover                     finish an interrupted transaction
+        \\  due                         list routines past their cadence
+        \\  routine done <id>           mark a routine as run today
         \\  agent-capture --scope S --request T [--project P] [--idempotency-key K] [--db PATH]
         \\  agent-checkpoint ID --scope S --expect-rev N --result T [--db PATH]
         \\  agent-prepare ID --scope S [--history N] [--db PATH]
+        \\  agent-remember --scope S --kind K --text T [--source SRC] [--idempotency-key K] [--db PATH]
+        \\  agent-recall --scope S --query Q [--limit N] [--db PATH]
         \\  agent-backup --out FILE [--db PATH]
         \\  agent-export --out FILE [--db PATH]
         \\  agent-restore --from FILE [--db PATH]
@@ -793,6 +934,7 @@ fn printHelp(ctx: *Ctx) !void {
 test {
     _ = @import("model.zig");
     _ = @import("platform.zig");
+    _ = @import("routine.zig");
     _ = @import("store.zig");
     _ = @import("config.zig");
     _ = @import("engine.zig");

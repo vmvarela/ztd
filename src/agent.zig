@@ -46,6 +46,26 @@ pub const CheckpointInput = struct {
     idempotency_key: ?[]const u8,
 };
 
+pub const RememberInput = struct {
+    scope: []const u8,
+    kind: []const u8,
+    text: []const u8,
+    source: ?[]const u8,
+    idempotency_key: ?[]const u8,
+};
+
+pub const RecallInput = struct { scope: []const u8, query: []const u8, limit: i64 };
+
+pub const Knowledge = struct {
+    id: []const u8,
+    scope: []const u8,
+    kind: []const u8,
+    text: []const u8,
+    source: ?[]const u8,
+    rev: i64,
+    created_at: []const u8,
+};
+
 pub const Assignment = struct {
     id: []const u8,
     scope: []const u8,
@@ -73,8 +93,9 @@ pub const Checkpoint = struct {
 pub const CaptureResult = struct { assignment: Assignment, replayed: bool };
 pub const CheckpointResult = struct { checkpoint: Checkpoint, assignment_rev: i64, replayed: bool };
 pub const PrepareResult = struct { assignment: Assignment, latest: ?Checkpoint };
+pub const RememberResult = struct { knowledge: Knowledge, replayed: bool };
 
-pub const ExportCounts = struct { scopes: usize, assignments: usize, checkpoints: usize, operations: usize };
+pub const ExportCounts = struct { scopes: usize, assignments: usize, checkpoints: usize, operations: usize, knowledge: usize };
 
 /// On-disk shape of `exportJson`/`restoreJson`: the schema column names, null
 /// columns as JSON null and `request_sha256` as lowercase hex.
@@ -107,6 +128,15 @@ const ExportOp = struct {
     result_json: []const u8,
     created_at: []const u8,
 };
+const ExportKnowledge = struct {
+    id: []const u8,
+    scope: []const u8,
+    kind: []const u8,
+    text: []const u8,
+    source: ?[]const u8,
+    rev: i64,
+    created_at: []const u8,
+};
 const ExportFile = struct {
     format: []const u8,
     version: i64,
@@ -114,6 +144,8 @@ const ExportFile = struct {
     assignments: []ExportAssignment,
     checkpoints: []ExportCheckpoint,
     operations: []ExportOp,
+    /// Absent from version-1 documents: those carry no knowledge rows.
+    knowledge: []const ExportKnowledge = &.{},
 };
 
 pub const Store = struct {
@@ -366,6 +398,119 @@ pub const Store = struct {
         return out.toOwnedSlice(alloc);
     }
 
+    /// Upserts the scope and inserts a knowledge record at rev 1 together with
+    /// its `knowledge_fts` row, both in one `BEGIN IMMEDIATE` transaction so
+    /// the standalone FTS index mirrors `knowledge` exactly. `kind` must be
+    /// `fact`, `decision`, `constraint` or `procedure`. Idempotency keys
+    /// follow the same replay/conflict rules as `capture`: the same key with
+    /// the same input replays the stored result, a different input is an
+    /// `error.IdempotencyConflict`.
+    pub fn remember(self: *Store, input: RememberInput) CaptureError!RememberResult {
+        if (input.scope.len == 0 or input.text.len == 0) return error.InvalidArgument;
+        if (!validKnowledgeKind(input.kind)) return error.InvalidArgument;
+        const digest = digestRemember(input);
+
+        try self.db.beginImmediate();
+        var committed = false;
+        defer if (!committed) self.db.rollback();
+
+        if (input.idempotency_key) |key| {
+            if (try self.lookupOp(key)) |op| {
+                defer {
+                    self.alloc.free(op.digest);
+                    self.alloc.free(op.result_json);
+                }
+                if (!std.mem.eql(u8, op.digest, &digest)) return error.IdempotencyConflict;
+                var res = try self.parseRemember(op.result_json);
+                res.replayed = true;
+                return res;
+            }
+        }
+
+        {
+            var stmt = try self.db.prepare("INSERT INTO scope (id) VALUES (?1) ON CONFLICT (id) DO NOTHING");
+            defer stmt.deinit();
+            try stmt.bindText(1, input.scope);
+            _ = try stmt.step();
+        }
+
+        const now = try self.nowIso();
+        defer self.alloc.free(now);
+        const id = try self.nextId("K", "knowledge");
+
+        var k = Knowledge{
+            .id = id,
+            .scope = "",
+            .kind = "",
+            .text = "",
+            .source = null,
+            .rev = 1,
+            .created_at = "",
+        };
+        errdefer freeKnowledge(self.alloc, k);
+        k.scope = try self.alloc.dupe(u8, input.scope);
+        k.kind = try self.alloc.dupe(u8, input.kind);
+        k.text = try self.alloc.dupe(u8, input.text);
+        k.source = if (input.source) |v| try self.alloc.dupe(u8, v) else null;
+        k.created_at = try self.alloc.dupe(u8, now);
+
+        try self.insertKnowledge(k);
+
+        const result = RememberResult{ .knowledge = k, .replayed = false };
+        if (input.idempotency_key) |key| try self.recordOp(key, &digest, now, result);
+        try self.db.commit();
+        committed = true;
+        return result;
+    }
+
+    /// Read-only full-text recall over one scope. The scope filter runs in SQL
+    /// before ranking, `knowledge_fts` joins on `knowledge.rowid` and rows come
+    /// back ordered by `bm25(knowledge_fts)` (ascending: best match first), at
+    /// most `limit` of them. `limit` must be positive; an unknown scope yields
+    /// an empty list. A malformed FTS5 query is `error.InvalidArgument`, while
+    /// an I/O failure stays `error.InputOutput`. The caller owns the result and
+    /// frees it with `deinitRecall`.
+    pub fn recall(self: *Store, input: RecallInput) CaptureError![]Knowledge {
+        if (input.scope.len == 0 or input.query.len == 0) return error.InvalidArgument;
+        if (input.limit <= 0) return error.InvalidArgument;
+
+        var stmt = self.db.prepare(
+            \\SELECT k.id, k.scope_id, k.kind, k.text, k.source, k.rev, k.created_at
+            \\FROM knowledge_fts, knowledge k
+            \\WHERE knowledge_fts MATCH ?1 AND k.rowid = knowledge_fts.rowid
+            \\  AND k.scope_id = ?2
+            \\ORDER BY bm25(knowledge_fts)
+            \\LIMIT ?3
+        ) catch |err| return self.recallError(err);
+        defer stmt.deinit();
+        try stmt.bindText(1, input.query);
+        try stmt.bindText(2, input.scope);
+        try stmt.bindInt64(3, input.limit);
+
+        var out: std.ArrayList(Knowledge) = .empty;
+        errdefer {
+            for (out.items) |k| freeKnowledge(self.alloc, k);
+            out.deinit(self.alloc);
+        }
+        while (true) {
+            const has_row = stmt.step() catch |err| return self.recallError(err);
+            if (!has_row) break;
+            const k = try readKnowledgeCols(self.alloc, &stmt, 0);
+            errdefer freeKnowledge(self.alloc, k);
+            try out.append(self.alloc, k);
+        }
+        return out.toOwnedSlice(self.alloc);
+    }
+
+    /// FTS5 reports a malformed MATCH query as SQLite's generic
+    /// `SQLITE_ERROR`, which the shared mapping turns into `InputOutput`; the
+    /// connection's result code tells that apart from a real I/O, busy or
+    /// corruption failure, which must keep its own error.
+    fn recallError(self: *Store, err: anyerror) CaptureError {
+        if (err == error.InputOutput and self.db.lastWasGenericError()) return error.InvalidArgument;
+        return err;
+    }
+
     /// Frees a result returned by `capture`.
     pub fn deinitCaptureResult(self: *Store, result: CaptureResult) void {
         freeAssignment(self.alloc, result.assignment);
@@ -382,11 +527,23 @@ pub const Store = struct {
         if (result.latest) |c| freeCheckpoint(self.alloc, c);
     }
 
+    /// Frees a result returned by `remember`.
+    pub fn deinitRememberResult(self: *Store, result: RememberResult) void {
+        freeKnowledge(self.alloc, result.knowledge);
+    }
+
+    /// Frees the slice returned by `recall`.
+    pub fn deinitRecall(self: *Store, items: []Knowledge) void {
+        for (items) |k| freeKnowledge(self.alloc, k);
+        self.alloc.free(items);
+    }
+
     /// Serialises the whole store as one JSON object
-    /// `{"format":"ztd-agent-export","version":1,"scopes":[...],"assignments":[...],"checkpoints":[...],"operations":[...]}`,
-    /// with the schema column names, rows ordered by id (`op_log` by key), null
-    /// columns as JSON null and `request_sha256` as lowercase hex. The caller
-    /// owns the result.
+    /// `{"format":"ztd-agent-export","version":2,"scopes":[...],"assignments":[...],"checkpoints":[...],"operations":[...],"knowledge":[...]}`,
+    /// with the schema column names (knowledge rows carry the record fields:
+    /// `id`, `scope`, `kind`, `text`, `source`, `rev`, `created_at`), rows
+    /// ordered by id (`op_log` by key), null columns as JSON null and
+    /// `request_sha256` as lowercase hex. The caller owns the result.
     pub fn exportJson(self: *Store, alloc: std.mem.Allocator) ![]u8 {
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
@@ -460,23 +617,46 @@ pub const Store = struct {
             }
         }
 
+        var knowledge: std.ArrayList(ExportKnowledge) = .empty;
+        {
+            var stmt = try self.db.prepare(
+                \\SELECT id, scope_id, kind, text, source, rev, created_at
+                \\FROM knowledge ORDER BY id
+            );
+            defer stmt.deinit();
+            while (try stmt.step()) {
+                try knowledge.append(a, .{
+                    .id = (try stmt.columnText(a, 0)) orelse "",
+                    .scope = (try stmt.columnText(a, 1)) orelse "",
+                    .kind = (try stmt.columnText(a, 2)) orelse "",
+                    .text = (try stmt.columnText(a, 3)) orelse "",
+                    .source = try stmt.columnText(a, 4),
+                    .rev = stmt.columnInt64(5),
+                    .created_at = (try stmt.columnText(a, 6)) orelse "",
+                });
+            }
+        }
+
         return std.json.Stringify.valueAlloc(alloc, ExportFile{
             .format = "ztd-agent-export",
-            .version = 1,
+            .version = 2,
             .scopes = scopes.items,
             .assignments = assignments.items,
             .checkpoints = checkpoints.items,
             .operations = operations.items,
+            .knowledge = knowledge.items,
         }, .{});
     }
 
     /// Reads an `exportJson` document into an empty store. The document must
-    /// declare `format` `ztd-agent-export` and `version` 1; a malformed or
-    /// inconsistent document, a non-empty store, duplicate ids, missing parents
-    /// or bad hex is `error.InvalidArgument`. Every row is inserted in one
-    /// transaction and the row counts and each assignment's revision are
-    /// verified before the commit, so a refusal leaves the store untouched.
-    /// Returns the inserted counts.
+    /// declare `format` `ztd-agent-export` and `version` 1 or 2 (a version-1
+    /// document carries no knowledge array and restores no knowledge rows); a
+    /// malformed or inconsistent document, a non-empty store, duplicate ids,
+    /// missing parents, a knowledge row outside the stored shape or bad hex is
+    /// `error.InvalidArgument`. Every row is inserted in one transaction and
+    /// the row counts — knowledge included — and each assignment's revision
+    /// are verified before the commit, so a refusal leaves the store
+    /// untouched. Returns the inserted counts.
     pub fn restoreJson(self: *Store, alloc: std.mem.Allocator, json: []const u8) !ExportCounts {
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
@@ -487,7 +667,7 @@ pub const Store = struct {
             else => return error.InvalidArgument,
         };
         if (!std.mem.eql(u8, file.format, "ztd-agent-export")) return error.InvalidArgument;
-        if (file.version != 1) return error.InvalidArgument;
+        if (file.version != 1 and file.version != 2) return error.InvalidArgument;
 
         // Structural problems are rejected before the transaction so they
         // surface as InvalidArgument instead of a SQLite constraint error.
@@ -520,12 +700,18 @@ pub const Store = struct {
             _ = std.fmt.hexToBytes(digest, op.request_sha256) catch return error.InvalidArgument;
             digests[i] = digest;
         }
+        for (file.knowledge, 0..) |k, i| {
+            if (k.id.len == 0 or k.scope.len == 0) return error.InvalidArgument;
+            for (file.knowledge[0..i]) |p| if (std.mem.eql(u8, p.id, k.id)) return error.InvalidArgument;
+            if (!hasId(file.scopes, k.scope)) return error.InvalidArgument;
+            if (!validKnowledgeKind(k.kind) or k.rev != 1) return error.InvalidArgument;
+        }
 
         try self.db.beginImmediate();
         var committed = false;
         defer if (!committed) self.db.rollback();
 
-        const empty = ExportCounts{ .scopes = 0, .assignments = 0, .checkpoints = 0, .operations = 0 };
+        const empty = ExportCounts{ .scopes = 0, .assignments = 0, .checkpoints = 0, .operations = 0, .knowledge = 0 };
         if (!std.meta.eql(try self.counts(), empty)) return error.InvalidArgument;
 
         for (file.scopes) |s| {
@@ -577,10 +763,22 @@ pub const Store = struct {
             try stmt.bindText(4, op.created_at);
             _ = try stmt.step();
         }
+        for (file.knowledge) |k| {
+            try self.insertKnowledge(.{
+                .id = k.id,
+                .scope = k.scope,
+                .kind = k.kind,
+                .text = k.text,
+                .source = k.source,
+                .rev = k.rev,
+                .created_at = k.created_at,
+            });
+        }
 
         const final = try self.counts();
         if (final.scopes != file.scopes.len or final.assignments != file.assignments.len or
-            final.checkpoints != file.checkpoints.len or final.operations != file.operations.len)
+            final.checkpoints != file.checkpoints.len or final.operations != file.operations.len or
+            final.knowledge != file.knowledge.len)
             return error.InvalidArgument;
         if (try self.revisionMismatches() != 0) return error.InvalidArgument;
 
@@ -655,6 +853,42 @@ pub const Store = struct {
         return std.json.parseFromSliceLeaky(CheckpointResult, self.alloc, text, .{ .allocate = .alloc_always });
     }
 
+    fn parseRemember(self: *Store, text: []const u8) !RememberResult {
+        return std.json.parseFromSliceLeaky(RememberResult, self.alloc, text, .{ .allocate = .alloc_always });
+    }
+
+    /// Inserts one `knowledge` row and its `knowledge_fts` twin (same rowid).
+    /// Both statements run on the caller's open transaction, so the standalone
+    /// index cannot drift from the table.
+    fn insertKnowledge(self: *Store, k: Knowledge) !void {
+        {
+            var stmt = try self.db.prepare(
+                \\INSERT INTO knowledge (id, scope_id, kind, text, source, rev, created_at)
+                \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            );
+            defer stmt.deinit();
+            try stmt.bindText(1, k.id);
+            try stmt.bindText(2, k.scope);
+            try stmt.bindText(3, k.kind);
+            try stmt.bindText(4, k.text);
+            try stmt.bindTextOpt(5, k.source);
+            try stmt.bindInt64(6, k.rev);
+            try stmt.bindText(7, k.created_at);
+            _ = try stmt.step();
+        }
+        {
+            var stmt = try self.db.prepare(
+                \\INSERT INTO knowledge_fts (rowid, text, source, id)
+                \\SELECT rowid, ?2, ?3, ?1 FROM knowledge WHERE id = ?1
+            );
+            defer stmt.deinit();
+            try stmt.bindText(1, k.id);
+            try stmt.bindText(2, k.text);
+            try stmt.bindTextOpt(3, k.source);
+            _ = try stmt.step();
+        }
+    }
+
     fn loadForCheckpoint(self: *Store, assignment_id: []const u8) !Loaded {
         var stmt = try self.db.prepare("SELECT scope_id, rev FROM assignment WHERE id = ?1");
         defer stmt.deinit();
@@ -669,7 +903,8 @@ pub const Store = struct {
     fn counts(self: *Store) !ExportCounts {
         var stmt = try self.db.prepare(
             \\SELECT (SELECT count(*) FROM scope), (SELECT count(*) FROM assignment),
-            \\       (SELECT count(*) FROM checkpoint), (SELECT count(*) FROM op_log)
+            \\       (SELECT count(*) FROM checkpoint), (SELECT count(*) FROM op_log),
+            \\       (SELECT count(*) FROM knowledge)
         );
         defer stmt.deinit();
         if (!try stmt.step()) return error.InvalidArgument;
@@ -678,6 +913,7 @@ pub const Store = struct {
             .assignments = try countToUsize(stmt.columnInt64(1)),
             .checkpoints = try countToUsize(stmt.columnInt64(2)),
             .operations = try countToUsize(stmt.columnInt64(3)),
+            .knowledge = try countToUsize(stmt.columnInt64(4)),
         };
     }
 
@@ -781,6 +1017,27 @@ pub const Store = struct {
         c.created_at = (try stmt.columnText(alloc, base + 7)) orelse "";
         return c;
     }
+
+    fn readKnowledgeCols(alloc: std.mem.Allocator, stmt: *db.Stmt, base: c_int) !Knowledge {
+        var k = Knowledge{
+            .id = "",
+            .scope = "",
+            .kind = "",
+            .text = "",
+            .source = null,
+            .rev = 0,
+            .created_at = "",
+        };
+        errdefer freeKnowledge(alloc, k);
+        k.id = (try stmt.columnText(alloc, base + 0)) orelse "";
+        k.scope = (try stmt.columnText(alloc, base + 1)) orelse "";
+        k.kind = (try stmt.columnText(alloc, base + 2)) orelse "";
+        k.text = (try stmt.columnText(alloc, base + 3)) orelse "";
+        k.source = try stmt.columnText(alloc, base + 4);
+        k.rev = stmt.columnInt64(base + 5);
+        k.created_at = (try stmt.columnText(alloc, base + 6)) orelse "";
+        return k;
+    }
 };
 
 fn freeAssignment(alloc: std.mem.Allocator, a: Assignment) void {
@@ -805,6 +1062,15 @@ fn freeCheckpoint(alloc: std.mem.Allocator, c: Checkpoint) void {
     alloc.free(c.created_at);
 }
 
+fn freeKnowledge(alloc: std.mem.Allocator, k: Knowledge) void {
+    alloc.free(k.id);
+    alloc.free(k.scope);
+    alloc.free(k.kind);
+    alloc.free(k.text);
+    if (k.source) |v| alloc.free(v);
+    alloc.free(k.created_at);
+}
+
 fn countToUsize(value: i64) !usize {
     return std.math.cast(usize, value) orelse return error.InvalidArgument;
 }
@@ -825,6 +1091,11 @@ fn validStatus(s: []const u8) bool {
 
 fn validKind(k: []const u8) bool {
     return std.mem.eql(u8, k, "progress") or std.mem.eql(u8, k, "done");
+}
+
+fn validKnowledgeKind(k: []const u8) bool {
+    return std.mem.eql(u8, k, "fact") or std.mem.eql(u8, k, "decision") or
+        std.mem.eql(u8, k, "constraint") or std.mem.eql(u8, k, "procedure");
 }
 
 const hex_chars = "0123456789abcdef";
@@ -873,6 +1144,15 @@ fn digestCheckpoint(input: CheckpointInput) [Sha256.digest_length]u8 {
     hashField(&h, input.result);
     hashOptField(&h, input.evidence);
     hashOptField(&h, input.next_action);
+    return h.finalResult();
+}
+
+fn digestRemember(input: RememberInput) [Sha256.digest_length]u8 {
+    var h = Sha256.init(.{});
+    hashField(&h, input.scope);
+    hashField(&h, input.kind);
+    hashField(&h, input.text);
+    hashOptField(&h, input.source);
     return h.finalResult();
 }
 
@@ -1231,7 +1511,7 @@ test "export and restore round trip preserves revisions and digests" {
     const json = try src.exportJson(alloc);
     defer alloc.free(json);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"format\":\"ztd-agent-export\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"version\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"version\":2") != null);
     // null columns stay JSON null, never ""
     try std.testing.expect(std.mem.indexOf(u8, json, "\"constraints\":null") != null);
     const expected_digest = digestCapture(input);
@@ -1353,7 +1633,7 @@ test "a corrupted export is refused without writing any row" {
     ));
     try std.testing.expectError(error.InvalidArgument, s.restoreJson(
         alloc,
-        "{\"format\":\"ztd-agent-export\",\"version\":2,\"scopes\":[],\"assignments\":[],\"checkpoints\":[],\"operations\":[]}",
+        "{\"format\":\"ztd-agent-export\",\"version\":3,\"scopes\":[],\"assignments\":[],\"checkpoints\":[],\"operations\":[]}",
     ));
     // trailing garbage and a missing field
     try std.testing.expectError(error.InvalidArgument, s.restoreJson(
@@ -1606,4 +1886,331 @@ test "a backup opens and passes the gate" {
         .idempotency_key = "op-1",
     });
     try std.testing.expectEqualSlices(u8, &expected, op.digest);
+}
+
+test "remember inserts at rev 1 and recall finds it in its scope" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const db_path = try tmpPath(alloc, io, &tmp);
+    defer alloc.free(db_path);
+
+    var s = try Store.open(alloc, io, db_path);
+    defer s.close();
+
+    const r = try s.remember(.{
+        .scope = "trabajo",
+        .kind = "decision",
+        .text = "usar FTS5 para el recall",
+        .source = "spec 10",
+        .idempotency_key = null,
+    });
+    defer s.deinitRememberResult(r);
+    try std.testing.expect(!r.replayed);
+    try std.testing.expectEqual(@as(i64, 1), r.knowledge.rev);
+    try std.testing.expectEqualStrings("trabajo", r.knowledge.scope);
+    try std.testing.expectEqualStrings("decision", r.knowledge.kind);
+    try std.testing.expectEqualStrings("usar FTS5 para el recall", r.knowledge.text);
+    try std.testing.expectEqualStrings("spec 10", r.knowledge.source.?);
+    try std.testing.expect(std.mem.startsWith(u8, r.knowledge.id, "K-"));
+    try std.testing.expectEqualStrings("001", r.knowledge.id[11..]);
+
+    const hits = try s.recall(.{ .scope = "trabajo", .query = "FTS5", .limit = 10 });
+    defer s.deinitRecall(hits);
+    try std.testing.expectEqual(@as(usize, 1), hits.len);
+    try std.testing.expectEqualStrings(r.knowledge.id, hits[0].id);
+    try std.testing.expectEqualStrings("trabajo", hits[0].scope);
+    try std.testing.expectEqual(@as(i64, 1), hits[0].rev);
+    try std.testing.expectEqualStrings("spec 10", hits[0].source.?);
+
+    // another scope sees nothing even for a matching query
+    const other = try s.recall(.{ .scope = "salud", .query = "FTS5", .limit = 10 });
+    defer s.deinitRecall(other);
+    try std.testing.expectEqual(@as(usize, 0), other.len);
+}
+
+test "recall ranks by bm25, folds diacritics and refuses bad input" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const db_path = try tmpPath(alloc, io, &tmp);
+    defer alloc.free(db_path);
+
+    var s = try Store.open(alloc, io, db_path);
+    defer s.close();
+
+    const a = try s.remember(.{
+        .scope = "demo",
+        .kind = "fact",
+        .text = "el build cache vive en zig-out",
+        .source = null,
+        .idempotency_key = null,
+    });
+    defer s.deinitRememberResult(a);
+    const b = try s.remember(.{
+        .scope = "demo",
+        .kind = "decision",
+        .text = "build cache",
+        .source = null,
+        .idempotency_key = null,
+    });
+    defer s.deinitRememberResult(b);
+    const c = try s.remember(.{
+        .scope = "salud",
+        .kind = "procedure",
+        .text = "revisión del sistema",
+        .source = null,
+        .idempotency_key = null,
+    });
+    defer s.deinitRememberResult(c);
+
+    // bm25 ascending: the shorter, better match ranks first
+    const hits = try s.recall(.{ .scope = "demo", .query = "build cache", .limit = 10 });
+    defer s.deinitRecall(hits);
+    try std.testing.expectEqual(@as(usize, 2), hits.len);
+    try std.testing.expectEqualStrings(b.knowledge.id, hits[0].id);
+    try std.testing.expectEqualStrings(a.knowledge.id, hits[1].id);
+
+    // unicode61 remove_diacritics 2: "revision" finds "revisión"
+    const accented = try s.recall(.{ .scope = "salud", .query = "revision", .limit = 10 });
+    defer s.deinitRecall(accented);
+    try std.testing.expectEqual(@as(usize, 1), accented.len);
+    try std.testing.expectEqualStrings(c.knowledge.id, accented[0].id);
+
+    // an unknown scope is an empty list, not an error
+    const none = try s.recall(.{ .scope = "inexistente", .query = "build", .limit = 10 });
+    defer s.deinitRecall(none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
+
+    // a positive limit is mandatory
+    try std.testing.expectError(error.InvalidArgument, s.recall(.{ .scope = "demo", .query = "build", .limit = 0 }));
+    try std.testing.expectError(error.InvalidArgument, s.recall(.{ .scope = "demo", .query = "build", .limit = -1 }));
+    // a malformed FTS5 query is a refusal, not an I/O error
+    try std.testing.expectError(error.InvalidArgument, s.recall(.{ .scope = "demo", .query = "\"", .limit = 10 }));
+    // unknown kind
+    try std.testing.expectError(error.InvalidArgument, s.remember(.{
+        .scope = "demo",
+        .kind = "banana",
+        .text = "x",
+        .source = null,
+        .idempotency_key = null,
+    }));
+}
+
+test "remember replays idempotently and conflicts on a different digest" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const db_path = try tmpPath(alloc, io, &tmp);
+    defer alloc.free(db_path);
+
+    var s = try Store.open(alloc, io, db_path);
+    defer s.close();
+
+    const input = RememberInput{
+        .scope = "demo",
+        .kind = "constraint",
+        .text = "sin dependencias nuevas",
+        .source = "revisión técnica",
+        .idempotency_key = "k-1",
+    };
+    const r1 = try s.remember(input);
+    defer s.deinitRememberResult(r1);
+    try std.testing.expect(!r1.replayed);
+
+    const r2 = try s.remember(input);
+    defer s.deinitRememberResult(r2);
+    try std.testing.expect(r2.replayed);
+    try std.testing.expectEqualStrings(r1.knowledge.id, r2.knowledge.id);
+    try std.testing.expectEqualStrings(r1.knowledge.text, r2.knowledge.text);
+    try std.testing.expectEqual(@as(i64, 1), r2.knowledge.rev);
+
+    const hits = try s.recall(.{ .scope = "demo", .query = "dependencias", .limit = 10 });
+    defer s.deinitRecall(hits);
+    try std.testing.expectEqual(@as(usize, 1), hits.len);
+
+    // same key, different payload: conflict, nothing written
+    try std.testing.expectError(error.IdempotencyConflict, s.remember(.{
+        .scope = "demo",
+        .kind = "constraint",
+        .text = "otro texto",
+        .source = "revisión técnica",
+        .idempotency_key = "k-1",
+    }));
+    const after = try s.recall(.{ .scope = "demo", .query = "dependencias", .limit = 10 });
+    defer s.deinitRecall(after);
+    try std.testing.expectEqual(@as(usize, 1), after.len);
+}
+
+test "export and restore round trip keeps knowledge and recall answers on the copy" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const src_path = try std.fs.path.join(alloc, &.{ path_buf[0..n], "src.db" });
+    defer alloc.free(src_path);
+    const dst_path = try std.fs.path.join(alloc, &.{ path_buf[0..n], "dst.db" });
+    defer alloc.free(dst_path);
+
+    var src = try Store.open(alloc, io, src_path);
+    defer src.close();
+
+    const cap = try src.capture(.{
+        .scope = "demo",
+        .project = null,
+        .request = "tarea con conocimiento",
+        .objective = null,
+        .constraints = null,
+        .idempotency_key = null,
+    });
+    defer src.deinitCaptureResult(cap);
+    const a = try src.remember(.{
+        .scope = "demo",
+        .kind = "fact",
+        .text = "el build cache vive en zig-out",
+        .source = null,
+        .idempotency_key = null,
+    });
+    defer src.deinitRememberResult(a);
+    const b = try src.remember(.{
+        .scope = "demo",
+        .kind = "decision",
+        .text = "build cache",
+        .source = "spec 10",
+        .idempotency_key = null,
+    });
+    defer src.deinitRememberResult(b);
+
+    const json = try src.exportJson(alloc);
+    defer alloc.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"version\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"knowledge\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"source\":null") != null);
+    // knowledge rows are ordered by id
+    const pos_a = std.mem.indexOf(u8, json, a.knowledge.id).?;
+    const pos_b = std.mem.indexOf(u8, json, b.knowledge.id).?;
+    try std.testing.expect(pos_a < pos_b);
+
+    var dst = try Store.open(alloc, io, dst_path);
+    defer dst.close();
+    const counts = try dst.restoreJson(alloc, json);
+    try std.testing.expectEqual(@as(usize, 1), counts.scopes);
+    try std.testing.expectEqual(@as(usize, 1), counts.assignments);
+    try std.testing.expectEqual(@as(usize, 0), counts.checkpoints);
+    try std.testing.expectEqual(@as(usize, 0), counts.operations);
+    try std.testing.expectEqual(@as(usize, 2), counts.knowledge);
+
+    const p = try dst.prepare(cap.assignment.id, "demo");
+    defer dst.deinitPrepareResult(p);
+    try std.testing.expectEqualStrings("tarea con conocimiento", p.assignment.request);
+
+    // the restored store answers recall with the original records
+    const hits = try dst.recall(.{ .scope = "demo", .query = "build cache", .limit = 10 });
+    defer dst.deinitRecall(hits);
+    try std.testing.expectEqual(@as(usize, 2), hits.len);
+    try std.testing.expectEqualStrings(b.knowledge.id, hits[0].id);
+    try std.testing.expectEqualStrings("decision", hits[0].kind);
+    try std.testing.expectEqualStrings("spec 10", hits[0].source.?);
+    try std.testing.expectEqual(@as(i64, 1), hits[0].rev);
+    try std.testing.expectEqualStrings(b.knowledge.created_at, hits[0].created_at);
+    try std.testing.expectEqualStrings(a.knowledge.id, hits[1].id);
+    try std.testing.expect(hits[1].source == null);
+}
+
+test "a version-1 export document restores without knowledge" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const db_path = try tmpPath(alloc, io, &tmp);
+    defer alloc.free(db_path);
+
+    var s = try Store.open(alloc, io, db_path);
+    defer s.close();
+
+    const v1_doc =
+        \\{"format":"ztd-agent-export","version":1,"scopes":[{"id":"demo"}],
+        \\ "assignments":[{"id":"A-20260101-001","scope_id":"demo","request":"legacy","objective":null,"constraints":null,"project":null,"status":"open","rev":1,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}],
+        \\ "checkpoints":[],"operations":[]}
+    ;
+    const counts = try s.restoreJson(alloc, v1_doc);
+    try std.testing.expectEqual(@as(usize, 1), counts.scopes);
+    try std.testing.expectEqual(@as(usize, 1), counts.assignments);
+    try std.testing.expectEqual(@as(usize, 0), counts.knowledge);
+
+    const p = try s.prepare("A-20260101-001", "demo");
+    defer s.deinitPrepareResult(p);
+    try std.testing.expectEqualStrings("legacy", p.assignment.request);
+
+    const none = try s.recall(.{ .scope = "demo", .query = "anything", .limit = 10 });
+    defer s.deinitRecall(none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
+}
+
+test "restore refuses knowledge rows it cannot produce" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const db_path = try tmpPath(alloc, io, &tmp);
+    defer alloc.free(db_path);
+
+    const head =
+        \\{"format":"ztd-agent-export","version":2,
+        \\ "scopes":[{"id":"demo"}],
+        \\ "assignments":[],"checkpoints":[],"operations":[],
+        \\ "knowledge":[
+    ;
+    const tail = "]}";
+
+    const cases = [_][]const u8{
+        // unknown kind
+        "{\"id\":\"K-20260101-001\",\"scope\":\"demo\",\"kind\":\"banana\",\"text\":\"x\",\"source\":null,\"rev\":1,\"created_at\":\"2026-01-01T00:00:00Z\"}",
+        // rev is not 1
+        "{\"id\":\"K-20260101-001\",\"scope\":\"demo\",\"kind\":\"fact\",\"text\":\"x\",\"source\":null,\"rev\":2,\"created_at\":\"2026-01-01T00:00:00Z\"}",
+        // duplicate id
+        "{\"id\":\"K-20260101-001\",\"scope\":\"demo\",\"kind\":\"fact\",\"text\":\"x\",\"source\":null,\"rev\":1,\"created_at\":\"2026-01-01T00:00:00Z\"},{\"id\":\"K-20260101-001\",\"scope\":\"demo\",\"kind\":\"fact\",\"text\":\"x\",\"source\":null,\"rev\":1,\"created_at\":\"2026-01-01T00:00:00Z\"}",
+        // scope missing from the document
+        "{\"id\":\"K-20260101-001\",\"scope\":\"otra\",\"kind\":\"fact\",\"text\":\"x\",\"source\":null,\"rev\":1,\"created_at\":\"2026-01-01T00:00:00Z\"}",
+        // empty id
+        "{\"id\":\"\",\"scope\":\"demo\",\"kind\":\"fact\",\"text\":\"x\",\"source\":null,\"rev\":1,\"created_at\":\"2026-01-01T00:00:00Z\"}",
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    for (cases) |body| {
+        buf.clearRetainingCapacity();
+        try buf.appendSlice(alloc, head);
+        try buf.appendSlice(alloc, body);
+        try buf.appendSlice(alloc, tail);
+        var s = try Store.open(alloc, io, db_path);
+        defer s.close();
+        try std.testing.expectError(error.InvalidArgument, s.restoreJson(alloc, buf.items));
+        const counts = try s.counts();
+        try std.testing.expectEqual(@as(usize, 0), counts.scopes);
+        try std.testing.expectEqual(@as(usize, 0), counts.knowledge);
+    }
 }
