@@ -3,6 +3,7 @@ const engine = @import("engine.zig");
 const init_mod = @import("init.zig");
 const platform = @import("platform.zig");
 const model = @import("model.zig");
+const routine_mod = @import("routine.zig");
 const store_mod = @import("store.zig");
 const mcp = @import("mcp.zig");
 const agent = @import("agent.zig");
@@ -61,6 +62,18 @@ const CheckData = struct {
     warnings: []const []const u8,
 };
 const RecoverData = struct { recovered: bool };
+const RoutineView = struct {
+    id: []const u8,
+    cadence: []const u8,
+    last: []const u8,
+    days: i64,
+};
+const DueData = struct { routines: []RoutineView };
+const RoutineData = struct {
+    action: []const u8,
+    dry_run: bool,
+    routine: RoutineView,
+};
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.arena.allocator();
@@ -183,7 +196,7 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
         return 0;
     }
     const root_path = try store_mod.resolveRoot(ctx.io, ctx.alloc, root);
-    const mutating = !dry_run and (std.mem.eql(u8, cmd, "capture") or std.mem.eql(u8, cmd, "move") or std.mem.eql(u8, cmd, "recover"));
+    const mutating = !dry_run and (std.mem.eql(u8, cmd, "capture") or std.mem.eql(u8, cmd, "move") or std.mem.eql(u8, cmd, "recover") or std.mem.eql(u8, cmd, "routine"));
     var eng = try engine.Engine.init(ctx.io, ctx.alloc, root_path, today, mutating);
     defer eng.deinit();
 
@@ -194,6 +207,8 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
     if (std.mem.eql(u8, cmd, "plan")) return cmdPlan(ctx, &eng, rest);
     if (std.mem.eql(u8, cmd, "check")) return cmdCheck(ctx, &eng, rest);
     if (std.mem.eql(u8, cmd, "recover")) return cmdRecover(ctx, &eng, rest);
+    if (std.mem.eql(u8, cmd, "due")) return cmdDue(ctx, &eng, rest);
+    if (std.mem.eql(u8, cmd, "routine")) return cmdRoutine(ctx, &eng, rest, dry_run);
 
     return usage(ctx, "unknown command");
 }
@@ -674,6 +689,65 @@ fn cmdRecover(ctx: *Ctx, eng: *engine.Engine, args: []const []const u8) !u8 {
     return 0;
 }
 
+fn cmdDue(ctx: *Ctx, eng: *engine.Engine, args: []const []const u8) !u8 {
+    if (args.len != 0) return usage(ctx, "due takes no arguments");
+    const rows = try eng.routines();
+    var due: std.ArrayList(RoutineView) = .empty;
+    for (rows) |r| {
+        if (!routine_mod.isDue(r, eng.today)) continue;
+        try due.append(ctx.alloc, try routineView(ctx, eng.today, r));
+    }
+    if (ctx.json) {
+        try success(ctx, "due", DueData{ .routines = due.items });
+        return 0;
+    }
+    if (due.items.len == 0) {
+        try stdout(ctx, "nothing due\n");
+        return 0;
+    }
+    for (due.items) |v| {
+        try stdout(ctx, v.id);
+        try stdout(ctx, " | ");
+        try stdout(ctx, v.cadence);
+        try stdout(ctx, " | ");
+        var buf: [32]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{d} day{s}\n", .{
+            v.days,
+            if (v.days == 1) "" else "s",
+        }) catch "";
+        try stdout(ctx, line);
+    }
+    return 0;
+}
+
+fn cmdRoutine(ctx: *Ctx, eng: *engine.Engine, args: []const []const u8, dry_run: bool) !u8 {
+    if (args.len != 2 or !std.mem.eql(u8, args[0], "done")) return usage(ctx, "routine done <id>");
+    const row = try eng.routineDone(args[1], dry_run);
+    const v = try routineView(ctx, eng.today, row);
+    if (ctx.json) {
+        try success(ctx, "routine", RoutineData{ .action = "done", .dry_run = dry_run, .routine = v });
+        return 0;
+    }
+    try stdout(ctx, if (dry_run) "would mark done " else "done ");
+    try stdout(ctx, v.id);
+    try stdout(ctx, " | ");
+    try stdout(ctx, v.cadence);
+    try stdout(ctx, " | ");
+    try stdout(ctx, v.last);
+    try stdout(ctx, "\n");
+    return 0;
+}
+
+fn routineView(ctx: *Ctx, today: platform.Date, r: routine_mod.Row) !RoutineView {
+    var buf: [10]u8 = undefined;
+    return .{
+        .id = r.id,
+        .cadence = r.cadence,
+        .last = try ctx.alloc.dupe(u8, r.last.format(&buf)),
+        .days = platform.diff(today, r.last),
+    };
+}
+
 fn view(lt: engine.LoadedTask) TaskView {
     return .{
         .id = lt.task.id,
@@ -777,6 +851,8 @@ fn printHelp(ctx: *Ctx) !void {
         \\  plan --context C [--client X] [--date YYYY-MM-DD]
         \\  check [--strict]            validate the workspace
         \\  recover                     finish an interrupted transaction
+        \\  due                         list routines past their cadence
+        \\  routine done <id>           mark a routine as run today
         \\  agent-capture --scope S --request T [--project P] [--idempotency-key K] [--db PATH]
         \\  agent-checkpoint ID --scope S --expect-rev N --result T [--db PATH]
         \\  agent-prepare ID --scope S [--history N] [--db PATH]
@@ -793,6 +869,7 @@ fn printHelp(ctx: *Ctx) !void {
 test {
     _ = @import("model.zig");
     _ = @import("platform.zig");
+    _ = @import("routine.zig");
     _ = @import("store.zig");
     _ = @import("config.zig");
     _ = @import("engine.zig");

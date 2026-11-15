@@ -22,6 +22,20 @@ BEFORE="$(sha256sum "$TMP/ztd/inbox.md" 2>/dev/null || shasum -a 256 "$TMP/ztd/i
 AFTER="$(sha256sum "$TMP/ztd/inbox.md" 2>/dev/null || shasum -a 256 "$TMP/ztd/inbox.md")"
 [ "$BEFORE" = "$AFTER" ]
 
+# Routines: `due` follows the cadence and `routine done` stamps the run date.
+for r in inbox plan review; do
+  "$BIN" --root "$TMP" --today 2026-11-14 routine done "$r" >/dev/null
+done
+"$BIN" --root "$TMP" --today 2026-11-14 due | grep -q 'nothing due'
+due15="$("$BIN" --root "$TMP" --today 2026-11-15 due)"
+[[ "$due15" == *"inbox | diaria | 1 day"* ]]
+[[ "$due15" != *review* ]]
+[[ "$("$BIN" --root "$TMP" --today 2026-11-21 due)" == *"review | semanal:sab | 7 days"* ]]
+[[ "$("$BIN" --root "$TMP" --today 2026-11-15 due --json)" == *'"days":1'* ]]
+"$BIN" --root "$TMP" --today 2026-11-15 --dry-run routine done inbox >/dev/null
+[[ "$("$BIN" --root "$TMP" --today 2026-11-15 due)" == *inbox* ]]
+if "$BIN" --root "$TMP" routine done nope >/dev/null 2>&1; then exit 1; fi
+
 # MCP handshake and one tool call
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \

@@ -56,6 +56,12 @@ Tasks are stored in *inbox.md*, *lists/next.md*, *lists/waiting.md*,
 *recover*
 	Finish or reject an interrupted transaction.
 
+*due*
+	List routines whose cadence has elapsed.
+
+*routine* *done* ID
+	Record a routine run for today.
+
 *agent-capture* *--scope* S *--request* TEXT [*--project* P] [*--objective* T] [*--constraints* T] [*--idempotency-key* K] [*--db* PATH]
 	Create an assignment in the agent store. Needs no Markdown workspace,
 	rejects the global options and prints the JSON envelope by default.

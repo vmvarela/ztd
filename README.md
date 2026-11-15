@@ -89,6 +89,8 @@ ztd move <id> <list> [--text T] [--field k:v] [--unset k] [--expect-line N]
 ztd plan --context C [--client X] [--date YYYY-MM-DD]
 ztd check [--strict]
 ztd recover
+ztd due
+ztd routine done <id>
 ztd agent-capture --scope S --request TEXT [--project P] [--objective T] [--constraints T] [--idempotency-key K] [--db PATH]
 ztd agent-checkpoint ID --scope S --expect-rev N --result TEXT [--kind progress|done] [--evidence T] [--next T] [--idempotency-key K] [--db PATH]
 ztd agent-prepare ID --scope S [--history N] [--db PATH]
