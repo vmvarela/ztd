@@ -64,6 +64,11 @@ printf '%s' "$out5" | grep -q '"code":"revision_conflict"'
 out6="$("$BIN" agent-prepare "$id1" --scope demo --db "$ADB")"
 printf '%s' "$out6" | grep -q '"objective":"terminar el flujo"'
 printf '%s' "$out6" | grep -q '"latest":{"id":"C-'
+# without --history the response keeps its original shape
+if printf '%s' "$out6" | grep -q '"history"'; then
+    echo "unexpected history field without --history" >&2
+    exit 1
+fi
 
 # Another scope cannot read the assignment.
 rc=0
@@ -91,6 +96,64 @@ mcp_typed="$(printf '%s\n' \
 printf '%s\n' "$mcp_typed" | grep -qF '"isError":true'
 printf '%s\n' "$mcp_typed" | grep -qF 'invalid_field'
 
+# Durability: a second checkpoint, then export, restore and backup.
+out8="$("$BIN" agent-checkpoint "$id1" --scope demo --expect-rev 2 --result 'segundo avance' --db "$ADB")"
+printf '%s' "$out8" | grep -q '"assignment_rev":3'
+
+EXPORT="$TMP/export.json"
+"$BIN" agent-export --out "$EXPORT" --db "$ADB" >/dev/null
+grep -q '"format":"ztd-agent-export"' "$EXPORT"
+grep -q "$id1" "$EXPORT"
+grep -q '"request_sha256":"' "$EXPORT"
+# the export parses as JSON (skipped when python3 is unavailable; the strict
+# restore below parses it too)
+if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$EXPORT"
+fi
+
+RESTORED="$TMP/restored.db"
+"$BIN" agent-restore --from "$EXPORT" --db "$RESTORED" >/dev/null
+# both checkpoints, newest-first
+out9="$("$BIN" agent-prepare "$id1" --scope demo --db "$RESTORED" --history 2)"
+hist="$(printf '%s' "$out9" | grep -o '"history":\[.*\]')"
+n_hist="$(printf '%s' "$hist" | grep -o '"id":"C-' | wc -l | tr -d ' ')"
+[ "$n_hist" -eq 2 ]
+case "$hist" in
+    *'"rev":3'*'"rev":2'*) ;;
+    *) echo "history is not newest-first" >&2; exit 1 ;;
+esac
+
+# restoring again into the non-empty store fails and writes nothing
+rc=0
+out10="$("$BIN" agent-restore --from "$EXPORT" --db "$RESTORED" 2>&1)" || rc=$?
+[ "$rc" -eq 1 ]
+printf '%s' "$out10" | grep -q '"code":"invalid_argument"'
+
+# a backup opens and answers prepare
+"$BIN" agent-backup --out "$TMP/backup.db" --db "$ADB" >/dev/null
+out11="$("$BIN" agent-prepare "$id1" --scope demo --db "$TMP/backup.db")"
+printf '%s' "$out11" | grep -q '"rev":3'
+# and never overwrites the existing file
+rc=0
+out12="$("$BIN" agent-backup --out "$TMP/backup.db" --db "$ADB" 2>&1)" || rc=$?
+[ "$rc" -eq 1 ]
+printf '%s' "$out12" | grep -q '"code":"invalid_argument"'
+# a single quote in the backup path is doubled, not tripled
+# (skipped under MSYS/MinGW: the emulated shell rewrites path arguments that contain quotes)
+case "$(uname -s)" in
+MINGW* | MSYS* | CYGWIN*) ;;
+*)
+    "$BIN" agent-backup --out "$TMP/it's.db" --db "$ADB" >/dev/null || { echo "quoted backup failed" >&2; exit 1; }
+    "$BIN" agent-prepare "$id1" --scope demo --db "$TMP/it's.db" >/dev/null || { echo "quoted backup does not open" >&2; exit 1; }
+    ;;
+esac
+# a malformed restore file is a domain error, not an io error
+printf '%s' '{"format":"ztd-agent-export","version":1,"scopes":[]}' > "$TMP/broken.json"
+rc=0
+out13="$("$BIN" agent-restore --from "$TMP/broken.json" --db "$TMP/broken.db" 2>&1)" || rc=$?
+[ "$rc" -eq 1 ] || { echo "malformed restore exited $rc: $out13" >&2; exit 1; }
+printf '%s' "$out13" | grep -q '"code":"invalid_argument"' || { echo "malformed restore: $out13" >&2; exit 1; }
+
 # Flags a command does not use are rejected, not silently discarded.
 if "$BIN" agent-capture --scope demo --request probe --evidence now --db "$TMP/agent.db" >/dev/null 2>&1; then
     echo "expected capture --evidence to fail" >&2
@@ -98,6 +161,18 @@ if "$BIN" agent-capture --scope demo --request probe --evidence now --db "$TMP/a
 fi
 if "$BIN" agent-checkpoint A-19700101-001 --scope demo --expect-rev 1 --result r --constraints c --db "$TMP/agent.db" >/dev/null 2>&1; then
     echo "expected checkpoint --constraints to fail" >&2
+    exit 1
+fi
+if "$BIN" agent-backup --scope demo --out "$TMP/other.db" --db "$TMP/agent.db" >/dev/null 2>&1; then
+    echo "expected backup --scope to fail" >&2
+    exit 1
+fi
+if "$BIN" agent-restore --scope demo --from "$TMP/export.json" --db "$TMP/agent.db" >/dev/null 2>&1; then
+    echo "expected restore --scope to fail" >&2
+    exit 1
+fi
+if "$BIN" agent-prepare A-19700101-001 --scope demo --out x --db "$TMP/agent.db" >/dev/null 2>&1; then
+    echo "expected prepare --out to fail" >&2
     exit 1
 fi
 

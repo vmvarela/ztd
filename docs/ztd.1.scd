@@ -64,9 +64,24 @@ Tasks are stored in *inbox.md*, *lists/next.md*, *lists/waiting.md*,
 	Record a checkpoint. A stale *--expect-rev* is *revision_conflict*; the
 	same idempotency key with a different payload is *idempotency_conflict*.
 
-*agent-prepare* ID *--scope* S [*--db* PATH]
+*agent-prepare* ID *--scope* S [*--db* PATH] [*--history* N]
 	Read an assignment and its latest checkpoint; another scope is
-	*scope_denied*.
+	*scope_denied*. With *--history* N also return up to N checkpoints
+	newest-first by revision; N is a positive integer.
+
+*agent-export* *--out* FILE [*--db* PATH]
+	Write every scope, assignment, checkpoint and idempotency log entry
+	as a versioned JSON export (*format* *ztd-agent-export*, *version* 1).
+
+*agent-restore* *--from* FILE [*--db* PATH]
+	Import an export into an empty store. A non-empty store, a different
+	format or version, or a corrupted file is *invalid_argument*; counts
+	and revisions are verified in one transaction, so a refusal writes
+	nothing. Returns the inserted counts.
+
+*agent-backup* *--out* FILE [*--db* PATH]
+	Copy the store into a new single file (*VACUUM INTO*). An existing
+	file is never overwritten; the copy opens and passes the schema gate.
 
 *mcp* [*--read-only*] [*--scope* C] [*--agent-scope* S] [*--agent-db* PATH]
 	Run the stdio MCP server. With *--agent-scope* only the three

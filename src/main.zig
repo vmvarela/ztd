@@ -226,7 +226,10 @@ fn agentDispatch(args: []const [:0]const u8) ?struct { idx: usize, legacy: bool 
 fn isAgentCommand(a: []const u8) bool {
     return std.mem.eql(u8, a, "agent-capture") or
         std.mem.eql(u8, a, "agent-checkpoint") or
-        std.mem.eql(u8, a, "agent-prepare");
+        std.mem.eql(u8, a, "agent-prepare") or
+        std.mem.eql(u8, a, "agent-backup") or
+        std.mem.eql(u8, a, "agent-export") or
+        std.mem.eql(u8, a, "agent-restore");
 }
 
 /// Local parser for the agent commands; the global option parser is not used.
@@ -244,6 +247,9 @@ fn runAgent(ctx: *Ctx, cmd: []const u8, args: []const [:0]const u8) !u8 {
     var result: ?[]const u8 = null;
     var evidence: ?[]const u8 = null;
     var next_action: ?[]const u8 = null;
+    var out: ?[]const u8 = null;
+    var from: ?[]const u8 = null;
+    var history_limit: ?usize = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -267,7 +273,13 @@ fn runAgent(ctx: *Ctx, cmd: []const u8, args: []const [:0]const u8) !u8 {
             else if (std.mem.eql(u8, a, "--evidence")) evidence = v //
             else if (std.mem.eql(u8, a, "--next")) next_action = v //
             else if (std.mem.eql(u8, a, "--result")) result = v //
-            else if (std.mem.eql(u8, a, "--kind")) {
+            else if (std.mem.eql(u8, a, "--out")) out = v //
+            else if (std.mem.eql(u8, a, "--from")) from = v //
+            else if (std.mem.eql(u8, a, "--history")) {
+                const n = std.fmt.parseInt(usize, v, 10) catch return usage(ctx, "--history needs a number");
+                if (n == 0) return usage(ctx, "--history must be positive");
+                history_limit = n;
+            } else if (std.mem.eql(u8, a, "--kind")) {
                 if (!std.mem.eql(u8, v, "progress") and !std.mem.eql(u8, v, "done"))
                     return usage(ctx, "--kind must be progress or done");
                 kind = v;
@@ -285,6 +297,12 @@ fn runAgent(ctx: *Ctx, cmd: []const u8, args: []const [:0]const u8) !u8 {
         if (id != null) return usage(ctx, "agent-capture takes no id");
         if (scope == null) return usage(ctx, "agent-capture needs --scope");
         if (request == null) return usage(ctx, "agent-capture needs --request");
+    } else if (std.mem.eql(u8, cmd, "agent-backup") or std.mem.eql(u8, cmd, "agent-export")) {
+        if (id != null) return usage(ctx, "this command takes no id");
+        if (out == null) return usage(ctx, "this command needs --out");
+    } else if (std.mem.eql(u8, cmd, "agent-restore")) {
+        if (id != null) return usage(ctx, "agent-restore takes no id");
+        if (from == null) return usage(ctx, "agent-restore needs --from");
     } else {
         if (id == null) return usage(ctx, "agent command needs an id");
         if (scope == null) return usage(ctx, "agent command needs --scope");
@@ -327,8 +345,44 @@ fn runAgent(ctx: *Ctx, cmd: []const u8, args: []const [:0]const u8) !u8 {
         try success(ctx, cmd, r);
         return 0;
     }
+    if (std.mem.eql(u8, cmd, "agent-backup")) {
+        const out_path = try db.resolvePath(ctx.io, ctx.alloc, out.?);
+        defer ctx.alloc.free(out_path);
+        store.backupTo(ctx.alloc, out_path) catch |err| switch (err) {
+            error.InvalidArgument => return invalidArgument(ctx),
+            else => return err,
+        };
+        try success(ctx, cmd, .{ .out = out_path });
+        return 0;
+    }
+    if (std.mem.eql(u8, cmd, "agent-export")) {
+        const out_path = try db.resolvePath(ctx.io, ctx.alloc, out.?);
+        defer ctx.alloc.free(out_path);
+        const data = try store.exportJson(ctx.alloc);
+        defer ctx.alloc.free(data);
+        try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = out_path, .data = data });
+        try success(ctx, cmd, .{ .out = out_path });
+        return 0;
+    }
+    if (std.mem.eql(u8, cmd, "agent-restore")) {
+        const from_path = try db.resolvePath(ctx.io, ctx.alloc, from.?);
+        defer ctx.alloc.free(from_path);
+        const data = try std.Io.Dir.cwd().readFileAlloc(ctx.io, from_path, ctx.alloc, .limited(1 << 30));
+        defer ctx.alloc.free(data);
+        const counts = store.restoreJson(ctx.alloc, data) catch |err| switch (err) {
+            error.InvalidArgument => return invalidArgument(ctx),
+            else => return err,
+        };
+        try success(ctx, cmd, counts);
+        return 0;
+    }
     const r = try store.prepare(id.?, scope.?);
     defer store.deinitPrepareResult(r);
+    if (history_limit) |n| {
+        const hist = try store.history(ctx.alloc, id.?, scope.?, n);
+        try success(ctx, cmd, .{ .assignment = r.assignment, .latest = r.latest, .history = hist });
+        return 0;
+    }
     try success(ctx, cmd, r);
     return 0;
 }
@@ -338,6 +392,7 @@ fn agentValueFlag(a: []const u8) bool {
         "--scope",       "--request",         "--project", "--objective",
         "--constraints", "--idempotency-key", "--db",      "--evidence",
         "--next",        "--result",          "--kind",    "--expect-rev",
+        "--out",         "--from",            "--history",
     };
     for (names) |n| if (std.mem.eql(u8, a, n)) return true;
     return false;
@@ -346,16 +401,35 @@ fn agentValueFlag(a: []const u8) bool {
 /// Each agent command accepts only the options it uses, so a misplaced flag is
 /// rejected instead of silently discarded.
 fn agentFlagAllowed(cmd: []const u8, flag: []const u8) bool {
-    if (std.mem.eql(u8, flag, "--scope") or std.mem.eql(u8, flag, "--db")) return true;
+    if (std.mem.eql(u8, flag, "--db")) return true;
+    if (std.mem.eql(u8, cmd, "agent-backup") or std.mem.eql(u8, cmd, "agent-export"))
+        return std.mem.eql(u8, flag, "--out");
+    if (std.mem.eql(u8, cmd, "agent-restore"))
+        return std.mem.eql(u8, flag, "--from");
+    if (std.mem.eql(u8, cmd, "agent-prepare"))
+        return std.mem.eql(u8, flag, "--scope") or std.mem.eql(u8, flag, "--history");
     if (std.mem.eql(u8, cmd, "agent-capture"))
-        return std.mem.eql(u8, flag, "--request") or std.mem.eql(u8, flag, "--project") or
-            std.mem.eql(u8, flag, "--objective") or std.mem.eql(u8, flag, "--constraints") or
-            std.mem.eql(u8, flag, "--idempotency-key");
+        return std.mem.eql(u8, flag, "--scope") or std.mem.eql(u8, flag, "--request") or
+            std.mem.eql(u8, flag, "--project") or std.mem.eql(u8, flag, "--objective") or
+            std.mem.eql(u8, flag, "--constraints") or std.mem.eql(u8, flag, "--idempotency-key");
     if (std.mem.eql(u8, cmd, "agent-checkpoint"))
-        return std.mem.eql(u8, flag, "--expect-rev") or std.mem.eql(u8, flag, "--result") or
-            std.mem.eql(u8, flag, "--kind") or std.mem.eql(u8, flag, "--evidence") or
-            std.mem.eql(u8, flag, "--next") or std.mem.eql(u8, flag, "--idempotency-key");
+        return std.mem.eql(u8, flag, "--scope") or std.mem.eql(u8, flag, "--expect-rev") or
+            std.mem.eql(u8, flag, "--result") or std.mem.eql(u8, flag, "--kind") or
+            std.mem.eql(u8, flag, "--evidence") or std.mem.eql(u8, flag, "--next") or
+            std.mem.eql(u8, flag, "--idempotency-key");
     return false;
+}
+
+/// The durability commands report a store-level `error.InvalidArgument`
+/// refusal (non-empty restore target, existing backup file, malformed export)
+/// as `invalid_argument`; `engine.errorName` has no entry for it and would
+/// otherwise hide the refusal behind `io_error`.
+fn invalidArgument(ctx: *Ctx) !u8 {
+    try writeJson(ctx, ErrOut{
+        .command = ctx.command,
+        .@"error" = .{ .code = "invalid_argument", .message = "InvalidArgument" },
+    });
+    return 1;
 }
 
 fn cmdCapture(ctx: *Ctx, eng: *engine.Engine, args: []const []const u8, dry_run: bool) !u8 {
@@ -705,7 +779,10 @@ fn printHelp(ctx: *Ctx) !void {
         \\  recover                     finish an interrupted transaction
         \\  agent-capture --scope S --request T [--project P] [--idempotency-key K] [--db PATH]
         \\  agent-checkpoint ID --scope S --expect-rev N --result T [--db PATH]
-        \\  agent-prepare ID --scope S [--db PATH]
+        \\  agent-prepare ID --scope S [--history N] [--db PATH]
+        \\  agent-backup --out FILE [--db PATH]
+        \\  agent-export --out FILE [--db PATH]
+        \\  agent-restore --from FILE [--db PATH]
         \\  version
         \\
         \\global: --root PATH --json --today YYYY-MM-DD --dry-run
