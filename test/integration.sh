@@ -139,14 +139,14 @@ out12="$("$BIN" agent-backup --out "$TMP/backup.db" --db "$ADB" 2>&1)" || rc=$?
 [ "$rc" -eq 1 ]
 printf '%s' "$out12" | grep -q '"code":"invalid_argument"'
 # a single quote in the backup path is doubled, not tripled
-"$BIN" agent-backup --out "$TMP/it's.db" --db "$ADB" >/dev/null
-"$BIN" agent-prepare "$id1" --scope demo --db "$TMP/it's.db" >/dev/null
+"$BIN" agent-backup --out "$TMP/it's.db" --db "$ADB" >/dev/null || { echo "quoted backup failed" >&2; exit 1; }
+"$BIN" agent-prepare "$id1" --scope demo --db "$TMP/it's.db" >/dev/null || { echo "quoted backup does not open" >&2; exit 1; }
 # a malformed restore file is a domain error, not an io error
 printf '%s' '{"format":"ztd-agent-export","version":1,"scopes":[]}' > "$TMP/broken.json"
 rc=0
 out13="$("$BIN" agent-restore --from "$TMP/broken.json" --db "$TMP/broken.db" 2>&1)" || rc=$?
-[ "$rc" -eq 1 ]
-printf '%s' "$out13" | grep -q '"code":"invalid_argument"'
+[ "$rc" -eq 1 ] || { echo "malformed restore exited $rc: $out13" >&2; exit 1; }
+printf '%s' "$out13" | grep -q '"code":"invalid_argument"' || { echo "malformed restore: $out13" >&2; exit 1; }
 
 # Flags a command does not use are rejected, not silently discarded.
 if "$BIN" agent-capture --scope demo --request probe --evidence now --db "$TMP/agent.db" >/dev/null 2>&1; then
