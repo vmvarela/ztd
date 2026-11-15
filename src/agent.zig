@@ -499,17 +499,24 @@ pub const Store = struct {
             if (x.id.len == 0) return error.InvalidArgument;
             for (file.assignments[0..i]) |p| if (std.mem.eql(u8, p.id, x.id)) return error.InvalidArgument;
             if (!hasId(file.scopes, x.scope_id)) return error.InvalidArgument;
+            if (!validStatus(x.status) or x.rev < 1) return error.InvalidArgument;
         }
         for (file.checkpoints, 0..) |c, i| {
             if (c.id.len == 0) return error.InvalidArgument;
             for (file.checkpoints[0..i]) |p| if (std.mem.eql(u8, p.id, c.id)) return error.InvalidArgument;
-            if (!hasId(file.assignments, c.assignment_id)) return error.InvalidArgument;
+            const parent_rev = assignmentRev(file.assignments, c.assignment_id) orelse return error.InvalidArgument;
+            if (!validKind(c.kind)) return error.InvalidArgument;
+            if (c.rev < 2 or c.rev > parent_rev) return error.InvalidArgument;
+            for (file.checkpoints[0..i]) |p| {
+                if (std.mem.eql(u8, p.assignment_id, c.assignment_id) and p.rev == c.rev)
+                    return error.InvalidArgument;
+            }
         }
         const digests = try a.alloc([]const u8, file.operations.len);
         for (file.operations, 0..) |op, i| {
-            if (op.key.len == 0 or op.request_sha256.len % 2 != 0) return error.InvalidArgument;
+            if (op.key.len == 0 or op.request_sha256.len != 64) return error.InvalidArgument;
             for (file.operations[0..i]) |p| if (std.mem.eql(u8, p.key, op.key)) return error.InvalidArgument;
-            const digest = try a.alloc(u8, op.request_sha256.len / 2);
+            const digest = try a.alloc(u8, 32);
             _ = std.fmt.hexToBytes(digest, op.request_sha256) catch return error.InvalidArgument;
             digests[i] = digest;
         }
@@ -601,8 +608,11 @@ pub const Store = struct {
         defer sql.deinit(alloc);
         try sql.appendSlice(alloc, "VACUUM INTO '");
         for (abs) |c| {
-            if (c == '\'') try sql.appendSlice(alloc, "''");
-            try sql.append(alloc, c);
+            if (c == '\'') {
+                try sql.appendSlice(alloc, "''");
+            } else {
+                try sql.append(alloc, c);
+            }
         }
         try sql.append(alloc, '\'');
         const z = try alloc.allocSentinel(u8, sql.items.len, 0);
@@ -802,6 +812,19 @@ fn countToUsize(value: i64) !usize {
 fn hasId(items: anytype, id: []const u8) bool {
     for (items) |item| if (std.mem.eql(u8, item.id, id)) return true;
     return false;
+}
+
+fn assignmentRev(assignments: anytype, id: []const u8) ?i64 {
+    for (assignments) |item| if (std.mem.eql(u8, item.id, id)) return item.rev;
+    return null;
+}
+
+fn validStatus(s: []const u8) bool {
+    return std.mem.eql(u8, s, "open") or std.mem.eql(u8, s, "done") or std.mem.eql(u8, s, "cancelled");
+}
+
+fn validKind(k: []const u8) bool {
+    return std.mem.eql(u8, k, "progress") or std.mem.eql(u8, k, "done");
 }
 
 const hex_chars = "0123456789abcdef";
@@ -1348,6 +1371,61 @@ test "a corrupted export is refused without writing any row" {
     try std.testing.expectEqual(@as(usize, 0), counts.operations);
 }
 
+test "restore rejects checkpoint shapes the store cannot produce" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const db_path = try tmpPath(alloc, io, &tmp);
+    defer alloc.free(db_path);
+
+    const head =
+        \\{"format":"ztd-agent-export","version":1,
+        \\ "scopes":[{"id":"trabajo"}],
+        \\ "assignments":[{"id":"A-20260101-001","scope_id":"trabajo","request":"x","objective":null,"constraints":null,"project":null,"status":"open","rev":2,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}],
+        \\ "checkpoints":[
+    ;
+    const tail = "],\"operations\":[]}";
+
+    const cases = [_][]const u8{
+        // checkpoint rev above the assignment rev
+        "{\"id\":\"C-20260101-001\",\"assignment_id\":\"A-20260101-001\",\"kind\":\"progress\",\"result\":\"r\",\"evidence\":null,\"next_action\":null,\"rev\":3,\"created_at\":\"2026-01-01T00:00:00Z\"}",
+        // unknown kind
+        "{\"id\":\"C-20260101-001\",\"assignment_id\":\"A-20260101-001\",\"kind\":\"banana\",\"result\":\"r\",\"evidence\":null,\"next_action\":null,\"rev\":2,\"created_at\":\"2026-01-01T00:00:00Z\"}",
+        // rev below the first checkpoint
+        "{\"id\":\"C-20260101-001\",\"assignment_id\":\"A-20260101-001\",\"kind\":\"progress\",\"result\":\"r\",\"evidence\":null,\"next_action\":null,\"rev\":1,\"created_at\":\"2026-01-01T00:00:00Z\"}",
+        // two checkpoints sharing one rev
+        "{\"id\":\"C-20260101-001\",\"assignment_id\":\"A-20260101-001\",\"kind\":\"progress\",\"result\":\"r\",\"evidence\":null,\"next_action\":null,\"rev\":2,\"created_at\":\"2026-01-01T00:00:00Z\"},{\"id\":\"C-20260101-002\",\"assignment_id\":\"A-20260101-001\",\"kind\":\"progress\",\"result\":\"r\",\"evidence\":null,\"next_action\":null,\"rev\":2,\"created_at\":\"2026-01-01T00:00:00Z\"}",
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    for (cases) |body| {
+        buf.clearRetainingCapacity();
+        try buf.appendSlice(alloc, head);
+        try buf.appendSlice(alloc, body);
+        try buf.appendSlice(alloc, tail);
+        var s = try Store.open(alloc, io, db_path);
+        defer s.close();
+        try std.testing.expectError(error.InvalidArgument, s.restoreJson(alloc, buf.items));
+        const counts = try s.counts();
+        try std.testing.expectEqual(@as(usize, 0), counts.checkpoints);
+    }
+
+    // a digest that is not 32 bytes
+    buf.clearRetainingCapacity();
+    try buf.appendSlice(alloc,
+        \\{"format":"ztd-agent-export","version":1,"scopes":[],"assignments":[],"checkpoints":[],
+        \\ "operations":[{"key":"k","request_sha256":"aa","result_json":"{}","created_at":"2026-01-01T00:00:00Z"}]}
+    );
+    var s2 = try Store.open(alloc, io, db_path);
+    defer s2.close();
+    try std.testing.expectError(error.InvalidArgument, s2.restoreJson(alloc, buf.items));
+}
+
 test "history is newest-first and honours the limit" {
     const alloc = std.testing.allocator;
     var threaded: std.Io.Threaded = .init(alloc, .{});
@@ -1484,6 +1562,13 @@ test "a backup opens and passes the gate" {
     try s.backupTo(alloc, bpath);
     // never overwrites an existing file
     try std.testing.expectError(error.InvalidArgument, s.backupTo(alloc, bpath));
+
+    // a single quote in the path must be doubled, not tripled
+    const quoted = try std.fs.path.join(alloc, &.{ path_buf[0..n], "it's.db" });
+    defer alloc.free(quoted);
+    try s.backupTo(alloc, quoted);
+    var q = try Store.open(alloc, io, quoted);
+    q.close();
 
     // opening runs the schema gate on the copy
     var b = try Store.open(alloc, io, bpath);

@@ -277,11 +277,14 @@ Durability, exposed only as `ztd agent-backup`, `ztd agent-export` and
 - `agent-restore --from FILE` accepts only `format` `ztd-agent-export` with
   `version` 1 and refuses everything else with `invalid_argument`: a
   malformed or partial document, unknown or missing fields, duplicate ids, a
-  reference to a missing row, bad hex, and any non-empty target store (a row
-  in any of the four tables). All rows are inserted in one transaction; the
-  row counts must equal the document's and every assignment rev must equal
-  `1 + its checkpoint count`, otherwise the transaction rolls back and the
-  store stays untouched. The command returns the inserted counts.
+  reference to a missing row, bad hex (exactly 64 hex digits; either case is
+  accepted, export always writes lowercase), a `status` or `kind` outside the
+  stored set, checkpoints whose rev is not between 2 and their assignment's
+  rev or that repeat a rev within one assignment, and any non-empty target
+  store (a row in any of the four tables). All rows are inserted in one
+  transaction; the row counts must equal the document's and every assignment
+  rev must equal `1 + its checkpoint count`, otherwise the transaction rolls
+  back and the store stays untouched. The command returns the inserted counts.
 - `agent-backup --out FILE` copies the store with
   `VACUUM INTO '<absolute path>'` (any single quote in the path is doubled).
   An existing file is never overwritten. The copy carries `user_version` and
