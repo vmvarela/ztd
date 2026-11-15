@@ -265,6 +265,15 @@ target or a malformed export (durability commands only).
   the timeout returns `db_busy`.
 - WAL mode requires a local filesystem on one host; the database must not live
   on a network filesystem.
+- Concurrency is between processes, not threads: a single connection per
+  process, one writer at a time. Two processes opening a fresh database at once
+  are serialised by the initialization lock, and both succeed. Reads need the
+  file to be writable at first use (the database becomes WAL); once it is WAL,
+  a read-only file still serves `prepare`.
+- `kind` is `progress` or `done`; `done` sets the assignment status to `done`.
+  A `progress` checkpoint after completion is a note: it is recorded and
+  increments the rev, but the status stays `done`. There is no reopen
+  operation.
 
 Durability, exposed only as `ztd agent-backup`, `ztd agent-export` and
 `ztd agent-restore` — operator actions, deliberately without MCP tools:

@@ -1081,6 +1081,13 @@ test "checkpoint enforces scope, revision and kind" {
     defer s.deinitCheckpointResult(c3);
     try std.testing.expectEqual(@as(i64, 4), c3.assignment_rev);
 
+    // Lifecycle: a progress note after completion is recorded, and status stays done.
+    const p3 = try s.prepare(id, "trabajo");
+    defer s.deinitPrepareResult(p3);
+    try std.testing.expectEqualStrings("done", p3.assignment.status);
+    try std.testing.expectEqual(@as(i64, 4), p3.assignment.rev);
+    try std.testing.expectEqualStrings(c3.checkpoint.id, p3.latest.?.id);
+
     const c4 = try s.checkpoint(.{
         .assignment_id = id,
         .scope = "trabajo",
