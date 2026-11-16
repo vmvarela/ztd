@@ -349,4 +349,12 @@ else
     echo "note: version-1 upgrade exercised by the db.zig unit test only (no python3)" >&2
 fi
 
+# Every command the binary dispatches must be visible in --help.
+HELP="$("$BIN" --help 2>&1)"
+for c in init capture list show move plan check recover due routine mcp version \
+         agent-capture agent-checkpoint agent-prepare agent-remember agent-recall \
+         agent-backup agent-export agent-restore; do
+    printf '%s' "$HELP" | grep -q "  $c" || { echo "help omits $c" >&2; exit 1; }
+done
+
 echo "integration ok"
