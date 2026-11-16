@@ -924,6 +924,8 @@ fn printHelp(ctx: *Ctx) !void {
         \\  agent-backup --out FILE [--db PATH]
         \\  agent-export --out FILE [--db PATH]
         \\  agent-restore --from FILE [--db PATH]
+        \\  mcp [--scope C] [--read-only]       serve MCP over stdio
+        \\  mcp --agent-scope S [--agent-db P]  agent-only tools, no Markdown workspace
         \\  version
         \\
         \\global: --root PATH --json --today YYYY-MM-DD --dry-run
