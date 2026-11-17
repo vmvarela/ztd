@@ -11,7 +11,7 @@ only in the "Information" branch.
 
 ## Scope and inbox queries
 
-1. With no selection, `/inbox` processes **only the local capture** with
+1. With no selection, `/ztd/inbox` processes **only the local capture** with
    `ztd list --list inbox`; if it is empty, say so and stop.
    An ID limits processing to that entry with `show ID`. A scope filters the
    local inbox; an explicit source queries that source. "All" includes the

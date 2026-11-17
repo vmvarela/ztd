@@ -63,7 +63,7 @@ This is an optional habit. Do not assume career changes or a single passion.
 
 ## Journal
 
-With `/journal`, add the user's text or reflections to
+With `/ztd/journal`, add the user's text or reflections to
 `journal/YYYY-MM-DD.md` using its template. When content is missing, ask
 briefly for the day's outcome and learning. Do not attribute emotions or
 achievements that were not shared. It does not require checking every list nor

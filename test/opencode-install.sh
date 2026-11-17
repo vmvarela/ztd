@@ -74,8 +74,8 @@ fi
 
 # 4. Conflict preflight: a differing target aborts with zero partial writes.
 home_conf=$(new_home)
-mkdir -p "$home_conf/.config/opencode/commands"
-printf 'user content\n' > "$home_conf/.config/opencode/commands/collect.md"
+mkdir -p "$home_conf/.config/opencode/commands/ztd"
+printf 'user content\n' > "$home_conf/.config/opencode/commands/ztd/collect.md"
 rc=0
 err=$(run_installer "$home_conf" "$WORK" 2>&1) || rc=$?
 expect_status 1 "$rc" "conflicting file aborts"
@@ -88,7 +88,7 @@ if [ -e "$home_conf/.config/opencode/skills" ]; then
 else
     pass "no partial writes after conflict"
 fi
-if [ "$(cat "$home_conf/.config/opencode/commands/collect.md")" = "user content" ]; then
+if [ "$(cat "$home_conf/.config/opencode/commands/ztd/collect.md")" = "user content" ]; then
     pass "conflicting user file untouched"
 else
     fail "conflicting user file untouched"
@@ -107,12 +107,12 @@ else
 fi
 
 home_leaf=$(new_home)
-mkdir -p "$home_leaf/.config/opencode/commands"
+mkdir -p "$home_leaf/.config/opencode/commands/ztd"
 printf 'target\n' > "$WORK/leaf-target"
-ln -s "$WORK/leaf-target" "$home_leaf/.config/opencode/commands/collect.md"
+ln -s "$WORK/leaf-target" "$home_leaf/.config/opencode/commands/ztd/collect.md"
 rc=0; run_installer "$home_leaf" "$WORK" >/dev/null 2>&1 || rc=$?
 expect_status 1 "$rc" "symlink leaf aborts"
-if [ -L "$home_leaf/.config/opencode/commands/collect.md" ] &&
+if [ -L "$home_leaf/.config/opencode/commands/ztd/collect.md" ] &&
         [ "$(cat "$WORK/leaf-target")" = "target" ]; then
     pass "symlink leaf and its target untouched"
 else

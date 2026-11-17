@@ -10,7 +10,7 @@ the method on the task store (store root `~/.ztd`).
 | Path | Contents |
 | --- | --- |
 | `skills/` | The 10 ZTD skills: `ztd` and its nine helpers (`ztd-collect`, `ztd-process`, `ztd-plan`, `ztd-do`, `ztd-review`, `ztd-trusted-system`, `ztd-simplify`, `ztd-knowledge`, `ztd-repo`) |
-| `commands/` | The commands `/ztd`, `/collect`, `/inbox`, `/plan`, `/focus`, `/week`, `/goal`, `/journal`, `/routine`, `/simplify`, `/learn`, `/repo`, `/ztd-review` |
+| `commands/` | `/ztd` plus the nested `/ztd/collect`, `/ztd/inbox`, `/ztd/plan`, `/ztd/focus`, `/ztd/week`, `/ztd/goal`, `/ztd/journal`, `/ztd/routine`, `/ztd/simplify`, `/ztd/learn`, `/ztd/repo`, `/ztd/review` |
 | `agents/ztd.md` | The `ztd` agent: a thin role that orchestrates capture, process, plan, do and review |
 
 ## Install globally
@@ -42,7 +42,9 @@ ztd init "$STORE"           # creates the store structure in $STORE
 cp method/templates/*.md "$STORE/templates/"
 ```
 
-The commands are OpenCode prompts: they run as `/name` in sessions that discover
+The commands are OpenCode prompts: `/ztd` is the entry point and the rest are
+nested as `/ztd/<name>` (for example `/ztd/plan`, `/ztd/review`), which OpenCode
+derives from `commands/ztd/<name>.md`. They run in sessions that discover
 `commands/`; the agent has ID `ztd`. The script installs globally; for
 project-only discovery, copy the same `skills/`, `commands/` and `agents/`
 directories into that project's `.opencode/` tree. Never copy assets into a
