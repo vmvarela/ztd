@@ -1,132 +1,70 @@
-//! Copy-only format-1 to format-2 store converter (`ztd migrate`).
+//! Copy-only format-1 → format-2 store converter (English canonical v2).
 //!
-//! Both paths are explicit store directories: neither the working directory
-//! nor `ZTD_ROOT` selects them. The source is read-only, the destination must
-//! not exist and its parent must. Conversion runs in a private sibling stage,
-//! the completed stage is validated with the strict format-2 checker and is
-//! promoted with `std.Io.Dir.renamePreserve`, which never replaces an existing
-//! destination. There is no inverse conversion and no live cutover.
+//! `run` reads an exact source store directory, converts the recognized
+//! format-1 structural vocabulary into format 2, copies everything else
+//! byte-for-byte, and promotes the staged result into a new exact
+//! destination directory. The source is never written to and never locked;
+//! the destination is never replaced.
 //!
-//! What is transformed — and nothing else:
+//! Interface (as wired by `ztd migrate --from --to [--dry-run]`):
 //!
-//! - reserved field names on the five canonical lists (`contexto` → `context`,
-//!   `cliente` → `client`, `proyecto` → `project`, `capturada` → `captured_at`,
-//!   `cerrada` → `closed_at`, `espera` → `waiting_on`, `resolución` →
-//!   `resolution`);
-//! - recognized `contexts.md` header cells in the first table row (`Contexto`
-//!   → `Context`, `Uso` → `Use`, `Clientes` → `Clients`, `Conocimiento` →
-//!   `Knowledge`);
-//! - `config.json`: `format` 1 → 2, with every other JSON property preserved
-//!   (re-serialised, values intact). A missing config is synthesised as
-//!   `{"format":2,"policy":{"requireClientFor":[],"clientOnlyIn":[]}}` only
-//!   when canonical v1 structure plus structural v1 evidence (a legacy task
-//!   field, a `Contexto` header cell or a format-1 routine token) establishes
-//!   the source as format 1; policy is never inferred from tasks;
-//! - present `routines/state.md` header/cadence/day tokens (`rutina` →
-//!   `routine`, `cadencia` → `cadence`, `último` → `last`, `diaria` → `daily`,
-//!   `semanal:<día>` → `weekly:<day>` with `lun…dom` → `mon…sun`). Row dates
-//!   are preserved byte for byte. A genuinely absent routine file is seeded
-//!   with the current v2 defaults (`inbox`, `plan`, `review`) dated at the one
-//!   captured conversion date — an initial scheduling baseline, not completed
-//!   history — and reported as such.
+//!     run(io, alloc, opts: Options, diagnostics) !Report
+//!     errorName(err) []const u8
 //!
-//! Titles, user values, field order, custom fields and every unrelated
-//! regular-file byte are copied verbatim. `.git` administration and `.state`
-//! are excluded from the copy. Opaque copies read raw bytes (`Dir.readFileAlloc`),
-//! never `Store.read`, which normalises CRLF; renames are done on the parsed
-//! field slice, never `Task.set`, which can overwrite a collision.
+//! `Options.from` and `Options.to` are exact store directories (no `ztd`
+//! suffix is appended); `Options.today` is the single date stamped when a
+//! missing routine table must be seeded. `dry_run` performs the same
+//! read-only preflight and in-memory structural transformation checks but
+//! creates no files, directories, locks or reports; only the real staged run
+//! performs the full v2 `Engine.check`, reported as `checked: true` (a dry
+//! run reports `false`). A refusal — and every staged-check error — appends
+//! human-readable lines to `diagnostics` when it is provided; the caller
+//! owns the list.
 //!
-//! Refusals (destination untouched, source never written): existing or
-//! dangling destination, missing parent, source/destination overlap or alias,
-//! a pending source journal, malformed canonical task lines, duplicate ids or
-//! fields, mixed format-1/format-2 signals, any key-renaming collision,
-//! a present-but-malformed/empty/unreadable routine table, a config that is
-//! not format 1, symlink or special files anywhere in the copied tree, a
-//! source that changes between the two inventory snapshots, and a staged copy
-//! that fails the strict format-2 check.
+//! The error set is inferred: it contains every member of `Error` below plus
+//! any I/O errors from `std.Io`. `errorName` maps them to CLI codes
+//! (`ambiguous_source`, `mixed_signals`, `key_collision`, …) with the
+//! engine's vocabulary as the fallback.
 //!
-//! Dry run (`Options.dry_run`) performs every preflight and all transformations
-//! in memory and writes nothing: no source, destination, stage, lock or report
-//! file. The one validation it cannot perform is the strict format-2 check of
-//! the completed copy, because that check walks a real staged directory;
-//! `Report.checked` is false for a dry run and true after a real promotion.
-//!
-//! Quiescence: this module never locks exclusively and never creates a file in
-//! the source. A real run calls `Store.lock(false)`, which takes a shared lock
-//! only when the source already has `.state/lock` (nothing is created when it
-//! is absent; a ztd writer cannot be active then) and fails closed if that
-//! existing lock cannot be opened. The inventory and content hashes of the
-//! copied set are taken before and after the conversion; any difference aborts
-//! with `error.SourceChanged` and never repairs or rewrites the source.
-//! Changes confined to `.git` or `.state` are not detected because those are
-//! not copied. A writer that ignores the ztd lock can still change the source
-//! in the window between the final snapshot and the promotion rename; it can
-//! neither corrupt the source (it is never written) nor leave a partial
-//! destination (the promotion is a single no-replace rename). A dry run takes
-//! no lock at all. The whole source store is held in memory while converting
-//! (each file is capped at `store.max_file_bytes`).
+//! A refusal returns an error: no destination is created and the CLI must
+//! exit nonzero. `.git` and `.state` administration is excluded only at the
+//! top level of the source; nested `.git`/`.state` content is ordinary
+//! data and is copied.
 
 const std = @import("std");
 const builtin = @import("builtin");
-const engine = @import("engine.zig");
 const model = @import("model.zig");
 const platform = @import("platform.zig");
 const routine = @import("routine.zig");
+const engine = @import("engine.zig");
 const store_mod = @import("store.zig");
-const config_mod = @import("config.zig");
 
-const Sha256 = std.crypto.hash.sha2.Sha256;
-
-/// The format a convertible source declares in `config.json` (or establishes
-/// structurally when the file is missing).
-const legacy_format: u32 = 1;
-
-/// The five lists whose reserved field names are translated.
-const canonical_lists = [_][]const u8{
-    "inbox.md",         "lists/next.md",    "lists/waiting.md",
-    "lists/someday.md", "lists/archive.md",
-};
-
-/// Top-level administration excluded from the copy.
-const excluded_top = [_][]const u8{ ".git", ".state" };
-
-const FieldRename = struct { from: []const u8, to: []const u8 };
-
-/// Format-1 reserved field names, paired with their format-2 spelling. Kept in
-/// sync with `model.legacy_fields` by a test below.
-const field_renames = [_]FieldRename{
-    .{ .from = "contexto", .to = "context" },
-    .{ .from = "cliente", .to = "client" },
-    .{ .from = "proyecto", .to = "project" },
-    .{ .from = "capturada", .to = "captured_at" },
-    .{ .from = "cerrada", .to = "closed_at" },
-    .{ .from = "espera", .to = "waiting_on" },
-    .{ .from = "resolución", .to = "resolution" },
-};
-
-const context_header_renames = [_]FieldRename{
-    .{ .from = "Contexto", .to = "Context" },
-    .{ .from = "Uso", .to = "Use" },
-    .{ .from = "Clientes", .to = "Clients" },
-    .{ .from = "Conocimiento", .to = "Knowledge" },
-};
-
-const routine_header_renames = [_]FieldRename{
-    .{ .from = "rutina", .to = "routine" },
-    .{ .from = "cadencia", .to = "cadence" },
-    .{ .from = "último", .to = "last" },
-};
-
-const day_renames = [_]FieldRename{
-    .{ .from = "lun", .to = "mon" },
-    .{ .from = "mar", .to = "tue" },
-    .{ .from = "mié", .to = "wed" },
-    .{ .from = "mie", .to = "wed" },
-    .{ .from = "jue", .to = "thu" },
-    .{ .from = "vie", .to = "fri" },
-    .{ .from = "sáb", .to = "sat" },
-    .{ .from = "sab", .to = "sat" },
-    .{ .from = "dom", .to = "sun" },
+/// Domain errors of the conversion. `run` may also return any `std.Io` error.
+pub const Error = error{
+    SourceNotFound,
+    DestinationExists,
+    DestinationParentMissing,
+    InvalidDestination,
+    PathOverlap,
+    PendingTransaction,
+    InvalidStoreStructure,
+    InvalidConfig,
+    /// An explicit config.json format other than exactly 1.
+    UnsupportedFormat,
+    /// Missing config without any format-1 structural marker.
+    AmbiguousSource,
+    /// Missing config whose markers are format-2 or mixed.
+    MixedSignals,
+    MalformedTask,
+    DuplicateId,
+    KeyCollision,
+    MalformedRoutine,
+    /// A symlink or special file inside the copied tree.
+    UnsupportedEntry,
+    /// The source inventory changed while converting.
+    SourceChanged,
+    /// The staged strict format-2 check rejected the converted copy.
+    StageInvalid,
 };
 
 pub const Options = struct {
@@ -141,15 +79,20 @@ pub const Options = struct {
 };
 
 pub const Report = struct {
+    /// Source path exactly as passed by the caller.
     from: []const u8,
+    /// Destination path exactly as passed by the caller.
     to: []const u8,
     dry_run: bool,
     /// `rewritten` (config.json was present) or `synthesized` (absent and
     /// established as format 1; policy arrays are empty).
     config: []const u8,
-    /// `transformed`, `unchanged` or `seeded` (absent routine file).
+    /// `transformed` (existing table converted) or `seeded` (absent routine
+    /// file, stamped with `seed_date`).
     routines: []const u8,
-    /// Regular files in the copy plan (or written to the stage).
+    /// Set when `routines` is `seeded`: the single captured date (YYYY-MM-DD).
+    seed_date: ?[]const u8,
+    /// Regular source files in the copy set (converted or copied verbatim).
     files: usize,
     /// Canonical task lines examined.
     tasks: usize,
@@ -160,615 +103,1014 @@ pub const Report = struct {
     checked: bool,
 };
 
+/// Legacy task key → English format-2 key. Kept in lockstep with
+/// `model.legacy_fields` (asserted by a test below).
+const key_renames = [_]struct { from: []const u8, to: []const u8 }{
+    .{ .from = "contexto", .to = "context" },
+    .{ .from = "cliente", .to = "client" },
+    .{ .from = "proyecto", .to = "project" },
+    .{ .from = "capturada", .to = "captured_at" },
+    .{ .from = "cerrada", .to = "closed_at" },
+    .{ .from = "espera", .to = "waiting_on" },
+    .{ .from = "resolución", .to = "resolution" },
+};
+
+/// The seven canonical format-2 task keys; their presence is v2 evidence.
+const english_keys = [_][]const u8{
+    "context",   "client",     "project",    "captured_at",
+    "closed_at", "waiting_on", "resolution",
+};
+
+const task_list_rels = [_][]const u8{
+    "inbox.md",
+    "lists/next.md",
+    "lists/waiting.md",
+    "lists/someday.md",
+    "lists/archive.md",
+};
+
+/// Canonical structure every source must have: contexts plus the five lists.
+const required_rels = [_][]const u8{
+    "contexts.md",
+    "inbox.md",
+    "lists/next.md",
+    "lists/waiting.md",
+    "lists/someday.md",
+    "lists/archive.md",
+};
+
+const routines_rel = "routines/state.md";
+const config_rel = "config.json";
+const contexts_rel = "contexts.md";
+
+/// The synthesized config for the inferred path: format 2 and the baseline
+/// empty policy arrays, nothing else.
+const synthesized_config =
+    "{\"format\":2,\"policy\":{\"requireClientFor\":[],\"clientOnlyIn\":[]}}\n";
+
+const Special = enum { config, contexts, task_list, routines, verbatim };
+
 /// Convert a format-1 store at `opts.from` into a new format-2 store at
-/// `opts.to`. `diagnostics`, when provided, receives human-readable detail
-/// for any refusal (and for every staged-check error) allocated from the
-/// caller's `alloc`; the caller owns and frees the list.
-pub fn run(io: std.Io, alloc: std.mem.Allocator, opts: Options, diagnostics: ?*std.ArrayList([]const u8)) !Report {
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    var c = Ctx{ .io = io, .a = arena.allocator(), .alloc = alloc, .diag = diagnostics };
+/// `opts.to`. Both are exact directories: the source must exist, the
+/// destination must not, and its parent must exist. Equality, overlap and
+/// symlink aliases of the two paths are rejected. `diagnostics`, when
+/// provided, receives one human-readable line per refusal and one line per
+/// staged-check error; the strings come from `alloc` and the caller owns the
+/// list.
+pub fn run(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    opts: Options,
+    diagnostics: ?*std.ArrayList([]const u8),
+) !Report {
+    const source_path = opts.from;
+    const destination_path = opts.to;
+    const dry_run = opts.dry_run;
+    const today = opts.today;
 
-    if (opts.from.len == 0) return c.fail("migrate needs a source path", .{}, error.InvalidWorkspace);
-    if (opts.to.len == 0) return c.fail("migrate needs a destination path", .{}, error.InvalidWorkspace);
-
-    const cwd = std.Io.Dir.cwd();
-
-    // Source: an existing directory. A symlinked root is allowed; resolved
-    // paths are used for the overlap check below.
-    if (cwd.statFile(io, opts.from, .{})) |st| {
-        if (st.kind != .directory) return c.fail("source is not a directory: {s}", .{opts.from}, error.InvalidWorkspace);
-    } else |err| switch (err) {
-        error.FileNotFound => return c.fail("source store not found: {s}", .{opts.from}, error.InvalidWorkspace),
+    // ---- path preflight: no writes, no locks, no source state ----
+    var src = openExact(io, source_path) catch |err| switch (err) {
+        error.FileNotFound => {
+            note(diagnostics, alloc, "source store not found: {s}", .{source_path});
+            return error.SourceNotFound;
+        },
         else => return err,
-    }
+    };
+    defer src.close(io);
+    var src_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const src_n = try src.realPath(io, &src_buf);
+    const src_real = src_buf[0..src_n];
 
-    // Destination: absent — a dangling symlink counts as existing — with an
-    // existing directory parent.
-    if (cwd.statFile(io, opts.to, .{ .follow_symlinks = false })) |_| {
-        return c.fail("destination already exists: {s}", .{opts.to}, error.DestinationExists);
-    } else |err| switch (err) {
-        error.FileNotFound => {},
+    const trimmed_dest = trimTrailingSeps(destination_path);
+    const dest_base = std.fs.path.basename(trimmed_dest);
+    if (dest_base.len == 0 or std.mem.eql(u8, dest_base, ".") or std.mem.eql(u8, dest_base, "..")) {
+        note(diagnostics, alloc, "destination has no usable directory name: {s}", .{destination_path});
+        return error.InvalidDestination;
+    }
+    const parent_path = std.fs.path.dirname(trimmed_dest) orelse ".";
+    var parent = openExact(io, parent_path) catch |err| switch (err) {
+        error.FileNotFound => {
+            note(diagnostics, alloc, "destination parent does not exist: {s}", .{parent_path});
+            return error.DestinationParentMissing;
+        },
         else => return err,
+    };
+    defer parent.close(io);
+    var parent_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const parent_n = try parent.realPath(io, &parent_buf);
+    const parent_real = parent_buf[0..parent_n];
+    const dest_real = try std.fs.path.join(alloc, &.{ parent_real, dest_base });
+    defer alloc.free(dest_real);
+
+    if (isWithin(src_real, dest_real) or isWithin(dest_real, src_real)) {
+        note(diagnostics, alloc, "source and destination overlap: {s} and {s}", .{ source_path, destination_path });
+        return error.PathOverlap;
     }
-    const parent_path = std.fs.path.dirname(opts.to) orelse ".";
-    if (cwd.statFile(io, parent_path, .{})) |st| {
-        if (st.kind != .directory) return c.fail("destination parent is not a directory: {s}", .{parent_path}, error.InvalidWorkspace);
-    } else |err| switch (err) {
-        error.FileNotFound => return c.fail("destination parent does not exist: {s}", .{parent_path}, error.InvalidWorkspace),
-        else => return err,
-    }
-    const base_to = std.fs.path.basename(opts.to);
-    if (base_to.len == 0 or std.mem.eql(u8, base_to, ".") or std.mem.eql(u8, base_to, ".."))
-        return c.fail("destination must name a directory: {s}", .{opts.to}, error.InvalidWorkspace);
-
-    const real_from = try realPath(&c, opts.from);
-    const real_parent = try realPath(&c, parent_path);
-    const real_to = try std.fs.path.join(c.a, &.{ real_parent, base_to });
-    if (nested(real_to, real_from) or nested(real_from, real_to))
-        return c.fail("source and destination overlap: {s} and {s}", .{ opts.from, opts.to }, error.PathOverlap);
-
-    // Read-only coordination with existing ztd writers. `Store.lock(false)`
-    // creates nothing when the source has no lock file; it is skipped
-    // entirely for a dry run, which writes nothing anywhere.
-    var src = try store_mod.Store.open(io, c.a, opts.from);
-    defer src.deinit();
-    if (!opts.dry_run) try src.lock(false);
-    if (src.exists(".state/pending.json"))
-        return c.fail("source has a pending journal (.state/pending.json); run `ztd recover` first", .{}, error.PendingTransaction);
-
-    const before = try snapshot(&c, opts.from);
-
-    for (canonical_lists) |rel| {
-        if (findEntry(before, rel) == null)
-            return c.fail("source is missing the canonical list {s}", .{rel}, error.InvalidWorkspace);
-    }
-    if (findEntry(before, "contexts.md") == null)
-        return c.fail("source is missing contexts.md", .{}, error.InvalidWorkspace);
-
-    var st: Stats = .{};
-    var seen: std.ArrayList([]const u8) = .empty;
-    var list_out: [canonical_lists.len][]const u8 = undefined;
-    for (canonical_lists, 0..) |rel, i| {
-        list_out[i] = try convertList(&c, rel, findEntry(before, rel).?.bytes, &seen, &st);
+    if (try destinationPresent(parent, io, dest_base)) {
+        note(diagnostics, alloc, "destination already exists: {s}", .{destination_path});
+        return error.DestinationExists;
     }
 
-    const contexts_out = try convertContexts(&c, findEntry(before, "contexts.md").?.bytes, &st);
-
-    const routines_entry = findEntry(before, routine.path);
-    var routines_out: []const u8 = undefined;
-    if (routines_entry) |e| {
-        routines_out = try convertRoutines(&c, e.bytes, &st);
-        // Rows are arena-owned; the parse itself is the validation.
-        _ = routine.parse(c.a, routines_out) catch |err| switch (err) {
-            error.DuplicateId => return c.fail("routines/state.md: duplicate routine id", .{}, error.DuplicateId),
-            error.MalformedRoutine => return c.fail("routines/state.md: malformed or empty routine table", .{}, error.MalformedRoutine),
-            else => return err,
-        };
-    } else {
-        routines_out = try seedRoutines(&c, opts.today);
+    if (try pathPresentStrict(src, io, ".state/pending.json")) {
+        note(diagnostics, alloc, "source has a pending transaction: {s}/.state/pending.json", .{source_path});
+        return error.PendingTransaction;
     }
-
-    const config_entry = findEntry(before, "config.json");
-    var config_out: []const u8 = undefined;
-    var config_synthesized = false;
-    if (config_entry) |e| {
-        config_out = try convertConfig(&c, e.bytes);
-    } else {
-        if (!(st.legacy_evidence or st.contexts_evidence or st.routines_evidence))
-            return c.fail(
-                "config.json is missing and nothing establishes a format-1 source (need a legacy task field, a `Contexto` contexts.md header or a format-1 routine token)",
-                .{},
-                error.AmbiguousSource,
-            );
-        config_out = try synthesizeConfig(&c);
-        config_synthesized = true;
-    }
-    // An established format-1 store must not carry format-2 reserved keys:
-    // converting one would silently change the meaning of user data.
-    if (st.english) return c.fail("mixed format signals: {s}", .{st.english_where}, error.MixedSignals);
-
-    var plan: std.ArrayList(PlanEntry) = .empty;
-    var files: usize = 0;
-    for (before) |e| {
-        if (e.kind == .directory) {
-            try plan.append(c.a, .{ .rel = e.rel, .kind = .directory, .bytes = "" });
-            continue;
+    for (required_rels) |rel| {
+        if (!try pathPresentStrict(src, io, rel)) {
+            note(diagnostics, alloc, "source is missing canonical store file: {s}", .{rel});
+            return error.InvalidStoreStructure;
         }
-        const bytes: []const u8 = blk: {
-            if (canonicalIndex(e.rel)) |i| break :blk list_out[i];
-            if (std.mem.eql(u8, e.rel, "contexts.md")) break :blk contexts_out;
-            if (std.mem.eql(u8, e.rel, "config.json")) break :blk config_out;
-            if (std.mem.eql(u8, e.rel, routine.path)) break :blk routines_out;
-            break :blk e.bytes;
-        };
-        try plan.append(c.a, .{ .rel = e.rel, .kind = .file, .bytes = bytes });
-        files += 1;
     }
-    if (config_entry == null) {
-        try plan.append(c.a, .{ .rel = "config.json", .kind = .file, .bytes = config_out });
-        files += 1;
-    }
-    if (routines_entry == null) {
-        try plan.append(c.a, .{ .rel = routine.path, .kind = .file, .bytes = routines_out });
-        files += 1;
-    }
+    const routines_present = try pathPresentStrict(src, io, routines_rel);
 
-    var report = Report{
-        .from = opts.from,
-        .to = opts.to,
-        .dry_run = opts.dry_run,
-        .config = if (config_synthesized) "synthesized" else "rewritten",
-        .routines = if (routines_entry == null)
-            "seeded"
-        else if (std.mem.eql(u8, routines_entry.?.bytes, routines_out))
-            "unchanged"
-        else
-            "transformed",
-        .files = files,
-        .tasks = st.tasks,
-        .fields_renamed = st.fields_renamed,
-        .checked = false,
+    // ---- uniquely owned sibling staging directory (real runs only) ----
+    var stage: ?Stage = null;
+    defer if (stage) |*s| {
+        if (s.dir) |d| d.close(io);
+        parent.deleteTree(io, s.name) catch {};
+    };
+    if (!dry_run) stage = try createStage(io, alloc, parent, dest_base, parent_real);
+
+    // ---- inventory before conversion (source consistency baseline) ----
+    var before = try inventory(io, alloc, src);
+    defer before.deinit();
+
+    // ---- conversion pass: transform canonical files, copy the rest ----
+    var stats = Stats{ .routines_present = routines_present };
+    defer {
+        for (stats.ids.items) |id| alloc.free(id);
+        stats.ids.deinit(alloc);
+    }
+    convert(io, alloc, src, if (stage) |*s| s else null, &stats) catch |err| {
+        note(diagnostics, alloc, "conversion refused: {s}", .{@errorName(err)});
+        return err;
     };
 
-    if (opts.dry_run) {
-        const after = try snapshot(&c, opts.from);
-        if (!sameSnapshot(before, after)) return c.fail("source changed during the dry run", .{}, error.SourceChanged);
-        return report;
+    // One task id may appear only once across the canonical lists.
+    std.mem.sort([]const u8, stats.ids.items, {}, lessThanId);
+    var i: usize = 1;
+    while (i < stats.ids.items.len) : (i += 1) {
+        if (std.mem.eql(u8, stats.ids.items[i - 1], stats.ids.items[i])) {
+            note(diagnostics, alloc, "duplicate task id in the canonical lists: {s}", .{stats.ids.items[i]});
+            return error.DuplicateId;
+        }
     }
 
-    // Private sibling stage of the destination, unique per attempt.
-    const stage_name = try stageName(&c, base_to);
-    var parent_dir = try openDirPath(io, parent_path, .{});
-    defer parent_dir.close(io);
-    if (parent_dir.statFile(io, stage_name, .{ .follow_symlinks = false })) |_| {
-        return c.fail("staging path already exists: {s}", .{stage_name}, error.PathAlreadyExists);
-    } else |err| switch (err) {
-        error.FileNotFound => {},
+    // ---- source must not change while we convert ----
+    verifyUnchanged(io, alloc, src, &before) catch |err| switch (err) {
+        error.SourceChanged => {
+            note(diagnostics, alloc, "source changed during conversion: {s}", .{source_path});
+            return error.SourceChanged;
+        },
         else => return err,
+    };
+    if (try pathPresentStrict(src, io, ".state/pending.json")) {
+        note(diagnostics, alloc, "source gained a pending transaction: {s}/.state/pending.json", .{source_path});
+        return error.PendingTransaction;
     }
-    try parent_dir.createDirPath(io, stage_name);
-    var stage_live = true;
-    defer if (stage_live) parent_dir.deleteTree(io, stage_name) catch {};
-    const stage_path = try std.fs.path.join(c.a, &.{ parent_path, stage_name });
 
-    {
-        var stage_store = try store_mod.Store.open(io, c.a, stage_path);
-        defer stage_store.deinit();
-        for (plan.items) |p| switch (p.kind) {
-            .directory => stage_store.dir.createDirPath(io, p.rel) catch |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => return err,
-            },
-            .file => {
-                if (std.fs.path.dirname(p.rel)) |d| stage_store.dir.createDirPath(io, d) catch |err| switch (err) {
-                    error.PathAlreadyExists => {},
-                    else => return err,
-                };
-                try stage_store.writeAtomic(p.rel, p.bytes);
-            },
+    // ---- config decision (explicit format 1, or strict-v1 inference) ----
+    const config_result: []const u8 = blk: {
+        if (stats.config_seen) {
+            // An explicit format-1 config whose store already carries
+            // format-2 markers is mixed evidence too: an English task key
+            // would be reinterpreted as a reserved v2 field after conversion.
+            if (stats.tasks_v2 or stats.contexts_v2_header) {
+                note(diagnostics, alloc, "format-1 config with format-2 markers: {s}", .{source_path});
+                return error.MixedSignals;
+            }
+            break :blk "rewritten";
+        }
+        const v1_evidence = stats.contexts_rewritten or stats.tasks_v1 or routines_present;
+        const v2_evidence = stats.contexts_v2_header or stats.tasks_v2;
+        // Format-2 or mixed markers with no explicit config are never
+        // converted; without any v1 marker the source is ambiguous.
+        if (v2_evidence) {
+            note(diagnostics, alloc, "missing config with format-2 or mixed evidence: {s}", .{source_path});
+            return error.MixedSignals;
+        }
+        if (!v1_evidence) {
+            note(diagnostics, alloc, "missing config without a format-1 marker: {s}", .{source_path});
+            return error.AmbiguousSource;
+        }
+        if (stage) |*st| if (st.dir) |d| try d.writeFile(io, .{ .sub_path = config_rel, .data = synthesized_config });
+        break :blk "synthesized";
+    };
+
+    // ---- routine table: convert or seed the baseline ----
+    const routines_result: []const u8 = if (routines_present) "transformed" else "seeded";
+    const seed_date: ?[]const u8 = if (routines_present) null else blk: {
+        var buf: [10]u8 = undefined;
+        const date = try alloc.dupe(u8, today.format(&buf));
+        if (stage) |*st| if (st.dir) |d| {
+            const seed_text = try seedRoutineText(alloc, date);
+            defer alloc.free(seed_text);
+            try d.createDirPath(io, "routines");
+            try d.writeFile(io, .{ .sub_path = routines_rel, .data = seed_text });
+        };
+        break :blk date;
+    };
+
+    if (dry_run) {
+        return Report{
+            .from = try alloc.dupe(u8, source_path),
+            .to = try alloc.dupe(u8, destination_path),
+            .dry_run = true,
+            .config = config_result,
+            .routines = routines_result,
+            .seed_date = seed_date,
+            .tasks = stats.tasks,
+            .fields_renamed = stats.renamed,
+            .files = stats.files,
+            .checked = false,
         };
     }
 
-    // The completed copy must pass the strict format-2 checker before it can
-    // become the destination; every error is reported through diagnostics.
+    // ---- staged strict v2 check ----
+    const st = &stage.?;
     {
-        var eng = try engine.Engine.init(io, c.a, stage_path, opts.today, false);
+        var eng = engine.Engine.init(io, alloc, st.path, today, true) catch |err| {
+            note(diagnostics, alloc, "staged store cannot be opened: {s}", .{@errorName(err)});
+            return err;
+        };
         defer eng.deinit();
         const res = try eng.check(true);
         if (res.errors.len > 0) {
-            for (res.errors) |e| appendDiag(&c, e);
-            return c.fail("the staged copy failed the strict format-2 check ({d} error(s))", .{res.errors.len}, error.StageInvalid);
+            if (diagnostics) |d| {
+                for (res.errors) |e| d.append(alloc, e) catch {};
+            }
+            return error.StageInvalid;
         }
     }
+    // Drop the operational state the exclusive engine lock created; the
+    // destination must not carry it.
+    if (st.dir) |d| try d.deleteTree(io, ".state");
 
-    const after = try snapshot(&c, opts.from);
-    if (!sameSnapshot(before, after))
-        return c.fail("source changed during conversion; nothing was written to the destination", .{}, error.SourceChanged);
+    const report = Report{
+        .from = try alloc.dupe(u8, source_path),
+        .to = try alloc.dupe(u8, destination_path),
+        .dry_run = false,
+        .config = config_result,
+        .routines = routines_result,
+        .seed_date = seed_date,
+        .tasks = stats.tasks,
+        .fields_renamed = stats.renamed,
+        .files = stats.files,
+        .checked = true,
+    };
 
-    // No-replace promotion: on any failure the destination stays absent and
-    // only our own stage is removed. Never a replacing rename.
-    std.Io.Dir.renamePreserve(parent_dir, stage_name, parent_dir, base_to, io) catch |err| switch (err) {
-        error.PathAlreadyExists => return c.fail("destination appeared during conversion: {s}", .{opts.to}, error.DestinationExists),
+    // ---- atomic promotion, never replacing an existing destination ----
+    if (st.dir) |d| {
+        d.close(io);
+        st.dir = null;
+    }
+    parent.renamePreserve(st.name, parent, dest_base, io) catch |err| switch (err) {
+        // A concurrent creator won the destination: fail without touching it.
+        error.PathAlreadyExists => {
+            note(diagnostics, alloc, "destination appeared during conversion: {s}", .{destination_path});
+            return error.DestinationExists;
+        },
         else => return err,
     };
-    stage_live = false;
     // Same durability step as `Store.writeAtomic`: the rename is on disk.
     if (builtin.os.tag != .windows) {
-        _ = std.c.fsync(parent_dir.handle);
+        _ = std.c.fsync(parent.handle);
     }
-
-    report.checked = true;
     return report;
 }
 
-/// Stable JSON codes for migration-specific refusals; shared refusals fall
-/// through to `engine.errorName`.
+/// Appends one human-readable refusal/check detail line; the string is
+/// allocated from `alloc` and owned by the diagnostics list.
+fn note(diag: ?*std.ArrayList([]const u8), alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) void {
+    if (diag) |d| {
+        const msg = std.fmt.allocPrint(alloc, fmt, args) catch return;
+        d.append(alloc, msg) catch {};
+    }
+}
+
+/// Stable error codes for CLI output; everything unmapped falls through to
+/// the engine vocabulary (`invalid_field`, `pending_transaction`, …).
 pub fn errorName(err: anyerror) []const u8 {
     return switch (err) {
         error.AmbiguousSource => "ambiguous_source",
         error.MixedSignals => "mixed_signals",
+        error.UnsupportedFormat => "unsupported_format",
         error.KeyCollision => "key_collision",
         error.DestinationExists => "destination_exists",
         error.PathOverlap => "path_overlap",
         error.UnsupportedEntry => "unsupported_entry",
         error.StageInvalid => "stage_invalid",
         error.SourceChanged => "source_changed",
+        error.SourceNotFound,
+        error.DestinationParentMissing,
+        error.InvalidDestination,
+        error.InvalidStoreStructure,
+        => "invalid_workspace",
         else => engine.errorName(err),
     };
 }
 
-const Ctx = struct {
-    io: std.Io,
-    /// Run-scoped arena: all conversion data lives exactly as long as `run`.
-    a: std.mem.Allocator,
-    /// Caller's allocator: diagnostics outlive the arena.
-    alloc: std.mem.Allocator,
-    diag: ?*std.ArrayList([]const u8),
-
-    fn fail(self: *const Ctx, comptime fmt: []const u8, args: anytype, err: anyerror) anyerror {
-        if (self.diag) |d| {
-            const msg = std.fmt.allocPrint(self.alloc, fmt, args) catch return err;
-            d.append(self.alloc, msg) catch {};
-        }
-        return err;
-    }
+const Stage = struct {
+    dir: ?std.Io.Dir,
+    /// Single path component, sibling of the destination, relative to parent.
+    name: []const u8,
+    /// Absolute path (parent real path + name), for `Engine.init`.
+    path: []const u8,
 };
-
-fn appendDiag(c: *Ctx, msg: []const u8) void {
-    if (c.diag) |d| {
-        const copy = c.alloc.dupe(u8, msg) catch return;
-        d.append(c.alloc, copy) catch {};
-    }
-}
 
 const Stats = struct {
+    routines_present: bool,
+    /// Owned task ids collected during conversion, sorted for the
+    /// duplicate-id rejection.
+    ids: std.ArrayList([]const u8) = .empty,
+    files: usize = 0,
     tasks: usize = 0,
-    fields_renamed: usize = 0,
-    /// A legacy reserved field on a canonical task line.
-    legacy_evidence: bool = false,
-    /// A format-1 routine header or cadence token.
-    routines_evidence: bool = false,
-    /// A recognized format-1 contexts.md header cell.
-    contexts_evidence: bool = false,
-    /// A format-2 reserved key found in an established format-1 store.
-    english: bool = false,
-    english_where: []const u8 = "",
+    renamed: usize = 0,
+    contexts_rewritten: bool = false,
+    contexts_v2_header: bool = false,
+    tasks_v1: bool = false,
+    tasks_v2: bool = false,
+    config_seen: bool = false,
 };
 
-const EntryKind = enum { file, directory };
+/// Opens an exact directory path (absolute or cwd-relative) without walking.
+fn openExact(io: std.Io, path: []const u8) !std.Io.Dir {
+    const options: std.Io.Dir.OpenOptions = .{ .iterate = true };
+    if (std.fs.path.isAbsolute(path)) {
+        return std.Io.Dir.openDirAbsolute(io, path, options);
+    }
+    return std.Io.Dir.cwd().openDir(io, path, options);
+}
 
-const Entry = struct {
-    rel: []const u8,
-    kind: EntryKind,
-    bytes: []const u8,
-    hash: [32]u8,
+/// No-follow presence check for the destination: a symlink entry counts as
+/// present even when it dangles, so the refusal happens here with an honest
+/// diagnostic instead of at promotion.
+fn destinationPresent(dir: std.Io.Dir, io: std.Io, rel: []const u8) !bool {
+    _ = dir.statFile(io, rel, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return true;
+}
+
+fn pathPresentStrict(dir: std.Io.Dir, io: std.Io, rel: []const u8) !bool {
+    dir.access(io, rel, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return true;
+}
+
+fn trimTrailingSeps(path: []const u8) []const u8 {
+    var end = path.len;
+    while (end > 1 and path[end - 1] == std.fs.path.sep) end -= 1;
+    return path[0..end];
+}
+
+/// True when `child` is `parent` itself or lives underneath it. Both paths
+/// must be canonical and separator-normalized (no trailing separator except
+/// the filesystem root).
+fn isWithin(parent: []const u8, child: []const u8) bool {
+    if (!std.mem.startsWith(u8, child, parent)) return false;
+    if (child.len == parent.len) return true;
+    const sep = std.fs.path.sep;
+    if (parent[parent.len - 1] == sep) return true;
+    return child[parent.len] == sep;
+}
+
+/// Walker paths become `/`-separated, matching the rest of the product
+/// (`engine.check` normalizes the same way).
+fn normalizeRel(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
+    const out = try alloc.dupe(u8, raw);
+    for (out) |*c| {
+        if (c.* == '\\') c.* = '/';
+    }
+    return out;
+}
+
+/// Only a top-level `.git` or `.state` is excluded from the copy; nested
+/// ones are ordinary content and are copied byte-for-byte.
+fn isExcluded(rel: []const u8) bool {
+    const first_end = std.mem.indexOfScalar(u8, rel, '/') orelse rel.len;
+    const first = rel[0..first_end];
+    return std.mem.eql(u8, first, ".git") or std.mem.eql(u8, first, ".state");
+}
+
+fn eqlPath(rel: []const u8, parts: []const []const u8) bool {
+    var it = std.mem.splitScalar(u8, rel, '/');
+    for (parts) |part| {
+        const seg = it.next() orelse return false;
+        if (!std.mem.eql(u8, seg, part)) return false;
+    }
+    return it.next() == null;
+}
+
+fn classify(rel: []const u8) Special {
+    if (std.mem.eql(u8, rel, config_rel)) return .config;
+    if (std.mem.eql(u8, rel, contexts_rel)) return .contexts;
+    if (std.mem.eql(u8, rel, routines_rel)) return .routines;
+    for (task_list_rels) |list_rel| {
+        if (std.mem.eql(u8, rel, list_rel)) return .task_list;
+    }
+    return .verbatim;
+}
+
+/// Creates the unique sibling staging directory used for a real run.
+fn createStage(io: std.Io, alloc: std.mem.Allocator, parent: std.Io.Dir, dest_base: []const u8, parent_real: []const u8) !Stage {
+    var entropy: std.Random.IoSource = .{ .io = io };
+    const rnd = entropy.interface();
+    var attempt: u8 = 0;
+    while (attempt < 16) : (attempt += 1) {
+        var raw: [8]u8 = undefined;
+        rnd.bytes(&raw);
+        var hex_buf: [16]u8 = undefined;
+        const hex = "0123456789abcdef";
+        for (raw, 0..) |b, i| {
+            hex_buf[i * 2] = hex[b >> 4];
+            hex_buf[i * 2 + 1] = hex[b & 0xf];
+        }
+        const name = try std.fmt.allocPrint(alloc, "{s}.ztd-migrate-{s}", .{ dest_base, hex_buf });
+        parent.createDir(io, name, .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {
+                alloc.free(name);
+                continue;
+            },
+            else => {
+                alloc.free(name);
+                return err;
+            },
+        };
+        const path = try std.fs.path.join(alloc, &.{ parent_real, name });
+        const dir = parent.openDir(io, name, .{ .iterate = true }) catch |err| {
+            parent.deleteTree(io, name) catch {};
+            alloc.free(name);
+            alloc.free(path);
+            return err;
+        };
+        return .{ .dir = dir, .name = name, .path = path };
+    }
+    return error.SystemResources;
+}
+
+const Inventory = struct {
+    alloc: std.mem.Allocator,
+    entries: std.ArrayList(Entry),
+
+    const Kind = enum { dir, file };
+    const Entry = struct {
+        path: []const u8,
+        kind: Kind,
+        hash: [32]u8 = undefined,
+    };
+
+    fn deinit(self: *Inventory) void {
+        for (self.entries.items) |e| self.alloc.free(e.path);
+        self.entries.deinit(self.alloc);
+    }
 };
 
-const PlanEntry = struct {
-    rel: []const u8,
-    kind: EntryKind,
-    bytes: []const u8,
-};
-
-fn realPath(c: *Ctx, path: []const u8) ![]u8 {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try std.Io.Dir.cwd().realPathFile(c.io, path, &buf);
-    return c.a.dupe(u8, buf[0..n]);
+fn lessThanEntry(_: void, a: Inventory.Entry, b: Inventory.Entry) bool {
+    return std.mem.lessThan(u8, a.path, b.path);
 }
 
-/// True when `inner` is `outer` or lives inside it, comparing resolved paths.
-fn nested(inner: []const u8, outer: []const u8) bool {
-    if (std.mem.eql(u8, inner, outer)) return true;
-    if (outer.len == 0) return false;
-    if (outer[outer.len - 1] == std.fs.path.sep) return std.mem.startsWith(u8, inner, outer);
-    if (!std.mem.startsWith(u8, inner, outer)) return false;
-    return inner.len > outer.len and inner[outer.len] == std.fs.path.sep;
+fn lessThanId(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
 }
 
-fn openDirPath(io: std.Io, path: []const u8, opts: std.Io.Dir.OpenOptions) !std.Io.Dir {
-    if (std.fs.path.isAbsolute(path)) return std.Io.Dir.openDirAbsolute(io, path, opts);
-    return std.Io.Dir.cwd().openDir(io, path, opts);
+/// Content inventory of the copy set (everything except `.git` and `.state`),
+/// sorted for stable before/after comparison. Also rejects symlinks and
+/// special files: the copy set may contain only directories and regular files.
+fn inventory(io: std.Io, alloc: std.mem.Allocator, src: std.Io.Dir) !Inventory {
+    var inv = Inventory{ .alloc = alloc, .entries = .empty };
+    errdefer inv.deinit();
+    var walker = try src.walk(alloc);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        const rel = try normalizeRel(alloc, entry.path);
+        if (isExcluded(rel)) {
+            alloc.free(rel);
+            continue;
+        }
+        switch (entry.kind) {
+            .directory => try inv.entries.append(alloc, .{ .path = rel, .kind = .dir }),
+            .file => {
+                const bytes = try entry.dir.readFileAlloc(io, entry.basename, alloc, .limited(store_mod.max_file_bytes));
+                defer alloc.free(bytes);
+                var hash: [32]u8 = undefined;
+                std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+                try inv.entries.append(alloc, .{ .path = rel, .kind = .file, .hash = hash });
+            },
+            else => {
+                alloc.free(rel);
+                return error.UnsupportedEntry;
+            },
+        }
+    }
+    std.mem.sort(Inventory.Entry, inv.entries.items, {}, lessThanEntry);
+    return inv;
 }
 
-/// Inventory of the copied set: every regular file (raw bytes plus SHA-256)
-/// and every directory below `root`, excluding top-level `.git` and `.state`.
-/// Symlinks and special files are refused instead of followed or read.
-fn snapshot(c: *Ctx, root: []const u8) ![]Entry {
-    var out: std.ArrayList(Entry) = .empty;
-    var root_dir = try openDirPath(c.io, root, .{ .iterate = true });
-    defer root_dir.close(c.io);
-    try walk(c, &root_dir, "", &out);
-    std.mem.sort(Entry, out.items, {}, lessThan);
-    return out.toOwnedSlice(c.a);
+/// The source must be byte-identical to the baseline taken before conversion.
+fn verifyUnchanged(io: std.Io, alloc: std.mem.Allocator, src: std.Io.Dir, before: *const Inventory) !void {
+    var after = try inventory(io, alloc, src);
+    defer after.deinit();
+    if (after.entries.items.len != before.entries.items.len) return error.SourceChanged;
+    for (after.entries.items, before.entries.items) |a, b| {
+        if (a.kind != b.kind or !std.mem.eql(u8, a.path, b.path)) return error.SourceChanged;
+        if (a.kind == .file and !std.mem.eql(u8, &a.hash, &b.hash)) return error.SourceChanged;
+    }
 }
 
-fn walk(c: *Ctx, dir: *std.Io.Dir, prefix: []const u8, out: *std.ArrayList(Entry)) !void {
-    var it = dir.iterate();
-    while (try it.next(c.io)) |entry| {
-        if (prefix.len == 0 and isExcluded(entry.name)) continue;
-        const rel = if (prefix.len == 0)
-            try c.a.dupe(u8, entry.name)
-        else
-            try std.fmt.allocPrint(c.a, "{s}/{s}", .{ prefix, entry.name });
-        // lstat: a symlink or special file is rejected by kind before any read.
-        const st = try dir.statFile(c.io, entry.name, .{ .follow_symlinks = false });
-        switch (st.kind) {
+/// One conversion walk: transform the canonical files, copy everything else
+/// byte-for-byte, and record the markers `run` needs for config inference.
+fn convert(io: std.Io, alloc: std.mem.Allocator, src: std.Io.Dir, stage: ?*Stage, stats: *Stats) !void {
+    var walker = try src.walk(alloc);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        const rel = try normalizeRel(alloc, entry.path);
+        defer alloc.free(rel);
+        if (isExcluded(rel)) continue;
+        switch (entry.kind) {
             .directory => {
-                try out.append(c.a, .{ .rel = rel, .kind = .directory, .bytes = "", .hash = @splat(0) });
-                var sub = try dir.openDir(c.io, entry.name, .{ .iterate = true });
-                defer sub.close(c.io);
-                try walk(c, &sub, rel, out);
+                // Canonical files may never be directories.
+                if (classify(rel) != .verbatim) return error.InvalidStoreStructure;
+                if (stage) |s| if (s.dir) |d| try d.createDirPath(io, rel);
             },
             .file => {
-                const bytes = try dir.readFileAlloc(c.io, entry.name, c.a, .limited(store_mod.max_file_bytes));
-                var digest: [32]u8 = undefined;
-                Sha256.hash(bytes, &digest, .{});
-                try out.append(c.a, .{ .rel = rel, .kind = .file, .bytes = bytes, .hash = digest });
+                const bytes = try entry.dir.readFileAlloc(io, entry.basename, alloc, .limited(store_mod.max_file_bytes));
+                defer alloc.free(bytes);
+                stats.files += 1;
+                const out: []const u8 = switch (classify(rel)) {
+                    .config => blk: {
+                        stats.config_seen = true;
+                        break :blk try transformConfig(alloc, bytes);
+                    },
+                    .contexts => blk: {
+                        const r = try transformContexts(alloc, bytes);
+                        defer alloc.free(r.text);
+                        if (r.rewritten) stats.contexts_rewritten = true;
+                        if (r.v2_header) stats.contexts_v2_header = true;
+                        break :blk try alloc.dupe(u8, r.text);
+                    },
+                    .task_list => blk: {
+                        const r = try transformTasks(alloc, bytes, &stats.ids);
+                        defer alloc.free(r.text);
+                        stats.tasks += r.tasks;
+                        stats.renamed += r.renamed;
+                        if (r.saw_legacy) stats.tasks_v1 = true;
+                        if (r.saw_english) stats.tasks_v2 = true;
+                        break :blk try alloc.dupe(u8, r.text);
+                    },
+                    .routines => blk: {
+                        const r = try transformRoutines(alloc, bytes);
+                        defer alloc.free(r.text);
+                        break :blk try alloc.dupe(u8, r.text);
+                    },
+                    .verbatim => try alloc.dupe(u8, bytes),
+                };
+                defer alloc.free(out);
+                if (stage) |s| if (s.dir) |d| try d.writeFile(io, .{ .sub_path = rel, .data = out });
             },
-            else => return c.fail(
-                "{s}: unsupported entry ({s}); only regular files and directories can be converted",
-                .{ rel, @tagName(st.kind) },
-                error.UnsupportedEntry,
-            ),
+            else => return error.UnsupportedEntry,
         }
     }
 }
 
-fn isExcluded(name: []const u8) bool {
-    for (excluded_top) |x| if (std.mem.eql(u8, x, name)) return true;
-    return false;
+const TaskTransform = struct {
+    text: []u8,
+    tasks: usize,
+    renamed: usize,
+    saw_legacy: bool,
+    saw_english: bool,
+};
+
+const ContextsTransform = struct {
+    text: []u8,
+    rewritten: bool,
+    v2_header: bool,
+};
+
+fn isEscaped(s: []const u8, i: usize) bool {
+    var n: usize = 0;
+    var j = i;
+    while (j > 0 and s[j - 1] == '\\') : (j -= 1) n += 1;
+    return n % 2 == 1;
 }
 
-fn lessThan(_: void, lhs: Entry, rhs: Entry) bool {
-    return std.mem.lessThan(u8, lhs.rel, rhs.rel);
-}
-
-fn findEntry(entries: []const Entry, rel: []const u8) ?*const Entry {
-    for (entries) |*e| if (std.mem.eql(u8, e.rel, rel)) return e;
+/// Same separator rule as `model.parseLine`: an unescaped ` | `.
+fn findSeparator(s: []const u8) ?usize {
+    var i: usize = 0;
+    while (i + 3 <= s.len) : (i += 1) {
+        if (s[i] == ' ' and s[i + 1] == '|' and s[i + 2] == ' ' and !isEscaped(s, i + 1)) {
+            return i;
+        }
+    }
     return null;
 }
 
-fn sameSnapshot(a: []const Entry, b: []const Entry) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| {
-        if (!std.mem.eql(u8, x.rel, y.rel)) return false;
-        if (x.kind != y.kind) return false;
-        if (x.kind == .file and !std.mem.eql(u8, &x.hash, &y.hash)) return false;
+fn freeTask(alloc: std.mem.Allocator, task: model.Task) void {
+    // The fields list shares its buffer with the caller's copy; deinit on a
+    // mutable local frees the same allocation.
+    var t = task;
+    alloc.free(t.id);
+    alloc.free(t.title);
+    for (t.fields.items) |f| {
+        alloc.free(f.key);
+        alloc.free(f.value);
+    }
+    t.fields.deinit(alloc);
+}
+
+/// Splits `text` into lines while keeping each original terminator intact.
+const LineIterator = struct {
+    text: []const u8,
+    pos: usize = 0,
+
+    const Line = struct { content: []const u8, eol: []const u8 };
+
+    fn next(self: *LineIterator) ?Line {
+        if (self.pos >= self.text.len) return null;
+        const rest = self.text[self.pos..];
+        const nl = std.mem.indexOfScalar(u8, rest, '\n');
+        if (nl) |n| {
+            var content_end = n;
+            var eol: []const u8 = "\n";
+            if (content_end > 0 and rest[content_end - 1] == '\r') {
+                content_end -= 1;
+                eol = "\r\n";
+            }
+            self.pos += n + 1;
+            return .{ .content = rest[0..content_end], .eol = eol };
+        }
+        self.pos = self.text.len;
+        return .{ .content = rest, .eol = "" };
+    }
+};
+
+/// Converts the five canonical task lists: renames the seven legacy keys in
+/// place (byte-preserving everywhere else), rejecting malformed lines,
+/// duplicate fields/ids and any legacy→English key collision. The rewritten
+/// line is re-parsed before it is accepted.
+fn transformTasks(alloc: std.mem.Allocator, bytes: []const u8, ids: *std.ArrayList([]const u8)) !TaskTransform {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var res = TaskTransform{ .text = undefined, .tasks = 0, .renamed = 0, .saw_legacy = false, .saw_english = false };
+
+    var lines: LineIterator = .{ .text = bytes };
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line.content, "- [")) {
+            try out.appendSlice(alloc, line.content);
+            try out.appendSlice(alloc, line.eol);
+            continue;
+        }
+        // Fail closed on anything the product would refuse to load.
+        const parsed = model.parseLine(alloc, line.content) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.MalformedTask,
+        };
+        const task = parsed orelse {
+            try out.appendSlice(alloc, line.content);
+            try out.appendSlice(alloc, line.eol);
+            continue;
+        };
+        const id_copy = try alloc.dupe(u8, task.id);
+        ids.append(alloc, id_copy) catch |err| {
+            alloc.free(id_copy);
+            return err;
+        };
+        freeTask(alloc, task);
+        res.tasks += 1;
+
+        // Locate field segments and collect raw keys (escape-aware, so a
+        // legacy word inside an escaped pipe in the title is never renamed).
+        var ranges: std.ArrayList(struct { start: usize, end: usize, to: []const u8 }) = .empty;
+        defer ranges.deinit(alloc);
+        var field_keys: std.ArrayList([]const u8) = .empty;
+        defer field_keys.deinit(alloc);
+        var cursor: usize = 0;
+        var seg_index: usize = 0;
+        while (true) {
+            const rel_sep = findSeparator(line.content[cursor..]);
+            const end = if (rel_sep) |r| cursor + r else line.content.len;
+            if (seg_index >= 2) {
+                const segment = line.content[cursor..end];
+                if (std.mem.indexOf(u8, segment, ": ")) |c| {
+                    if (c > 0) {
+                        const raw_key = segment[0..c];
+                        try field_keys.append(alloc, raw_key);
+                        for (key_renames) |kr| {
+                            if (std.mem.eql(u8, raw_key, kr.from)) {
+                                try ranges.append(alloc, .{ .start = cursor, .end = cursor + c, .to = kr.to });
+                            }
+                        }
+                        for (english_keys) |ek| {
+                            if (std.mem.eql(u8, raw_key, ek)) res.saw_english = true;
+                        }
+                    }
+                }
+            }
+            seg_index += 1;
+            if (rel_sep == null) break;
+            cursor = end + 3;
+        }
+
+        // Any legacy key whose English target is already a field on this task
+        // is a collision — rejected even when the values would be equal.
+        for (ranges.items) |r| {
+            for (field_keys.items) |k| {
+                if (std.mem.eql(u8, k, r.to)) return error.KeyCollision;
+            }
+        }
+        if (ranges.items.len > 0) res.saw_legacy = true;
+        res.renamed += ranges.items.len;
+
+        // Rebuild the line with only the key ranges replaced, then re-parse
+        // the rewritten line before accepting it (in-memory structural check
+        // that also runs in dry-run).
+        var line_out: std.ArrayList(u8) = .empty;
+        defer line_out.deinit(alloc);
+        var pos: usize = 0;
+        for (ranges.items) |r| {
+            try line_out.appendSlice(alloc, line.content[pos..r.start]);
+            try line_out.appendSlice(alloc, r.to);
+            pos = r.end;
+        }
+        try line_out.appendSlice(alloc, line.content[pos..]);
+        const reparsed = model.parseLine(alloc, line_out.items) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.MalformedTask,
+        };
+        const rewritten_task = reparsed orelse return error.MalformedTask;
+        freeTask(alloc, rewritten_task);
+        try out.appendSlice(alloc, line_out.items);
+        try out.appendSlice(alloc, line.eol);
+    }
+    res.text = try out.toOwnedSlice(alloc);
+    return res;
+}
+
+/// Rewrites the parser-sensitive contexts header cell `Contexto` → `Context`.
+/// Context/client names and user prose are preserved byte-for-byte.
+/// The recognized contexts-table header labels of the first table row.
+const context_header_labels = [_]struct { from: []const u8, to: []const u8 }{
+    .{ .from = "Contexto", .to = "Context" },
+    .{ .from = "Uso", .to = "Use" },
+    .{ .from = "Clientes", .to = "Clients" },
+    .{ .from = "Conocimiento", .to = "Knowledge" },
+};
+
+const Replacement = struct { start: usize, end: usize, to: []const u8 };
+
+/// Rewrites the parser-sensitive contexts header: the recognized labels of
+/// the first table row (`Contexto` → `Context`, `Uso` → `Use`, `Clientes` →
+/// `Clients`, `Conocimiento` → `Knowledge`) and, on later rows, a first cell
+/// `Contexto` → `Context` (invisible in format 1, still invisible as
+/// `Context` in format 2). Context/client names and user prose are preserved
+/// byte-for-byte.
+fn transformContexts(alloc: std.mem.Allocator, bytes: []const u8) !ContextsTransform {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var res = ContextsTransform{ .text = undefined, .rewritten = false, .v2_header = false };
+    var lines: LineIterator = .{ .text = bytes };
+    var first_row = true;
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line.content, " \t\r");
+        if (trimmed.len == 0 or trimmed[0] != '|') {
+            try out.appendSlice(alloc, line.content);
+            try out.appendSlice(alloc, line.eol);
+            continue;
+        }
+        const first = std.mem.indexOfScalar(u8, line.content, '|');
+        const last = std.mem.lastIndexOfScalar(u8, line.content, '|');
+        if (first == null or last == null or last.? <= first.?) {
+            try out.appendSlice(alloc, line.content);
+            try out.appendSlice(alloc, line.eol);
+            continue;
+        }
+        const f = first.?;
+        const l = last.?;
+        var regions: std.ArrayList(struct { start: usize, len: usize }) = .empty;
+        defer regions.deinit(alloc);
+        {
+            var cursor: usize = f + 1;
+            var it = std.mem.splitScalar(u8, line.content[f + 1 .. l], '|');
+            while (it.next()) |seg| {
+                try regions.append(alloc, .{ .start = cursor, .len = seg.len });
+                cursor += seg.len + 1;
+            }
+        }
+        var reps: std.ArrayList(Replacement) = .empty;
+        defer reps.deinit(alloc);
+        for (regions.items, 0..) |r, idx| {
+            const c = cellTextRegion(line.content, r.start, r.len);
+            if (first_row) {
+                for (context_header_labels) |label| {
+                    if (std.mem.eql(u8, c.text, label.from)) {
+                        try reps.append(alloc, .{ .start = c.start, .end = c.end, .to = label.to });
+                        if (std.mem.eql(u8, label.from, "Contexto")) res.rewritten = true;
+                    }
+                }
+                if (idx == 0 and std.mem.eql(u8, c.text, "Context")) res.v2_header = true;
+            } else if (idx == 0) {
+                if (std.mem.eql(u8, c.text, "Contexto")) {
+                    try reps.append(alloc, .{ .start = c.start, .end = c.end, .to = "Context" });
+                    res.rewritten = true;
+                } else if (std.mem.eql(u8, c.text, "Context")) {
+                    res.v2_header = true;
+                }
+            }
+        }
+        first_row = false;
+        if (reps.items.len == 0) {
+            try out.appendSlice(alloc, line.content);
+        } else {
+            var pos: usize = 0;
+            for (reps.items) |r| {
+                try out.appendSlice(alloc, line.content[pos..r.start]);
+                try out.appendSlice(alloc, r.to);
+                pos = r.end;
+            }
+            try out.appendSlice(alloc, line.content[pos..]);
+        }
+        try out.appendSlice(alloc, line.eol);
+    }
+    res.text = try out.toOwnedSlice(alloc);
+    return res;
+}
+
+const RoutinesTransform = struct { text: []u8 };
+
+/// The v1 weekly cadence spellings and their English format-2 equivalents.
+const weekly_pairs = [_]struct { from: []const u8, to: []const u8 }{
+    .{ .from = "semanal:lun", .to = "weekly:mon" },
+    .{ .from = "semanal:mar", .to = "weekly:tue" },
+    .{ .from = "semanal:mie", .to = "weekly:wed" },
+    .{ .from = "semanal:mié", .to = "weekly:wed" },
+    .{ .from = "semanal:jue", .to = "weekly:thu" },
+    .{ .from = "semanal:vie", .to = "weekly:fri" },
+    .{ .from = "semanal:sab", .to = "weekly:sat" },
+    .{ .from = "semanal:sáb", .to = "weekly:sat" },
+    .{ .from = "semanal:dom", .to = "weekly:sun" },
+};
+
+fn freeRows(alloc: std.mem.Allocator, rows: []const routine.Row) void {
+    for (rows) |r| {
+        alloc.free(r.id);
+        alloc.free(r.cadence);
+    }
+    alloc.free(rows);
+}
+
+/// One routine-table cell's exact text region inside the raw line.
+const CellRegion = struct { start: usize, end: usize, text: []const u8 };
+
+fn cellTextRegion(content: []const u8, start: usize, len: usize) CellRegion {
+    const seg = content[start .. start + len];
+    const trimmed = std.mem.trim(u8, seg, " \t\r");
+    const lead = seg.len - std.mem.trimStart(u8, seg, " \t\r").len;
+    return .{ .start = start + lead, .end = start + lead + trimmed.len, .text = trimmed };
+}
+
+const v1_weekly_days = [_][]const u8{ "lun", "mar", "mie", "mié", "jue", "vie", "sab", "sáb", "dom" };
+
+fn v1RoutineIdValid(id: []const u8) bool {
+    if (id.len == 0 or id[0] < 'a' or id[0] > 'z') return false;
+    for (id[1..]) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return false;
     }
     return true;
 }
 
-fn canonicalIndex(rel: []const u8) ?usize {
-    for (canonical_lists, 0..) |l, i| if (std.mem.eql(u8, l, rel)) return i;
-    return null;
+fn v1IsSeparator(id: []const u8) bool {
+    for (id) |c| {
+        if (c != '-') return false;
+    }
+    return id.len > 0;
 }
 
-fn renameTarget(key: []const u8) ?[]const u8 {
-    for (field_renames) |r| if (std.mem.eql(u8, r.from, key)) return r.to;
-    return null;
-}
-
-fn isV2Reserved(key: []const u8) bool {
-    for (field_renames) |r| if (std.mem.eql(u8, r.to, key)) return true;
-    return false;
-}
-
-fn lookup(map: []const FieldRename, token: []const u8) ?[]const u8 {
-    for (map) |r| if (std.mem.eql(u8, r.from, token)) return r.to;
-    return null;
-}
-
-/// Translate reserved field names on one canonical list. Lines that are not
-/// canonical task lines keep their exact bytes; a task line with no legacy
-/// field is validated but also kept byte for byte, so only renamed lines are
-/// re-rendered. Malformed `- [` lines, duplicate ids and renaming collisions
-/// fail closed with `file:line` diagnostics.
-fn convertList(c: *Ctx, rel: []const u8, bytes: []const u8, seen: *std.ArrayList([]const u8), st: *Stats) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var line_no: usize = 0;
-    var first = true;
-    var it = std.mem.splitScalar(u8, bytes, '\n');
-    while (it.next()) |raw| {
-        line_no += 1;
-        if (!first) try out.append(c.a, '\n');
-        first = false;
-        const has_cr = raw.len > 0 and raw[raw.len - 1] == '\r';
-        const line = if (has_cr) raw[0 .. raw.len - 1] else raw;
-        if (std.mem.startsWith(u8, line, "- [")) {
-            const parsed = model.parseLine(c.a, line) catch |err| switch (err) {
-                error.MalformedTask, error.InvalidId => return c.fail("{s}:{d}: malformed task", .{ rel, line_no }, error.MalformedTask),
-                else => return err,
-            };
-            const task = parsed.?;
-            st.tasks += 1;
-            for (seen.items) |id| {
-                if (std.mem.eql(u8, id, task.id))
-                    return c.fail("{s}:{d}: duplicate id {s}", .{ rel, line_no, task.id }, error.DuplicateId);
+/// Validates an existing routine table with the format-1 vocabulary
+/// (`rutina`, `diaria`, `semanal:<lun…dom>`). The product parser only knows
+/// format 2 now, so the source file needs its own v1 validation; duplicate
+/// ids and empty tables are rejected by the format-2 re-parse of the
+/// rewritten text, which preserves ids and dates.
+fn validateV1RoutineTable(text: []const u8) !void {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0 or trimmed[0] != '|') continue;
+        if (trimmed[trimmed.len - 1] != '|') return error.MalformedRoutine;
+        var cells: [3][]const u8 = undefined;
+        var count: usize = 0;
+        var it = std.mem.splitScalar(u8, trimmed[1 .. trimmed.len - 1], '|');
+        while (it.next()) |cell| {
+            if (count >= cells.len) return error.MalformedRoutine;
+            cells[count] = std.mem.trim(u8, cell, " \t");
+            count += 1;
+        }
+        if (count != cells.len) return error.MalformedRoutine;
+        const id = cells[0];
+        const cadence = cells[1];
+        if (std.mem.eql(u8, id, "rutina") or v1IsSeparator(id)) continue;
+        if (!v1RoutineIdValid(id)) return error.MalformedRoutine;
+        if (!std.mem.eql(u8, cadence, "diaria")) {
+            if (!std.mem.startsWith(u8, cadence, "semanal:")) return error.MalformedRoutine;
+            const day = cadence["semanal:".len..];
+            var known = false;
+            for (v1_weekly_days) |d| {
+                if (std.mem.eql(u8, d, day)) known = true;
             }
-            try seen.append(c.a, task.id);
+            if (!known) return error.MalformedRoutine;
+        }
+        _ = platform.parseDate(cells[2]) catch return error.MalformedRoutine;
+    }
+}
 
-            var renamed: usize = 0;
-            for (task.fields.items) |*f| {
-                if (isV2Reserved(f.key)) {
-                    st.english = true;
-                    if (st.english_where.len == 0)
-                        st.english_where = try std.fmt.allocPrint(c.a, "{s}:{d} ({s})", .{ rel, line_no, f.key });
-                    continue;
+/// Converts the existing routine table: header cells
+/// `rutina|cadencia|última` → `routine|cadence|last`, `diaria` → `daily`,
+/// `semanal:<lun…dom>` → `weekly:<mon…sun>` (Monday-first), preserving ids,
+/// dates and every byte outside the vocabulary cells. The source table must
+/// already parse (a malformed file fails), and the rewritten text must parse
+/// as a format-2 table before it is accepted.
+fn transformRoutines(alloc: std.mem.Allocator, bytes: []const u8) !RoutinesTransform {
+    try validateV1RoutineTable(bytes);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var lines: LineIterator = .{ .text = bytes };
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line.content, " \t\r");
+        if (trimmed.len == 0 or trimmed[0] != '|') {
+            try out.appendSlice(alloc, line.content);
+            try out.appendSlice(alloc, line.eol);
+            continue;
+        }
+        const first = std.mem.indexOfScalar(u8, line.content, '|') orelse return error.MalformedRoutine;
+        const last = std.mem.lastIndexOfScalar(u8, line.content, '|') orelse return error.MalformedRoutine;
+        if (last <= first) return error.MalformedRoutine;
+        const inner = line.content[first + 1 .. last];
+        var regions: [3]struct { start: usize, len: usize } = undefined;
+        var count: usize = 0;
+        var cursor: usize = first + 1;
+        var it = std.mem.splitScalar(u8, inner, '|');
+        while (it.next()) |cell_seg| {
+            if (count >= regions.len) return error.MalformedRoutine;
+            regions[count] = .{ .start = cursor, .len = cell_seg.len };
+            cursor += cell_seg.len + 1;
+            count += 1;
+        }
+        if (count != regions.len) return error.MalformedRoutine;
+
+        var reps: [3]?struct { start: usize, end: usize, to: []const u8 } = .{ null, null, null };
+        const c0 = cellTextRegion(line.content, regions[0].start, regions[0].len);
+        // A v1 data row named `routine` would become an invisible v2 header
+        // row; format 2 cannot represent it, so the file fails instead.
+        if (std.mem.eql(u8, c0.text, "routine")) return error.MalformedRoutine;
+        if (std.mem.eql(u8, c0.text, "rutina")) reps[0] = .{ .start = c0.start, .end = c0.end, .to = "routine" };
+
+        const c1 = cellTextRegion(line.content, regions[1].start, regions[1].len);
+        if (std.mem.eql(u8, c1.text, "cadencia")) {
+            reps[1] = .{ .start = c1.start, .end = c1.end, .to = "cadence" };
+        } else if (std.mem.eql(u8, c1.text, "diaria")) {
+            reps[1] = .{ .start = c1.start, .end = c1.end, .to = "daily" };
+        } else if (std.mem.startsWith(u8, c1.text, "semanal:")) {
+            for (weekly_pairs) |pair| {
+                if (std.mem.eql(u8, c1.text, pair.from)) {
+                    reps[1] = .{ .start = c1.start, .end = c1.end, .to = pair.to };
+                    break;
                 }
-                const target = renameTarget(f.key) orelse continue;
-                st.legacy_evidence = true;
-                for (task.fields.items) |other| {
-                    if (std.mem.eql(u8, other.key, target))
-                        return c.fail(
-                            "{s}:{d}: {s} would rename to {s}, already present on {s}",
-                            .{ rel, line_no, f.key, target, task.id },
-                            error.KeyCollision,
-                        );
-                }
-                // The rename is a pointer swap onto a static spelling: field
-                // order and values are untouched and no `Task.set` can collide.
-                f.key = target;
-                renamed += 1;
             }
-            st.fields_renamed += renamed;
-            const rendered: []const u8 = if (renamed > 0) try task.render(c.a) else line;
-            try out.appendSlice(c.a, rendered);
-        } else {
-            try out.appendSlice(c.a, line);
+            if (reps[1] == null) return error.MalformedRoutine;
         }
-        if (has_cr) try out.append(c.a, '\r');
-    }
-    return out.toOwnedSlice(c.a);
-}
 
-/// Translate recognized header cells in the first table row of `contexts.md`.
-/// Every other byte of the file is preserved.
-fn convertContexts(c: *Ctx, bytes: []const u8, st: *Stats) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var header_done = false;
-    var first = true;
-    var it = std.mem.splitScalar(u8, bytes, '\n');
-    while (it.next()) |raw| {
-        if (!first) try out.append(c.a, '\n');
-        first = false;
-        const has_cr = raw.len > 0 and raw[raw.len - 1] == '\r';
-        const line = if (has_cr) raw[0 .. raw.len - 1] else raw;
-        var emit = line;
-        if (!header_done) {
-            const trimmed = std.mem.trimStart(u8, line, " \t");
-            if (trimmed.len > 0 and trimmed[0] == '|') {
-                header_done = true;
-                emit = try translateCells(c, line, &context_header_renames, &st.contexts_evidence);
+        const c2 = cellTextRegion(line.content, regions[2].start, regions[2].len);
+        if (std.mem.eql(u8, c2.text, "última")) reps[2] = .{ .start = c2.start, .end = c2.end, .to = "last" };
+
+        var pos: usize = 0;
+        for (&reps) |*rep| {
+            if (rep.*) |r| {
+                try out.appendSlice(alloc, line.content[pos..r.start]);
+                try out.appendSlice(alloc, r.to);
+                pos = r.end;
             }
         }
-        try out.appendSlice(c.a, emit);
-        if (has_cr) try out.append(c.a, '\r');
+        try out.appendSlice(alloc, line.content[pos..]);
+        try out.appendSlice(alloc, line.eol);
     }
-    return out.toOwnedSlice(c.a);
+
+    const text = try out.toOwnedSlice(alloc);
+    errdefer alloc.free(text);
+    const rows = routine.parse(alloc, text) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.MalformedRoutine,
+    };
+    freeRows(alloc, rows);
+    return .{ .text = text };
 }
 
-/// Replace recognized tokens in the `|`-separated cells of one line,
-/// preserving cell spacing; returns the original slice when nothing matched.
-fn translateCells(c: *Ctx, line: []const u8, map: []const FieldRename, evidence: *bool) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var changed = false;
-    var first = true;
-    var it = std.mem.splitScalar(u8, line, '|');
-    while (it.next()) |part| {
-        if (!first) try out.append(c.a, '|');
-        first = false;
-        const trimmed = std.mem.trim(u8, part, " \t");
-        if (lookup(map, trimmed)) |replacement| {
-            const ls = std.mem.trimStart(u8, part, " \t");
-            const ts = std.mem.trimEnd(u8, ls, " \t");
-            try out.appendSlice(c.a, part[0 .. part.len - ls.len]);
-            try out.appendSlice(c.a, replacement);
-            try out.appendSlice(c.a, ls[ts.len..]);
-            changed = true;
-            evidence.* = true;
-        } else {
-            try out.appendSlice(c.a, part);
-        }
-    }
-    return if (changed) try out.toOwnedSlice(c.a) else line;
-}
-
-/// Translate the header/cadence/day tokens of a present `routines/state.md`.
-/// Ids and dates keep their exact bytes; the result is validated by
-/// `routine.parse` afterwards, so unknown tokens fail rather than pass.
-fn convertRoutines(c: *Ctx, bytes: []const u8, st: *Stats) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var first = true;
-    var it = std.mem.splitScalar(u8, bytes, '\n');
-    while (it.next()) |raw| {
-        if (!first) try out.append(c.a, '\n');
-        first = false;
-        const has_cr = raw.len > 0 and raw[raw.len - 1] == '\r';
-        const line = if (has_cr) raw[0 .. raw.len - 1] else raw;
-        try out.appendSlice(c.a, try transformRoutineLine(c, line, st));
-        if (has_cr) try out.append(c.a, '\r');
-    }
-    return out.toOwnedSlice(c.a);
-}
-
-fn transformRoutineLine(c: *Ctx, line: []const u8, st: *Stats) ![]const u8 {
-    const trimmed = std.mem.trim(u8, line, " \t");
-    if (trimmed.len < 2 or trimmed[0] != '|' or trimmed[trimmed.len - 1] != '|') return line;
-    var cells: [3][]const u8 = undefined;
-    var count: usize = 0;
-    var it = std.mem.splitScalar(u8, trimmed[1 .. trimmed.len - 1], '|');
-    while (it.next()) |cell| {
-        if (count == cells.len) return line; // wrong shape: routine.parse rejects it
-        cells[count] = cell;
-        count += 1;
-    }
-    if (count != 3) return line;
-
-    const c0 = std.mem.trim(u8, cells[0], " \t");
-    const c1 = std.mem.trim(u8, cells[1], " \t");
-    const c2 = std.mem.trim(u8, cells[2], " \t");
-    const is_header = (std.mem.eql(u8, c0, "routine") or std.mem.eql(u8, c0, "rutina")) and
-        (std.mem.eql(u8, c1, "cadence") or std.mem.eql(u8, c1, "cadencia"));
-    if (is_header) return translateCells(c, line, &routine_header_renames, &st.routines_evidence);
-    if (allDash(c0) and allDash(c1) and allDash(c2)) return line;
-
-    const cadence = (try translateCadence(c, c1, st)) orelse return line;
-    // Rebuild with only the cadence cell's token replaced: ids, dates and all
-    // cell spacing stay byte exact.
-    const lead_len = line.len - std.mem.trimStart(u8, line, " \t").len;
-    const rest = line[lead_len..];
-    const trail_len = rest.len - std.mem.trimEnd(u8, rest, " \t").len;
-    const raw_cadence = cells[1];
-    const ls = std.mem.trimStart(u8, raw_cadence, " \t");
-    const ts = std.mem.trimEnd(u8, ls, " \t");
-    var out: std.ArrayList(u8) = .empty;
-    try out.appendSlice(c.a, line[0..lead_len]);
-    try out.append(c.a, '|');
-    try out.appendSlice(c.a, cells[0]);
-    try out.append(c.a, '|');
-    try out.appendSlice(c.a, raw_cadence[0 .. raw_cadence.len - ls.len]);
-    try out.appendSlice(c.a, cadence);
-    try out.appendSlice(c.a, ls[ts.len..]);
-    try out.append(c.a, '|');
-    try out.appendSlice(c.a, cells[2]);
-    try out.append(c.a, '|');
-    try out.appendSlice(c.a, rest[rest.len - trail_len ..]);
-    return out.toOwnedSlice(c.a);
-}
-
-fn translateCadence(c: *Ctx, cadence: []const u8, st: *Stats) !?[]const u8 {
-    if (std.mem.eql(u8, cadence, "diaria")) {
-        st.routines_evidence = true;
-        return "daily";
-    }
-    if (std.mem.startsWith(u8, cadence, "semanal:")) {
-        st.routines_evidence = true;
-        const day = lookup(&day_renames, cadence["semanal:".len..]) orelse cadence["semanal:".len..];
-        return try std.fmt.allocPrint(c.a, "weekly:{s}", .{day});
-    }
-    if (std.mem.startsWith(u8, cadence, "weekly:")) {
-        const day = cadence["weekly:".len..];
-        if (lookup(&day_renames, day)) |mapped| {
-            st.routines_evidence = true;
-            return try std.fmt.allocPrint(c.a, "weekly:{s}", .{mapped});
-        }
-    }
-    return null; // already v2, or invalid: routine.parse decides
-}
-
-fn allDash(text: []const u8) bool {
-    if (text.len == 0) return false;
-    for (text) |ch| if (ch != '-') return false;
-    return true;
-}
-
-/// The current v2 defaults at the captured conversion date: an initial
-/// scheduling baseline, not a record of completed history.
-fn seedRoutines(c: *Ctx, today: platform.Date) ![]u8 {
-    var buf: [10]u8 = undefined;
-    const date = today.format(&buf);
-    return std.fmt.allocPrint(c.a,
+/// The v2 baseline routine rows stamped with the single captured date: a
+/// fresh scheduling baseline, not a history of completions.
+fn seedRoutineText(alloc: std.mem.Allocator, date: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc,
         \\# Routine state
         \\
         \\| routine | cadence | last |
@@ -780,109 +1122,311 @@ fn seedRoutines(c: *Ctx, today: platform.Date) ![]u8 {
     , .{ date, date, date });
 }
 
-/// `config.json` must be a JSON object declaring `format` 1. The format key
-/// is rewritten in place and every other property (unknown keys included) is
-/// preserved through the `Value` round trip.
-fn convertConfig(c: *Ctx, bytes: []const u8) ![]u8 {
-    var value = std.json.parseFromSliceLeaky(std.json.Value, c.a, bytes, .{ .allocate = .alloc_always }) catch |err| {
-        return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => c.fail("config.json is not readable JSON", .{}, error.InvalidConfig),
-        };
-    };
-    switch (value) {
-        .object => |*obj| {
-            const fmt = obj.get("format") orelse return c.fail("config.json does not declare \"format\"", .{}, error.InvalidConfig);
-            switch (fmt) {
-                .integer => |n| {
-                    if (n != legacy_format)
-                        return c.fail("config.json declares format {d}; only a format-{d} source can be converted", .{ n, legacy_format }, error.InvalidConfig);
-                },
-                else => return c.fail("config.json \"format\" must be {d}", .{legacy_format}, error.InvalidConfig),
-            }
-            obj.getPtr("format").?.* = .{ .integer = config_mod.supported_format };
-        },
-        else => return c.fail("config.json must be a JSON object", .{}, error.InvalidConfig),
-    }
-    const text = try std.json.Stringify.valueAlloc(c.a, value, .{});
-    return std.fmt.allocPrint(c.a, "{s}\n", .{text});
+const Range = struct { start: usize, end: usize };
+
+fn isJsonWs(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
 }
 
-fn synthesizeConfig(c: *Ctx) ![]u8 {
-    return std.fmt.allocPrint(
-        c.a,
-        "{{\"format\":{d},\"policy\":{{\"requireClientFor\":[],\"clientOnlyIn\":[]}}}}\n",
-        .{config_mod.supported_format},
-    );
+fn isJsonDigit(c: u8) bool {
+    return c >= '0' and c <= '9';
 }
 
-fn stageName(c: *Ctx, base: []const u8) ![]u8 {
-    var suffix: [8]u8 = undefined;
-    c.io.randomSecure(&suffix) catch {
-        const ns: u64 = @truncate(@as(u128, @intCast(std.Io.Clock.real.now(c.io).nanoseconds)));
-        std.mem.writeInt(u64, &suffix, ns, .little);
-    };
-    return std.fmt.allocPrint(c.a, ".{s}.ztd-stage-{x:0>16}", .{ base, std.mem.readInt(u64, &suffix, .little) });
+fn isJsonNumberChar(c: u8) bool {
+    return isJsonDigit(c) or c == '-' or c == '+' or c == '.' or c == 'e' or c == 'E';
 }
 
-// --- tests ---------------------------------------------------------------
-
-const FileSpec = struct { rel: []const u8, data: []const u8 };
-
-fn writeFiles(io: std.Io, alloc: std.mem.Allocator, root: []const u8, files: []const FileSpec) !void {
-    const cwd = std.Io.Dir.cwd();
-    for (files) |f| {
-        const full = try std.fs.path.join(alloc, &.{ root, f.rel });
-        if (std.fs.path.dirname(full)) |d| try cwd.createDirPath(io, d);
-        try cwd.writeFile(io, .{ .sub_path = full, .data = f.data });
-    }
-}
-
-fn dirNames(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ![]const []const u8 {
-    var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
-    defer dir.close(io);
-    var out: std.ArrayList([]const u8) = .empty;
-    var it = dir.iterate();
-    while (try it.next(io)) |e| try out.append(alloc, try alloc.dupe(u8, e.name));
-    const items = try out.toOwnedSlice(alloc);
-    std.mem.sort([]const u8, items, {}, struct {
-        fn lt(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.lessThan(u8, a, b);
+/// Byte range of the top-level `format` number token. The text was already
+/// validated as JSON with unique keys, so there is at most one such key;
+/// anything unexpected returns null and the caller fails closed.
+fn findFormatRange(text: []const u8) ?Range {
+    var depth: usize = 0;
+    var want_number = false;
+    var in_string = false;
+    var str_start: usize = 0;
+    var escaped = false;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        if (want_number) {
+            const c = text[i];
+            if (isJsonWs(c) or c == ':') continue;
+            if (!isJsonDigit(c)) return null;
+            const start = i;
+            while (i < text.len and isJsonNumberChar(text[i])) i += 1;
+            return .{ .start = start, .end = i };
         }
-    }.lt);
-    return items;
+        if (in_string) {
+            const c = text[i];
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (c == '"') {
+                in_string = false;
+                if (depth == 1) {
+                    var j = i + 1;
+                    while (j < text.len and isJsonWs(text[j])) j += 1;
+                    if (j < text.len and text[j] == ':' and rawKeyIsFormat(text[str_start + 1 .. i])) {
+                        want_number = true;
+                        i = j; // the loop step steps over the ':'
+                    }
+                }
+            }
+            continue;
+        }
+        const c = text[i];
+        switch (c) {
+            '"' => {
+                in_string = true;
+                str_start = i;
+            },
+            '{', '[' => depth += 1,
+            '}', ']' => {
+                if (depth == 0) return null;
+                depth -= 1;
+            },
+            else => {},
+        }
+    }
+    return null;
 }
 
-fn testCtx(io: std.Io, alloc: std.mem.Allocator, a: std.mem.Allocator) Ctx {
-    return .{ .io = io, .a = a, .alloc = alloc, .diag = null };
+/// True when the raw JSON string contents decode to exactly "format"
+/// (handles the `\u0066`-style spelling of the same key).
+fn rawKeyIsFormat(raw: []const u8) bool {
+    const expected = "format";
+    var i: usize = 0;
+    var k: usize = 0;
+    while (i < raw.len) {
+        var cp: u21 = undefined;
+        if (raw[i] == '\\') {
+            i += 1;
+            if (i >= raw.len) return false;
+            switch (raw[i]) {
+                '"' => {
+                    cp = '"';
+                    i += 1;
+                },
+                '\\' => {
+                    cp = '\\';
+                    i += 1;
+                },
+                '/' => {
+                    cp = '/';
+                    i += 1;
+                },
+                'b' => {
+                    cp = 0x08;
+                    i += 1;
+                },
+                'f' => {
+                    cp = 0x0C;
+                    i += 1;
+                },
+                'n' => {
+                    cp = 0x0A;
+                    i += 1;
+                },
+                'r' => {
+                    cp = 0x0D;
+                    i += 1;
+                },
+                't' => {
+                    cp = 0x09;
+                    i += 1;
+                },
+                'u' => {
+                    if (i + 4 >= raw.len) return false;
+                    cp = std.fmt.parseInt(u21, raw[i + 1 .. i + 5], 16) catch return false;
+                    i += 5;
+                },
+                else => return false,
+            }
+        } else {
+            cp = raw[i];
+            i += 1;
+        }
+        var buf: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(cp, &buf) catch return false;
+        if (k + len > expected.len) return false;
+        if (!std.mem.eql(u8, expected[k .. k + len], buf[0..len])) return false;
+        k += len;
+    }
+    return k == expected.len;
 }
 
-fn expectSourceUnchanged(io: std.Io, alloc: std.mem.Allocator, a: std.mem.Allocator, src: []const u8, before: []const Entry) !void {
-    var c = testCtx(io, alloc, a);
-    const after = try snapshot(&c, src);
-    try std.testing.expect(sameSnapshot(before, after));
+/// Rewrites an explicit format-1 config to format 2 while preserving every
+/// unknown property byte-for-byte: only the top-level `format` number token
+/// is spliced. Malformed JSON, duplicate keys at any depth, a wrong-typed
+/// policy or a format that is not exactly 1 are rejected; the spliced result
+/// must reload as a format-2 config.
+fn transformConfig(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    {
+        var parsed = std.json.parseFromSlice(std.json.Value, alloc, bytes, .{
+            .allocate = .alloc_always,
+        }) catch return error.InvalidConfig;
+        defer parsed.deinit();
+        const root = parsed.value;
+        if (root != .object) return error.InvalidConfig;
+        switch (root.object.get("format") orelse return error.AmbiguousSource) {
+            .integer => |n| if (n != 1) return error.UnsupportedFormat,
+            else => return error.InvalidConfig,
+        }
+        try validatePolicyShape(root);
+    }
+
+    const range = findFormatRange(bytes) orelse return error.InvalidConfig;
+    var out = try alloc.alloc(u8, bytes.len - (range.end - range.start) + 1);
+    errdefer alloc.free(out);
+    @memcpy(out[0..range.start], bytes[0..range.start]);
+    out[range.start] = '2';
+    @memcpy(out[range.start + 1 ..], bytes[range.end..]);
+
+    {
+        var parsed = std.json.parseFromSlice(std.json.Value, alloc, out, .{
+            .allocate = .alloc_always,
+        }) catch return error.InvalidConfig;
+        defer parsed.deinit();
+        const root = parsed.value;
+        if (root != .object) return error.InvalidConfig;
+        switch (root.object.get("format") orelse return error.InvalidConfig) {
+            .integer => |n| if (n != 2) return error.InvalidConfig,
+            else => return error.InvalidConfig,
+        }
+        try validatePolicyShape(root);
+    }
+    return out;
 }
 
-/// The fixture below is a complete format-1 store: Spanish reserved keys,
-/// a `Contexto` header, format-1 routine tokens, unknown config properties,
-/// a git directory and a `.state` lock that must not be copied.
-const v1_files = [_]FileSpec{
-    .{ .rel = "config.json", .data = "{\"format\":1,\"note\":\"keep me\",\"policy\":{\"requireClientFor\":[],\"clientOnlyIn\":[\"work\"]}}\n" },
-    .{ .rel = "contexts.md", .data = "# Contextos\n\n| Contexto | Uso |\n| --- | --- |\n| personal | Asuntos personales |\n| work | Trabajo |\n" },
-    .{ .rel = "inbox.md", .data = "# Bandeja\n\n- [ ] T-20261101-001 | Comprar \\| verduras | contexto: personal | capturada: 2026-11-01 | estimate: 2d\n" },
-    .{ .rel = "lists/next.md", .data = "# Siguiente\n\n- [ ] T-20261102-001 | Llamar al banco | contexto: work | cliente: acme | proyecto: work/acme/demo | capturada: 2026-11-02\n" },
-    .{ .rel = "lists/waiting.md", .data = "# Espera\n\n- [ ] T-20261103-001 | Firmar contrato | contexto: work | cliente: acme | espera: legal | capturada: 2026-11-03\n" },
-    .{ .rel = "lists/someday.md", .data = "# Algún día\n\n" },
-    .{ .rel = "lists/archive.md", .data = "# Archivo\n\n- [x] T-20261104-001 | Terminado | contexto: personal | resolución: hecho | cerrada: 2026-11-04\n" },
-    .{ .rel = "lists/projects/work/acme/demo.md", .data = "# demo\n" },
-    .{ .rel = "routines/state.md", .data = "# Rutinas\n\n| rutina | cadencia | último |\n| --- | --- | --- |\n| inbox | diaria | 2026-11-01 |\n| plan | diaria | 2026-11-05 |\n| review | semanal:dom | 2026-11-02 |\n" },
-    .{ .rel = "README.md", .data = "# store\n" },
-    .{ .rel = ".gitignore", .data = ".state/\n" },
-    .{ .rel = ".git/config", .data = "gitdata\n" },
-    .{ .rel = ".state/lock", .data = "locked\n" },
-};
+fn validatePolicyShape(root: std.json.Value) !void {
+    const policy = root.object.get("policy") orelse return;
+    if (policy != .object) return error.InvalidConfig;
+    for ([_][]const u8{ "requireClientFor", "clientOnlyIn" }) |key| {
+        if (policy.object.get(key)) |list| {
+            if (list != .array) return error.InvalidConfig;
+            for (list.array.items) |item| {
+                if (item != .string) return error.InvalidConfig;
+            }
+        }
+    }
+}
 
-test "converts a format-1 store with routines and preserves everything else" {
+// ============================ tests ============================
+// Every test builds only synthetic stores under a fresh temp directory and
+// asserts that failures and dry runs leave the source byte-identical and no
+// destination or staging directory behind. The tests pass an arena to `run`
+// because the engine APIs it drives are arena-oriented.
+
+/// Writes `data` at `<store_root>/<rel>` inside the test temp directory.
+fn put(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    tmp: *std.testing.TmpDir,
+    store_root: []const u8,
+    rel: []const u8,
+    data: []const u8,
+) !void {
+    tmp.dir.createDirPath(io, store_root) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    if (std.fs.path.dirname(rel)) |parent_rel| {
+        if (parent_rel.len > 0) {
+            const parent_full = try std.fs.path.join(alloc, &.{ store_root, parent_rel });
+            defer alloc.free(parent_full);
+            tmp.dir.createDirPath(io, parent_full) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
+        }
+    }
+    const full = try std.fs.path.join(alloc, &.{ store_root, rel });
+    defer alloc.free(full);
+    try tmp.dir.writeFile(io, .{ .sub_path = full, .data = data });
+}
+
+fn readStoreFile(alloc: std.mem.Allocator, io: std.Io, store_abs: []const u8, rel: []const u8) ![]u8 {
+    var d = try openExact(io, store_abs);
+    defer d.close(io);
+    return d.readFileAlloc(io, rel, alloc, .limited(store_mod.max_file_bytes));
+}
+
+fn snapshot(alloc: std.mem.Allocator, io: std.Io, store_abs: []const u8) !Inventory {
+    var d = try openExact(io, store_abs);
+    defer d.close(io);
+    return inventory(io, alloc, d);
+}
+
+fn expectSourceUnchanged(alloc: std.mem.Allocator, io: std.Io, store_abs: []const u8, before: *const Inventory) !void {
+    var d = try openExact(io, store_abs);
+    defer d.close(io);
+    try verifyUnchanged(io, alloc, d, before);
+}
+
+/// Staging directories left next to a destination (must always be zero once
+/// `run` returns, success or failure).
+fn countStages(alloc: std.mem.Allocator, io: std.Io, parent_abs: []const u8) !usize {
+    _ = alloc;
+    var d = try openExact(io, parent_abs);
+    defer d.close(io);
+    var it = d.iterate();
+    var count: usize = 0;
+    while (try it.next(io)) |entry| {
+        if (std.mem.indexOf(u8, entry.name, "ztd-migrate-") != null) count += 1;
+    }
+    return count;
+}
+
+fn listNames(alloc: std.mem.Allocator, io: std.Io, parent_abs: []const u8) ![][]const u8 {
+    var d = try openExact(io, parent_abs);
+    defer d.close(io);
+    var list: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (list.items) |n| alloc.free(n);
+        list.deinit(alloc);
+    }
+    var it = d.iterate();
+    while (try it.next(io)) |entry| try list.append(alloc, try alloc.dupe(u8, entry.name));
+    std.mem.sort([]const u8, list.items, {}, lessThanId);
+    return list.toOwnedSlice(alloc);
+}
+
+/// A realistic format-1 store: all seven legacy keys spread over the five
+/// lists, an unknown config property, v1 contexts/routine vocabulary, and
+/// copy-only noise (plans, templates, `.git`, `.state`).
+fn writeV1Store(io: std.Io, alloc: std.mem.Allocator, tmp: *std.testing.TmpDir, root: []const u8) !void {
+    try put(io, alloc, tmp, root, "contexts.md", "# Active contexts\n\n| Contexto | Uso |\n| --- | --- |\n| personal | Personal matters |\n| work | Work |\n");
+    try put(io, alloc, tmp, root, "config.json", "{\"format\":1,\"policy\":{\"requireClientFor\":[],\"clientOnlyIn\":[\"personal\"]},\"custom\":{\"keep\":true}}\n");
+    try put(io, alloc, tmp, root, "inbox.md", "- [ ] T-20260101-001 | Fix contexto: now | contexto: personal | cliente: acme | proyecto: alpha | capturada: 2026-01-01\n");
+    try put(io, alloc, tmp, root, "lists/next.md", "- [ ] T-20260101-002 | Next legacy | contexto: personal | prioridad: alta\n");
+    try put(io, alloc, tmp, root, "lists/waiting.md", "- [ ] T-20260101-003 | Waiting legacy | contexto: personal | espera: the bank\n");
+    try put(io, alloc, tmp, root, "lists/someday.md", "- [ ] T-20260101-004 | Someday legacy | contexto: personal\n");
+    try put(io, alloc, tmp, root, "lists/archive.md", "- [x] T-20260101-005 | Archived | contexto: personal | resolución: done | cerrada: 2026-01-01\n");
+    try put(io, alloc, tmp, root, "lists/projects/alpha.md", "# Alpha\n\n");
+    try put(io, alloc, tmp, root, "routines/state.md", "# Routine state\n\n| rutina | cadencia | última |\n| --- | --- | --- |\n| inbox | diaria | 2026-01-01 |\n| review | semanal:sab | 2025-12-27 |\n| plan | semanal:lun | 2025-12-29 |\n");
+    try put(io, alloc, tmp, root, "plans/daily/2026-01-02.md", "T-20260101-002\n");
+    try put(io, alloc, tmp, root, "templates/.gitkeep", "");
+    try put(io, alloc, tmp, root, "README.md", "# Workspace\n\nByte-for-byte copy.\n");
+    try put(io, alloc, tmp, root, ".gitignore", ".state/\n");
+    try put(io, alloc, tmp, root, ".gitattributes", "* text eol=lf\n");
+    try put(io, alloc, tmp, root, ".git/HEAD", "ref: refs/heads/main\n");
+    try put(io, alloc, tmp, root, ".state/last-transaction.json", "{}\n");
+    // Nested `.git`/`.state` are ordinary content and must be copied.
+    try put(io, alloc, tmp, root, "knowledge/.git/HEAD", "nested\n");
+}
+
+/// Five empty canonical lists plus a contexts file, for evidence tests.
+fn putBareStructure(io: std.Io, alloc: std.mem.Allocator, tmp: *std.testing.TmpDir, root: []const u8) !void {
+    for ([_][]const u8{ "inbox.md", "lists/next.md", "lists/waiting.md", "lists/someday.md", "lists/archive.md" }) |rel| {
+        try put(io, alloc, tmp, root, rel, "# Empty\n\n");
+    }
+}
+
+test "converts a realistic format-1 store to format 2" {
     const alloc = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -890,93 +1434,93 @@ test "converts a format-1 store with routines and preserves everything else" {
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
     const io = threaded.io();
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &buf);
-    const base = try a.dupe(u8, buf[0..n]);
-    const src = try std.fs.path.join(a, &.{ base, "src" });
-    const dst = try std.fs.path.join(a, &.{ base, "dst" });
-    try writeFiles(io, a, src, &v1_files);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
 
-    var c = testCtx(io, alloc, a);
-    const before = try snapshot(&c, src);
+    try writeV1Store(io, a, &tmp, "src");
+    const before = try snapshot(a, io, src_abs);
 
-    var diag: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (diag.items) |m| alloc.free(m);
-        diag.deinit(alloc);
-    }
-    const today = try platform.parseDate("2026-11-17");
-    const rep = try run(io, alloc, .{ .from = src, .to = dst, .today = today }, &diag);
-    try std.testing.expectEqual(@as(usize, 0), diag.items.len);
-    try std.testing.expect(!rep.dry_run);
-    try std.testing.expect(rep.checked);
-    try std.testing.expectEqualStrings("rewritten", rep.config);
-    try std.testing.expectEqualStrings("transformed", rep.routines);
-    try std.testing.expectEqual(@as(usize, 4), rep.tasks);
-    try std.testing.expectEqual(@as(usize, 13), rep.fields_renamed);
-    // config, contexts, five lists, project, routines, README, .gitignore
-    try std.testing.expectEqual(@as(usize, 11), rep.files);
+    const report = try run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null);
 
-    // Field names, header cells, cadence and day tokens are translated;
-    // titles, values, field order, ids and custom fields are untouched.
-    const inbox = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dst, "inbox.md" }), alloc, .limited(1 << 20));
-    defer alloc.free(inbox);
-    try std.testing.expectEqualStrings(
-        "# Bandeja\n\n- [ ] T-20261101-001 | Comprar \\| verduras | context: personal | captured_at: 2026-11-01 | estimate: 2d\n",
-        inbox,
-    );
-    const contexts = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dst, "contexts.md" }), alloc, .limited(1 << 20));
-    defer alloc.free(contexts);
+    try std.testing.expect(!report.dry_run);
+    try std.testing.expectEqualStrings("rewritten", report.config);
+    try std.testing.expectEqualStrings("transformed", report.routines);
+    try std.testing.expect(report.seed_date == null);
+    try std.testing.expectEqual(@as(usize, 5), report.tasks);
+    try std.testing.expectEqual(@as(usize, 11), report.fields_renamed);
+    try std.testing.expectEqual(@as(usize, 15), report.files);
+    try std.testing.expect(report.checked);
+
+    // Config: format 2 with every unknown property preserved byte-for-byte.
+    const cfg = try readStoreFile(a, io, dest_abs, "config.json");
+    try std.testing.expect(std.mem.indexOf(u8, cfg, "\"format\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cfg, "\"keep\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cfg, "\"clientOnlyIn\":[\"personal\"]") != null);
+
+    // Contexts header renamed; context names and prose untouched.
+    const contexts = try readStoreFile(a, io, dest_abs, "contexts.md");
     try std.testing.expect(std.mem.indexOf(u8, contexts, "| Context | Use |") != null);
-    try std.testing.expect(std.mem.indexOf(u8, contexts, "| Contexto |") == null);
+    try std.testing.expect(std.mem.indexOf(u8, contexts, "Contexto") == null);
+    try std.testing.expect(std.mem.indexOf(u8, contexts, "| personal | Personal matters |") != null);
 
-    const config_text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dst, "config.json" }), alloc, .limited(1 << 20));
-    defer alloc.free(config_text);
-    try std.testing.expect(std.mem.indexOf(u8, config_text, "\"format\":2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, config_text, "\"note\":\"keep me\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, config_text, "\"clientOnlyIn\":[\"work\"]") != null);
+    // All seven keys converted; title prose and custom fields preserved.
+    const inbox = try readStoreFile(a, io, dest_abs, "inbox.md");
+    try std.testing.expect(std.mem.indexOf(u8, inbox, "context: personal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inbox, "client: acme") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inbox, "project: alpha") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inbox, "captured_at: 2026-01-01") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inbox, "Fix contexto: now") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inbox, "| contexto:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, inbox, "| cliente:") == null);
+    const next = try readStoreFile(a, io, dest_abs, "lists/next.md");
+    try std.testing.expect(std.mem.indexOf(u8, next, "prioridad: alta") != null);
+    const waiting = try readStoreFile(a, io, dest_abs, "lists/waiting.md");
+    try std.testing.expect(std.mem.indexOf(u8, waiting, "waiting_on: the bank") != null);
+    const archive = try readStoreFile(a, io, dest_abs, "lists/archive.md");
+    try std.testing.expect(std.mem.indexOf(u8, archive, "resolution: done") != null);
+    try std.testing.expect(std.mem.indexOf(u8, archive, "closed_at: 2026-01-01") != null);
+    try std.testing.expect(std.mem.indexOf(u8, archive, "- [x]") != null);
 
-    const routines_text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dst, routine.path }), alloc, .limited(1 << 20));
-    defer alloc.free(routines_text);
-    try std.testing.expect(std.mem.indexOf(u8, routines_text, "| routine | cadence | last |") != null);
-    // Row dates are preserved exactly; only cadence/day tokens change.
-    try std.testing.expect(std.mem.indexOf(u8, routines_text, "| inbox | daily | 2026-11-01 |") != null);
-    try std.testing.expect(std.mem.indexOf(u8, routines_text, "| plan | daily | 2026-11-05 |") != null);
-    try std.testing.expect(std.mem.indexOf(u8, routines_text, "| review | weekly:sun | 2026-11-02 |") != null);
+    // Routine vocabulary converted; ids and dates untouched.
+    const routines = try readStoreFile(a, io, dest_abs, "routines/state.md");
+    try std.testing.expect(std.mem.indexOf(u8, routines, "| routine | cadence | last |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, routines, "| inbox | daily | 2026-01-01 |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, routines, "weekly:sat") != null);
+    try std.testing.expect(std.mem.indexOf(u8, routines, "weekly:mon") != null);
+    try std.testing.expect(std.mem.indexOf(u8, routines, "diaria") == null);
+    try std.testing.expect(std.mem.indexOf(u8, routines, "semanal") == null);
+    try std.testing.expect(std.mem.indexOf(u8, routines, "cadencia") == null);
+    try std.testing.expect(std.mem.indexOf(u8, routines, "última") == null);
 
-    // Unrelated bytes are byte-identical; `.git` administration and `.state`
-    // are not copied.
-    const project = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dst, "lists/projects/work/acme/demo.md" }), alloc, .limited(1 << 20));
-    defer alloc.free(project);
-    try std.testing.expectEqualStrings("# demo\n", project);
-    const gitignore = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dst, ".gitignore" }), alloc, .limited(1 << 20));
-    defer alloc.free(gitignore);
+    // Everything else is byte-for-byte.
+    const plan_src = try readStoreFile(a, io, src_abs, "plans/daily/2026-01-02.md");
+    const plan_dest = try readStoreFile(a, io, dest_abs, "plans/daily/2026-01-02.md");
+    try std.testing.expectEqualStrings(plan_src, plan_dest);
+    const readme = try readStoreFile(a, io, dest_abs, "README.md");
+    try std.testing.expectEqualStrings("# Workspace\n\nByte-for-byte copy.\n", readme);
+    const gitignore = try readStoreFile(a, io, dest_abs, ".gitignore");
     try std.testing.expectEqualStrings(".state/\n", gitignore);
-    try std.testing.expect(!store_mod.pathExists(io, try std.fs.path.join(a, &.{ dst, ".git" })));
-    try std.testing.expect(!store_mod.pathExists(io, try std.fs.path.join(a, &.{ dst, ".state" })));
 
-    // The destination is a clean format-2 store under the strict checker.
-    var eng = try engine.Engine.init(io, a, dst, today, false);
-    defer eng.deinit();
-    const res = try eng.check(true);
-    try std.testing.expectEqual(@as(usize, 0), res.errors.len);
-    try std.testing.expectEqual(@as(usize, 0), res.warnings.len);
-    try std.testing.expect(!store_mod.pathExists(io, try std.fs.path.join(a, &.{ dst, ".state" })));
+    // `.git` and `.state` never reach the destination; no stage is left.
+    var dest_dir = try openExact(io, dest_abs);
+    defer dest_dir.close(io);
+    try std.testing.expect(!try pathPresentStrict(dest_dir, io, ".git"));
+    try std.testing.expect(!try pathPresentStrict(dest_dir, io, ".state"));
+    const nested_git = try readStoreFile(a, io, dest_abs, "knowledge/.git/HEAD");
+    try std.testing.expectEqualStrings("nested\n", nested_git);
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
 
-    // The source is untouched, lock included: the shared lock neither writes
-    // the existing lock file nor adds anything to `.state`.
-    try expectSourceUnchanged(io, alloc, a, src, before);
-    const lock_text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ src, ".state/lock" }), alloc, .limited(1 << 20));
-    defer alloc.free(lock_text);
-    try std.testing.expectEqualStrings("locked\n", lock_text);
-    const state_names = try dirNames(io, a, try std.fs.path.join(a, &.{ src, ".state" }));
-    try std.testing.expectEqualStrings("lock", try std.mem.join(a, ",", state_names));
+    // The source is byte-identical to the pre-conversion baseline.
+    try expectSourceUnchanged(a, io, src_abs, &before);
 }
 
-test "missing config is accepted only with legacy evidence and synthesises empty policy" {
+test "dry run creates nothing and defers the staged check" {
     const alloc = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -984,57 +1528,37 @@ test "missing config is accepted only with legacy evidence and synthesises empty
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
     const io = threaded.io();
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &buf);
-    const base = try a.dupe(u8, buf[0..n]);
-    const src = try std.fs.path.join(a, &.{ base, "src" });
-    const dst = try std.fs.path.join(a, &.{ base, "dst" });
-    // Canonical v1 structure, `Contexto` evidence, no config, no routines.
-    try writeFiles(io, a, src, &.{
-        .{ .rel = "contexts.md", .data = "| Contexto | Uso |\n| --- | --- |\n| personal | Personal |\n" },
-        .{ .rel = "inbox.md", .data = "- [ ] T-20261101-001 | Una cosa | contexto: personal | capturada: 2026-11-01\n" },
-        .{ .rel = "lists/next.md", .data = "# Siguiente\n\n" },
-        .{ .rel = "lists/waiting.md", .data = "# Espera\n\n" },
-        .{ .rel = "lists/someday.md", .data = "# Algún día\n\n" },
-        .{ .rel = "lists/archive.md", .data = "# Archivo\n\n" },
-    });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
 
-    var c = testCtx(io, alloc, a);
-    const before = try snapshot(&c, src);
-    const today = try platform.parseDate("2026-11-17");
-    const rep = try run(io, alloc, .{ .from = src, .to = dst, .today = today }, null);
-    try std.testing.expectEqualStrings("synthesized", rep.config);
-    try std.testing.expectEqualStrings("seeded", rep.routines);
-    try std.testing.expect(rep.checked);
+    try writeV1Store(io, a, &tmp, "src");
+    const before = try snapshot(a, io, src_abs);
+    const names_before = try listNames(a, io, base);
 
-    const config_text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dst, "config.json" }), alloc, .limited(1 << 20));
-    defer alloc.free(config_text);
-    try std.testing.expectEqualStrings(
-        "{\"format\":2,\"policy\":{\"requireClientFor\":[],\"clientOnlyIn\":[]}}\n",
-        config_text,
-    );
+    const report = try run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = true }, null);
 
-    // The absent routine file is seeded at the conversion date: an initial
-    // baseline, not completed history.
-    const routines_text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dst, routine.path }), alloc, .limited(1 << 20));
-    defer alloc.free(routines_text);
-    try std.testing.expect(std.mem.indexOf(u8, routines_text, "| inbox | daily | 2026-11-17 |") != null);
-    try std.testing.expect(std.mem.indexOf(u8, routines_text, "| plan | daily | 2026-11-17 |") != null);
-    try std.testing.expect(std.mem.indexOf(u8, routines_text, "| review | weekly:sat | 2026-11-17 |") != null);
+    try std.testing.expect(report.dry_run);
+    try std.testing.expect(!report.checked);
+    try std.testing.expectEqualStrings("rewritten", report.config);
+    try std.testing.expectEqualStrings("transformed", report.routines);
+    try std.testing.expectEqual(@as(usize, 11), report.fields_renamed);
 
-    var eng = try engine.Engine.init(io, a, dst, today, false);
-    defer eng.deinit();
-    const res = try eng.check(true);
-    try std.testing.expectEqual(@as(usize, 0), res.errors.len);
-    try std.testing.expectEqual(@as(usize, 0), res.warnings.len);
-
-    try expectSourceUnchanged(io, alloc, a, src, before);
+    // No destination, no staging directory, no new entries next to the source.
+    try std.testing.expectError(error.FileNotFound, readStoreFile(a, io, dest_abs, "config.json"));
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+    const names_after = try listNames(a, io, base);
+    try std.testing.expectEqual(names_before.len, names_after.len);
+    for (names_before, names_after) |x, y| try std.testing.expectEqualStrings(x, y);
+    try expectSourceUnchanged(a, io, src_abs, &before);
 }
 
-test "dry run transforms in memory and writes nothing" {
+test "missing config is inferred only from strict v1 evidence" {
     const alloc = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -1042,39 +1566,32 @@ test "dry run transforms in memory and writes nothing" {
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
     const io = threaded.io();
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &buf);
-    const base = try a.dupe(u8, buf[0..n]);
-    const src = try std.fs.path.join(a, &.{ base, "src" });
-    const dst = try std.fs.path.join(a, &.{ base, "dst" });
-    try writeFiles(io, a, src, &v1_files);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
 
-    var c = testCtx(io, alloc, a);
-    const before = try snapshot(&c, src);
-    const names_before = try dirNames(io, a, base);
+    try writeV1Store(io, a, &tmp, "src");
+    // No config: keep every v1 marker, drop the client field so the
+    // synthesized empty policy still passes the strict staged check.
+    try tmp.dir.deleteFile(io, "src/config.json");
+    try put(io, a, &tmp, "src", "inbox.md", "- [ ] T-20260101-001 | Fix contexto: now | contexto: personal | proyecto: alpha | capturada: 2026-01-01\n");
 
-    const today = try platform.parseDate("2026-11-17");
-    const rep = try run(io, alloc, .{ .from = src, .to = dst, .dry_run = true, .today = today }, null);
-    try std.testing.expect(rep.dry_run);
-    // The strict checker needs a real staged directory; a dry run cannot run it.
-    try std.testing.expect(!rep.checked);
-    try std.testing.expectEqualStrings("rewritten", rep.config);
-    try std.testing.expectEqual(@as(usize, 11), rep.files);
-    try std.testing.expectEqual(@as(usize, 13), rep.fields_renamed);
+    const report = try run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null);
 
-    try std.testing.expect(!store_mod.pathExists(io, dst));
-    const names_after = try dirNames(io, a, base);
-    try std.testing.expectEqualStrings(
-        try std.mem.join(a, ",", names_before),
-        try std.mem.join(a, ",", names_after),
-    );
-    try expectSourceUnchanged(io, alloc, a, src, before);
+    try std.testing.expectEqualStrings("synthesized", report.config);
+    try std.testing.expect(report.checked);
+    const cfg = try readStoreFile(a, io, dest_abs, "config.json");
+    try std.testing.expectEqualStrings(synthesized_config, cfg);
+    const inbox = try readStoreFile(a, io, dest_abs, "inbox.md");
+    try std.testing.expect(std.mem.indexOf(u8, inbox, "context: personal") != null);
 }
 
-test "dry run on a broken store also writes nothing" {
+test "missing config with v2 or mixed evidence is rejected" {
     const alloc = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -1082,81 +1599,90 @@ test "dry run on a broken store also writes nothing" {
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
     const io = threaded.io();
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &buf);
-    const base = try a.dupe(u8, buf[0..n]);
-    const src = try std.fs.path.join(a, &.{ base, "src" });
-    const dst = try std.fs.path.join(a, &.{ base, "dst" });
-    try writeFiles(io, a, src, &.{
-        .{ .rel = "config.json", .data = "{\"format\":1}\n" },
-        .{ .rel = "contexts.md", .data = "| Contexto | Uso |\n| --- | --- |\n| personal | P |\n" },
-        .{ .rel = "inbox.md", .data = "- [ ] not a task\n" },
-        .{ .rel = "lists/next.md", .data = "" },
-        .{ .rel = "lists/waiting.md", .data = "" },
-        .{ .rel = "lists/someday.md", .data = "" },
-        .{ .rel = "lists/archive.md", .data = "" },
-    });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
 
-    var c = testCtx(io, alloc, a);
-    const before = try snapshot(&c, src);
-    const names_before = try dirNames(io, a, base);
+    // Pure format-2 evidence: v2 contexts header, no config.
+    try putBareStructure(io, a, &tmp, "src");
+    try put(io, a, &tmp, "src", "contexts.md", "# Contexts\n\n| Context | Use |\n| --- | --- |\n| personal | Personal |\n");
+    try std.testing.expectError(error.MixedSignals, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null));
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
 
-    const today = try platform.parseDate("2026-11-17");
-    try std.testing.expectError(error.MalformedTask, run(io, alloc, .{ .from = src, .to = dst, .dry_run = true, .today = today }, null));
-    try std.testing.expect(!store_mod.pathExists(io, dst));
-    const names_after = try dirNames(io, a, base);
-    try std.testing.expectEqualStrings(
-        try std.mem.join(a, ",", names_before),
-        try std.mem.join(a, ",", names_after),
-    );
-    try expectSourceUnchanged(io, alloc, a, src, before);
+    // Mixed evidence: v1 contexts header plus an English task key.
+    try put(io, a, &tmp, "src", "contexts.md", "# Contexts\n\n| Contexto | Use |\n| --- | --- |\n| personal | Personal |\n");
+    try put(io, a, &tmp, "src", "inbox.md", "- [ ] T-20260101-001 | Mixed | context: personal\n");
+    try std.testing.expectError(error.MixedSignals, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null));
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+    try std.testing.expectError(error.FileNotFound, readStoreFile(a, io, dest_abs, "config.json"));
 }
 
-/// Every refusal leaves the destination absent, the source byte-identical and
-/// no staging directory behind in the parent.
-fn expectRefusal(io: std.Io, alloc: std.mem.Allocator, a: std.mem.Allocator, src: []const u8, dst: []const u8, files: []const FileSpec, expected: anyerror) !void {
-    try writeFiles(io, a, src, files);
-    var c = testCtx(io, alloc, a);
-    // The baseline cannot hash a symlink or special file — that refusal is
-    // the very behaviour under test — so the source-hash comparison is
-    // skipped exactly when the baseline itself is refused; the top-level
-    // listing is compared either way.
-    const before = snapshot(&c, src) catch |err| blk: {
-        try std.testing.expectEqual(expected, err);
-        break :blk null;
+test "missing config without any v1 marker is ambiguous" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
+
+    try putBareStructure(io, a, &tmp, "src");
+    try put(io, a, &tmp, "src", "contexts.md", "# Contexts\n\n| Thing | Use |\n| --- | --- |\n| personal | Personal |\n");
+
+    try std.testing.expectError(error.AmbiguousSource, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null));
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+    try std.testing.expectError(error.FileNotFound, readStoreFile(a, io, dest_abs, "config.json"));
+}
+
+test "an existing config must be exactly format 1 and well formed" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
+
+    try writeV1Store(io, a, &tmp, "src");
+    const cases = [_]struct { data: []const u8, err: anyerror }{
+        .{ .data = "{\"format\":2}\n", .err = error.UnsupportedFormat },
+        .{ .data = "{\"format\":3}\n", .err = error.UnsupportedFormat },
+        .{ .data = "not json\n", .err = error.InvalidConfig },
+        .{ .data = "{\"format\":1,\"format\":1}\n", .err = error.InvalidConfig },
+        .{ .data = "{\"format\":1,\"policy\":{\"requireClientFor\":[1]}}\n", .err = error.InvalidConfig },
+        .{ .data = "{\"format\":\"1\"}\n", .err = error.InvalidConfig },
+        .{ .data = "{}\n", .err = error.AmbiguousSource },
     };
-    const names_before = try dirNames(io, a, std.fs.path.dirname(dst).?);
-
-    var diag: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (diag.items) |m| alloc.free(m);
-        diag.deinit(alloc);
+    for (cases) |c| {
+        try put(io, a, &tmp, "src", "config.json", c.data);
+        try std.testing.expectError(c.err, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null));
+        try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+        try std.testing.expectError(error.FileNotFound, readStoreFile(a, io, dest_abs, "config.json"));
     }
-    const today = try platform.parseDate("2026-11-17");
-    try std.testing.expectError(expected, run(io, alloc, .{ .from = src, .to = dst, .today = today }, &diag));
-    try std.testing.expect(!store_mod.pathExists(io, dst));
-    const names_after = try dirNames(io, a, std.fs.path.dirname(dst).?);
-    try std.testing.expectEqualStrings(
-        try std.mem.join(a, ",", names_before),
-        try std.mem.join(a, ",", names_after),
-    );
-    if (before) |b| try expectSourceUnchanged(io, alloc, a, src, b);
 }
 
-const minimal_v1 = [_]FileSpec{
-    .{ .rel = "config.json", .data = "{\"format\":1}\n" },
-    .{ .rel = "contexts.md", .data = "| Contexto | Uso |\n| --- | --- |\n| personal | P |\n" },
-    .{ .rel = "inbox.md", .data = "# Bandeja\n\n" },
-    .{ .rel = "lists/next.md", .data = "" },
-    .{ .rel = "lists/waiting.md", .data = "" },
-    .{ .rel = "lists/someday.md", .data = "" },
-    .{ .rel = "lists/archive.md", .data = "" },
-};
-
-test "refuses ambiguous or mixed format signals" {
+test "a legacy key colliding with an English key is rejected" {
     const alloc = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -1164,357 +1690,27 @@ test "refuses ambiguous or mixed format signals" {
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
     const io = threaded.io();
-
-    // No config and no v1 evidence: a store that is not established as v1.
-    {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = try tmp.dir.realPath(io, &buf);
-        const base = try a.dupe(u8, buf[0..n]);
-        const src = try std.fs.path.join(a, &.{ base, "src" });
-        const dst = try std.fs.path.join(a, &.{ base, "dst" });
-        try expectRefusal(io, alloc, a, src, dst, &.{
-            .{ .rel = "contexts.md", .data = "| Context | Use |\n| --- | --- |\n| personal | P |\n" },
-            .{ .rel = "inbox.md", .data = "# Inbox\n\n" },
-            .{ .rel = "lists/next.md", .data = "" },
-            .{ .rel = "lists/waiting.md", .data = "" },
-            .{ .rel = "lists/someday.md", .data = "" },
-            .{ .rel = "lists/archive.md", .data = "" },
-        }, error.AmbiguousSource);
-    }
-
-    // Format-2 keys with no config: not a convertible source either.
-    {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = try tmp.dir.realPath(io, &buf);
-        const base = try a.dupe(u8, buf[0..n]);
-        const src = try std.fs.path.join(a, &.{ base, "src" });
-        const dst = try std.fs.path.join(a, &.{ base, "dst" });
-        try expectRefusal(io, alloc, a, src, dst, &.{
-            .{ .rel = "contexts.md", .data = "| Context | Use |\n| --- | --- |\n| personal | P |\n" },
-            .{ .rel = "inbox.md", .data = "- [ ] T-20261101-001 | New style | context: personal\n" },
-            .{ .rel = "lists/next.md", .data = "" },
-            .{ .rel = "lists/waiting.md", .data = "" },
-            .{ .rel = "lists/someday.md", .data = "" },
-            .{ .rel = "lists/archive.md", .data = "" },
-        }, error.AmbiguousSource);
-    }
-
-    // Declared format 1 but carrying format-2 keys: mixed signals.
-    {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = try tmp.dir.realPath(io, &buf);
-        const base = try a.dupe(u8, buf[0..n]);
-        const src = try std.fs.path.join(a, &.{ base, "src" });
-        const dst = try std.fs.path.join(a, &.{ base, "dst" });
-        try expectRefusal(io, alloc, a, src, dst, &.{
-            .{ .rel = "config.json", .data = "{\"format\":1}\n" },
-            .{ .rel = "contexts.md", .data = "| Contexto | Uso |\n| --- | --- |\n| personal | P |\n" },
-            .{ .rel = "inbox.md", .data = "- [ ] T-20261101-001 | Mixed | context: personal\n" },
-            .{ .rel = "lists/next.md", .data = "" },
-            .{ .rel = "lists/waiting.md", .data = "" },
-            .{ .rel = "lists/someday.md", .data = "" },
-            .{ .rel = "lists/archive.md", .data = "" },
-        }, error.MixedSignals);
-    }
-}
-
-test "refuses a key-renaming collision and malformed or duplicate tasks" {
-    const alloc = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var threaded: std.Io.Threaded = .init(alloc, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    const cases = [_]struct { name: []const u8, inbox: []const u8, next: []const u8, expected: anyerror }{
-        // A legacy key that would land on an existing format-2 key.
-        .{ .name = "collision", .inbox = "- [ ] T-20261101-001 | C | contexto: personal | context: work\n", .next = "", .expected = error.KeyCollision },
-        .{ .name = "malformed", .inbox = "- [ ] not a task\n", .next = "", .expected = error.MalformedTask },
-        .{ .name = "duplicate fields", .inbox = "- [ ] T-20261101-001 | D | contexto: a | contexto: b\n", .next = "", .expected = error.MalformedTask },
-        .{ .name = "duplicate ids", .inbox = "- [ ] T-20261101-001 | One | contexto: personal\n", .next = "- [ ] T-20261101-001 | Two | contexto: personal\n", .expected = error.DuplicateId },
-    };
-    for (cases) |case| {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = try tmp.dir.realPath(io, &buf);
-        const base = try a.dupe(u8, buf[0..n]);
-        const src = try std.fs.path.join(a, &.{ base, "src" });
-        const dst = try std.fs.path.join(a, &.{ base, "dst" });
-        try expectRefusal(io, alloc, a, src, dst, &.{
-            .{ .rel = "config.json", .data = "{\"format\":1}\n" },
-            .{ .rel = "contexts.md", .data = "| Contexto | Uso |\n| --- | --- |\n| personal | P |\n" },
-            .{ .rel = "inbox.md", .data = case.inbox },
-            .{ .rel = "lists/next.md", .data = case.next },
-            .{ .rel = "lists/waiting.md", .data = "" },
-            .{ .rel = "lists/someday.md", .data = "" },
-            .{ .rel = "lists/archive.md", .data = "" },
-        }, case.expected);
-    }
-}
-
-test "refuses a present but malformed, empty or unreadable routine table" {
-    const alloc = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var threaded: std.Io.Threaded = .init(alloc, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    // Unknown cadence token.
-    {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = try tmp.dir.realPath(io, &buf);
-        const base = try a.dupe(u8, buf[0..n]);
-        const src = try std.fs.path.join(a, &.{ base, "src" });
-        const dst = try std.fs.path.join(a, &.{ base, "dst" });
-        try expectRefusal(io, alloc, a, src, dst, &.{
-            .{ .rel = "config.json", .data = "{\"format\":1}\n" },
-            .{ .rel = "contexts.md", .data = "| Contexto | Uso |\n| --- | --- |\n| personal | P |\n" },
-            .{ .rel = "inbox.md", .data = "" },
-            .{ .rel = "lists/next.md", .data = "" },
-            .{ .rel = "lists/waiting.md", .data = "" },
-            .{ .rel = "lists/someday.md", .data = "" },
-            .{ .rel = "lists/archive.md", .data = "" },
-            .{ .rel = "routines/state.md", .data = "| rutina | cadencia | último |\n| --- | --- | --- |\n| inbox | hourly | 2026-11-01 |\n" },
-        }, error.MalformedRoutine);
-    }
-
-    // Empty table (no rows at all).
-    {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = try tmp.dir.realPath(io, &buf);
-        const base = try a.dupe(u8, buf[0..n]);
-        const src = try std.fs.path.join(a, &.{ base, "src" });
-        const dst = try std.fs.path.join(a, &.{ base, "dst" });
-        try expectRefusal(io, alloc, a, src, dst, &.{
-            .{ .rel = "config.json", .data = "{\"format\":1}\n" },
-            .{ .rel = "contexts.md", .data = "| Contexto | Uso |\n| --- | --- |\n| personal | P |\n" },
-            .{ .rel = "inbox.md", .data = "" },
-            .{ .rel = "lists/next.md", .data = "" },
-            .{ .rel = "lists/waiting.md", .data = "" },
-            .{ .rel = "lists/someday.md", .data = "" },
-            .{ .rel = "lists/archive.md", .data = "" },
-            .{ .rel = "routines/state.md", .data = "# Rutinas\n\n| rutina | cadencia | último |\n| --- | --- | --- |\n" },
-        }, error.MalformedRoutine);
-    }
-
-    // Unreadable: a directory where the routine table must be. Any failure is
-    // a refusal; nothing is written.
-    {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = try tmp.dir.realPath(io, &buf);
-        const base = try a.dupe(u8, buf[0..n]);
-        const src = try std.fs.path.join(a, &.{ base, "src" });
-        const dst = try std.fs.path.join(a, &.{ base, "dst" });
-        try writeFiles(io, a, src, &.{
-            .{ .rel = "config.json", .data = "{\"format\":1}\n" },
-            .{ .rel = "contexts.md", .data = "| Contexto | Uso |\n| --- | --- |\n| personal | P |\n" },
-            .{ .rel = "inbox.md", .data = "" },
-            .{ .rel = "lists/next.md", .data = "" },
-            .{ .rel = "lists/waiting.md", .data = "" },
-            .{ .rel = "lists/someday.md", .data = "" },
-            .{ .rel = "lists/archive.md", .data = "" },
-        });
-        try std.Io.Dir.cwd().createDirPath(io, try std.fs.path.join(a, &.{ src, routine.path }));
-        var c = testCtx(io, alloc, a);
-        const before = try snapshot(&c, src);
-        const today = try platform.parseDate("2026-11-17");
-        var failed = false;
-        if (run(io, alloc, .{ .from = src, .to = dst, .today = today }, null)) |_| {} else |_| failed = true;
-        try std.testing.expect(failed);
-        try std.testing.expect(!store_mod.pathExists(io, dst));
-        try expectSourceUnchanged(io, alloc, a, src, before);
-    }
-}
-
-test "refuses a pending journal, a non-format-1 config and missing structure" {
-    const alloc = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var threaded: std.Io.Threaded = .init(alloc, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    // Pending journal: inspected without creating any file.
-    {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = try tmp.dir.realPath(io, &buf);
-        const base = try a.dupe(u8, buf[0..n]);
-        const src = try std.fs.path.join(a, &.{ base, "src" });
-        const dst = try std.fs.path.join(a, &.{ base, "dst" });
-        var files: [minimal_v1.len + 1]FileSpec = undefined;
-        @memcpy(files[0..minimal_v1.len], &minimal_v1);
-        files[minimal_v1.len] = .{ .rel = ".state/pending.json", .data = "{\"version\":1,\"files\":[]}\n" };
-        try expectRefusal(io, alloc, a, src, dst, &files, error.PendingTransaction);
-    }
-
-    // A format-2 (or malformed) config is not a convertible source.
-    for ([_]struct { data: []const u8, expected: anyerror }{
-        .{ .data = "{\"format\":2}\n", .expected = error.InvalidConfig },
-        .{ .data = "not json\n", .expected = error.InvalidConfig },
-        .{ .data = "{\"policy\":{}}\n", .expected = error.InvalidConfig },
-    }) |case| {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = try tmp.dir.realPath(io, &buf);
-        const base = try a.dupe(u8, buf[0..n]);
-        const src = try std.fs.path.join(a, &.{ base, "src" });
-        const dst = try std.fs.path.join(a, &.{ base, "dst" });
-        var files: [minimal_v1.len]FileSpec = undefined;
-        @memcpy(&files, &minimal_v1);
-        files[0] = .{ .rel = "config.json", .data = case.data };
-        try expectRefusal(io, alloc, a, src, dst, &files, case.expected);
-    }
-
-    // Missing canonical list: not a complete store.
-    {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = try tmp.dir.realPath(io, &buf);
-        const base = try a.dupe(u8, buf[0..n]);
-        const src = try std.fs.path.join(a, &.{ base, "src" });
-        const dst = try std.fs.path.join(a, &.{ base, "dst" });
-        try expectRefusal(io, alloc, a, src, dst, &.{
-            .{ .rel = "config.json", .data = "{\"format\":1}\n" },
-            .{ .rel = "contexts.md", .data = "| Contexto | Uso |\n| --- | --- |\n| personal | P |\n" },
-            .{ .rel = "inbox.md", .data = "" },
-            .{ .rel = "lists/next.md", .data = "" },
-            .{ .rel = "lists/waiting.md", .data = "" },
-            .{ .rel = "lists/someday.md", .data = "" },
-        }, error.InvalidWorkspace);
-    }
-}
-
-test "refuses symlinks and special files in the copied tree" {
-    const alloc = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var threaded: std.Io.Threaded = .init(alloc, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    // A symlink where a canonical list belongs.
-    {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = try tmp.dir.realPath(io, &buf);
-        const base = try a.dupe(u8, buf[0..n]);
-        const src = try std.fs.path.join(a, &.{ base, "src" });
-        const dst = try std.fs.path.join(a, &.{ base, "dst" });
-        // Only the directory needs to exist for the link itself.
-        try std.Io.Dir.cwd().createDirPath(io, try std.fs.path.join(a, &.{ src, "lists" }));
-        const link = try std.fs.path.join(a, &.{ src, "lists/someday.md" });
-        try std.Io.Dir.cwd().symLink(io, "../inbox.md", link, .{});
-        try expectRefusal(io, alloc, a, src, dst, &.{
-            .{ .rel = "config.json", .data = "{\"format\":1}\n" },
-            .{ .rel = "contexts.md", .data = "| Contexto | Uso |\n| --- | --- |\n| personal | P |\n" },
-            .{ .rel = "inbox.md", .data = "" },
-            .{ .rel = "lists/next.md", .data = "" },
-            .{ .rel = "lists/waiting.md", .data = "" },
-        }, error.UnsupportedEntry);
-    }
-
-    // A FIFO is a special file and must never be read (reading it would block).
-    if (builtin.os.tag != .windows) {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = try tmp.dir.realPath(io, &buf);
-        const base = try a.dupe(u8, buf[0..n]);
-        const src = try std.fs.path.join(a, &.{ base, "src" });
-        const dst = try std.fs.path.join(a, &.{ base, "dst" });
-        try writeFiles(io, a, src, &minimal_v1);
-        const pipe_path = try std.fs.path.join(a, &.{ src, "notes.pipe" });
-        const pipe = try a.allocSentinel(u8, pipe_path.len, 0);
-        @memcpy(pipe, pipe_path);
-        try std.testing.expectEqual(@as(c_int, 0), mkfifo(pipe, 0o600));
-        try expectRefusal(io, alloc, a, src, dst, &.{
-            .{ .rel = "config.json", .data = "{\"format\":1}\n" },
-            .{ .rel = "contexts.md", .data = "| Contexto | Uso |\n| --- | --- |\n| personal | P |\n" },
-            .{ .rel = "inbox.md", .data = "" },
-            .{ .rel = "lists/next.md", .data = "" },
-            .{ .rel = "lists/waiting.md", .data = "" },
-            .{ .rel = "lists/someday.md", .data = "" },
-            .{ .rel = "lists/archive.md", .data = "" },
-        }, error.UnsupportedEntry);
-    }
-}
-
-extern "c" fn mkfifo(path: [*:0]const u8, mode: std.posix.mode_t) c_int;
-
-test "refuses overlapping paths, an existing destination and a missing parent" {
-    const alloc = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var threaded: std.Io.Threaded = .init(alloc, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &buf);
-    const base = try a.dupe(u8, buf[0..n]);
-    const src = try std.fs.path.join(a, &.{ base, "src" });
-    try writeFiles(io, a, src, &minimal_v1);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
 
-    var c = testCtx(io, alloc, a);
-    const before = try snapshot(&c, src);
-    const today = try platform.parseDate("2026-11-17");
+    try writeV1Store(io, a, &tmp, "src");
+    // Even equal values must not paper over the collision.
+    try put(io, a, &tmp, "src", "inbox.md", "- [ ] T-20260101-001 | Both | contexto: personal | context: personal\n");
+    const before = try snapshot(a, io, src_abs);
 
-    // Destination inside the source: refused before anything is written.
-    try std.testing.expectError(
-        error.PathOverlap,
-        run(io, alloc, .{ .from = src, .to = try std.fs.path.join(a, &.{ src, "nested" }), .today = today }, null),
-    );
-
-    // Destination parent missing.
-    try std.testing.expectError(
-        error.InvalidWorkspace,
-        run(io, alloc, .{ .from = src, .to = try std.fs.path.join(a, &.{ base, "absent", "dst" }), .today = today }, null),
-    );
-
-    // Source missing.
-    try std.testing.expectError(
-        error.InvalidWorkspace,
-        run(io, alloc, .{ .from = try std.fs.path.join(a, &.{ base, "ghost" }), .to = try std.fs.path.join(a, &.{ base, "dst1" }), .today = today }, null),
-    );
-
-    // Existing destination directory, then a dangling symlink at the same path.
-    const dst = try std.fs.path.join(a, &.{ base, "dst" });
-    try std.Io.Dir.cwd().createDirPath(io, dst);
-    try std.testing.expectError(error.DestinationExists, run(io, alloc, .{ .from = src, .to = dst, .today = today }, null));
-    try std.Io.Dir.cwd().deleteTree(io, dst);
-    try std.Io.Dir.cwd().symLink(io, "nowhere", dst, .{});
-    try std.testing.expectError(error.DestinationExists, run(io, alloc, .{ .from = src, .to = dst, .today = today }, null));
-
-    try expectSourceUnchanged(io, alloc, a, src, before);
+    try std.testing.expectError(error.KeyCollision, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null));
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+    try std.testing.expectError(error.FileNotFound, readStoreFile(a, io, dest_abs, "config.json"));
+    try expectSourceUnchanged(a, io, src_abs, &before);
 }
 
-test "a strict check failure keeps the destination absent and removes the stage" {
+test "malformed task lines and duplicate ids are rejected" {
     const alloc = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -1522,71 +1718,498 @@ test "a strict check failure keeps the destination absent and removes the stage"
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
     const io = threaded.io();
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &buf);
-    const base = try a.dupe(u8, buf[0..n]);
-    const src = try std.fs.path.join(a, &.{ base, "src" });
-    const dst = try std.fs.path.join(a, &.{ base, "dst" });
-    // Passes every preflight step; only the strict checker of the staged copy
-    // rejects it (`captured_at` disagrees with the id date).
-    try writeFiles(io, a, src, &.{
-        .{ .rel = "config.json", .data = "{\"format\":1}\n" },
-        .{ .rel = "contexts.md", .data = "| Contexto | Uso |\n| --- | --- |\n| personal | P |\n" },
-        .{ .rel = "inbox.md", .data = "- [ ] T-20261111-001 | Mismatch | contexto: personal | capturada: 2026-01-01\n" },
-        .{ .rel = "lists/next.md", .data = "" },
-        .{ .rel = "lists/waiting.md", .data = "" },
-        .{ .rel = "lists/someday.md", .data = "" },
-        .{ .rel = "lists/archive.md", .data = "" },
-    });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
 
-    var c = testCtx(io, alloc, a);
-    const before = try snapshot(&c, src);
-    const names_before = try dirNames(io, a, base);
+    // A malformed task line is a failure, exactly like the product loader.
+    try writeV1Store(io, a, &tmp, "src");
+    try put(io, a, &tmp, "src", "inbox.md", "- [ ] not a task\n");
+    try std.testing.expectError(error.MalformedTask, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null));
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
 
-    var diag: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (diag.items) |m| alloc.free(m);
-        diag.deinit(alloc);
-    }
-    const today = try platform.parseDate("2026-11-17");
-    try std.testing.expectError(error.StageInvalid, run(io, alloc, .{ .from = src, .to = dst, .today = today }, &diag));
+    // An invalid id is malformed too.
+    try put(io, a, &tmp, "src", "inbox.md", "- [ ] BAD | x\n");
+    try std.testing.expectError(error.MalformedTask, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null));
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+
+    // One task id may appear only once across the canonical lists.
+    try writeV1Store(io, a, &tmp, "src");
+    try put(io, a, &tmp, "src", "lists/next.md", "- [ ] T-20260101-001 | Duplicate id | contexto: personal\n");
+    try std.testing.expectError(error.DuplicateId, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null));
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+    try std.testing.expectError(error.FileNotFound, readStoreFile(a, io, dest_abs, "config.json"));
+}
+
+test "a missing routine file is seeded with the captured date" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
+
+    try writeV1Store(io, a, &tmp, "src");
+    try tmp.dir.deleteFile(io, "src/routines/state.md");
+
+    // The dry run reports the captured seed date without writing anything.
+    const dry = try run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = true }, null);
+    try std.testing.expectEqualStrings("seeded", dry.routines);
+    try std.testing.expect(dry.seed_date != null);
+    try std.testing.expectEqualStrings("2026-11-11", dry.seed_date.?);
+    try std.testing.expect(!dry.checked);
+    try std.testing.expectError(error.FileNotFound, readStoreFile(a, io, dest_abs, "routines/state.md"));
+
+    const report = try run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null);
+
+    try std.testing.expectEqualStrings("seeded", report.routines);
+    try std.testing.expect(report.seed_date != null);
+    try std.testing.expectEqualStrings("2026-11-11", report.seed_date.?);
+    try std.testing.expect(report.checked);
+    const seeded = try readStoreFile(a, io, dest_abs, "routines/state.md");
+    const expected = try seedRoutineText(a, "2026-11-11");
+    try std.testing.expectEqualStrings(expected, seeded);
+}
+
+test "malformed routines and missing canonical lists fail" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
+
+    // An existing but malformed routine file fails; it is never reseeded.
+    try writeV1Store(io, a, &tmp, "src");
+    try put(io, a, &tmp, "src", "routines/state.md", "| inbox | hourly | 2026-01-01 |\n");
+    try std.testing.expectError(error.MalformedRoutine, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null));
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+
+    // A missing canonical list fails the structure preflight.
+    try writeV1Store(io, a, &tmp, "src");
+    try tmp.dir.deleteFile(io, "src/lists/someday.md");
+    try std.testing.expectError(error.InvalidStoreStructure, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null));
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+    try std.testing.expectError(error.FileNotFound, readStoreFile(a, io, dest_abs, "config.json"));
+}
+
+test "a pending journal refuses the migration before any write" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
+
+    try writeV1Store(io, a, &tmp, "src");
+    try put(io, a, &tmp, "src", ".state/pending.json", "{}\n");
+    const before = try snapshot(a, io, src_abs);
+
+    try std.testing.expectError(error.PendingTransaction, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null));
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+    try std.testing.expectError(error.FileNotFound, readStoreFile(a, io, dest_abs, "config.json"));
+    try expectSourceUnchanged(a, io, src_abs, &before);
+}
+
+test "a symlink in the copy set is rejected" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
+
+    if (builtin.os.tag == .windows) return; // symlink creation is not portable here
+    try writeV1Store(io, a, &tmp, "src");
+    const link_abs = try std.fs.path.join(a, &.{ src_abs, "evil" });
+    const target = try a.allocSentinel(u8, "plans".len, 0);
+    @memcpy(target[0..5], "plans");
+    const link_path = try a.allocSentinel(u8, link_abs.len, 0);
+    @memcpy(link_path[0..link_abs.len], link_abs);
+    if (std.c.symlink(target, link_path) != 0) return; // filesystem without symlink support
+
+    try std.testing.expectError(error.UnsupportedEntry, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null));
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+    try std.testing.expectError(error.FileNotFound, readStoreFile(a, io, dest_abs, "config.json"));
+}
+
+test "path guards reject overlap, existing destinations and bad names" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const today = try platform.parseDate("2026-11-11");
+
+    try writeV1Store(io, a, &tmp, "src");
+    const before = try snapshot(a, io, src_abs);
+
+    // equality and overlap, in both directions
+    try std.testing.expectError(error.PathOverlap, run(io, a, .{ .from = src_abs, .to = src_abs, .today = today, .dry_run = false }, null));
+    const inner = try std.fs.path.join(a, &.{ src_abs, "inner" });
+    try std.testing.expectError(error.PathOverlap, run(io, a, .{ .from = src_abs, .to = inner, .today = today, .dry_run = false }, null));
+    try std.testing.expectError(error.PathOverlap, run(io, a, .{ .from = src_abs, .to = base, .today = today, .dry_run = false }, null));
+
+    // an existing, distinct destination (and its diagnostic line)
+    try tmp.dir.createDirPath(io, "taken");
+    const taken = try std.fs.path.join(a, &.{ base, "taken" });
+    var diags: std.ArrayList([]const u8) = .empty;
+    defer diags.deinit(a);
+    try std.testing.expectError(error.DestinationExists, run(io, a, .{ .from = src_abs, .to = taken, .today = today, .dry_run = false }, &diags));
     var saw_detail = false;
-    for (diag.items) |m| {
-        if (std.mem.indexOf(u8, m, "captured_at does not match id date") != null) saw_detail = true;
+    for (diags.items) |d| {
+        if (std.mem.indexOf(u8, d, "destination already exists") != null) saw_detail = true;
     }
     try std.testing.expect(saw_detail);
-
-    try std.testing.expect(!store_mod.pathExists(io, dst));
-    const names_after = try dirNames(io, a, base);
-    try std.testing.expectEqualStrings(
-        try std.mem.join(a, ",", names_before),
-        try std.mem.join(a, ",", names_after),
-    );
-    try expectSourceUnchanged(io, alloc, a, src, before);
-}
-
-test "the rename table covers exactly the legacy reserved keys" {
-    try std.testing.expectEqual(model.legacy_fields.len, field_renames.len);
-    for (model.legacy_fields) |key| try std.testing.expect(renameTarget(key) != null);
-    for (field_renames) |r| try std.testing.expect(model.isLegacyField(r.from));
-    for (field_renames) |r| try std.testing.expect(isV2Reserved(r.to));
-}
-
-test "migration error names are stable" {
-    try std.testing.expectEqualStrings("ambiguous_source", errorName(error.AmbiguousSource));
-    try std.testing.expectEqualStrings("mixed_signals", errorName(error.MixedSignals));
-    try std.testing.expectEqualStrings("key_collision", errorName(error.KeyCollision));
     try std.testing.expectEqualStrings("destination_exists", errorName(error.DestinationExists));
-    try std.testing.expectEqualStrings("path_overlap", errorName(error.PathOverlap));
-    try std.testing.expectEqualStrings("unsupported_entry", errorName(error.UnsupportedEntry));
+
+    // a destination whose parent does not exist
+    const missing = try std.fs.path.join(a, &.{ base, "no/such/dest" });
+    try std.testing.expectError(error.DestinationParentMissing, run(io, a, .{ .from = src_abs, .to = missing, .today = today, .dry_run = false }, null));
+
+    // an unusable destination name
+    const dot = try std.fs.path.join(a, &.{ base, "x/." });
+    try std.testing.expectError(error.InvalidDestination, run(io, a, .{ .from = src_abs, .to = dot, .today = today, .dry_run = false }, null));
+
+    // a symlink alias of the source resolves to the same store
+    if (builtin.os.tag != .windows) {
+        const alias = try std.fs.path.join(a, &.{ base, "alias" });
+        const alias_z = try a.allocSentinel(u8, alias.len, 0);
+        @memcpy(alias_z[0..alias.len], alias);
+        const target_z = try a.allocSentinel(u8, src_abs.len, 0);
+        @memcpy(target_z[0..src_abs.len], src_abs);
+        if (std.c.symlink(target_z, alias_z) == 0) {
+            try std.testing.expectError(error.PathOverlap, run(io, a, .{ .from = alias, .to = src_abs, .today = today, .dry_run = false }, null));
+        }
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+    try expectSourceUnchanged(a, io, src_abs, &before);
+}
+
+test "the consistency re-check detects a changed source" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+
+    try writeV1Store(io, a, &tmp, "src");
+    const before = try snapshot(a, io, src_abs);
+    try put(io, a, &tmp, "src", "inbox.md", "- [ ] T-20260101-001 | Changed\n");
+    try std.testing.expectError(error.SourceChanged, expectSourceUnchanged(a, io, src_abs, &before));
+}
+
+test "line endings are preserved through conversion" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
+
+    try writeV1Store(io, a, &tmp, "src");
+    try put(io, a, &tmp, "src", "lists/next.md", "- [ ] T-20260101-002 | Next | contexto: personal\r\n- [ ] T-20260101-006 | Extra | contexto: personal\r\n");
+
+    const report = try run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null);
+    try std.testing.expect(report.checked);
+    const next = try readStoreFile(a, io, dest_abs, "lists/next.md");
+    try std.testing.expect(std.mem.indexOf(u8, next, "context: personal\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, next, "contexto") == null);
+    try std.testing.expectEqual(std.mem.count(u8, next, "\r\n"), std.mem.count(u8, next, "\n"));
+}
+
+test "a failed staged strict check creates no destination" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
+
+    try writeV1Store(io, a, &tmp, "src");
+    // Converts cleanly as v1 but violates format 2: `next` requires context.
+    try put(io, a, &tmp, "src", "lists/next.md", "- [ ] T-20260101-002 | No context\n");
+    const before = try snapshot(a, io, src_abs);
+
+    var diags: std.ArrayList([]const u8) = .empty;
+    defer diags.deinit(a);
+    try std.testing.expectError(error.StageInvalid, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, &diags));
+
+    // The staged check errors reach the diagnostics list for CLI output.
+    var reported = false;
+    for (diags.items) |d| {
+        if (std.mem.indexOf(u8, d, "missing context") != null) reported = true;
+    }
+    try std.testing.expect(reported);
     try std.testing.expectEqualStrings("stage_invalid", errorName(error.StageInvalid));
-    try std.testing.expectEqualStrings("source_changed", errorName(error.SourceChanged));
-    try std.testing.expectEqualStrings("invalid_field", errorName(error.MalformedTask));
-    try std.testing.expectEqualStrings("duplicate_id", errorName(error.DuplicateId));
-    try std.testing.expectEqualStrings("pending_transaction", errorName(error.PendingTransaction));
-    try std.testing.expectEqualStrings("invalid_workspace", errorName(error.InvalidWorkspace));
-    try std.testing.expectEqualStrings("unsupported_format", errorName(error.InvalidConfig));
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+    try std.testing.expectError(error.FileNotFound, readStoreFile(a, io, dest_abs, "config.json"));
+    try expectSourceUnchanged(a, io, src_abs, &before);
+}
+
+test "the migration key map matches the product legacy vocabulary" {
+    try std.testing.expectEqual(model.legacy_fields.len, key_renames.len);
+    for (model.legacy_fields, key_renames) |legacy, pair| {
+        try std.testing.expectEqualStrings(legacy, pair.from);
+    }
+    for (key_renames) |pair| {
+        var found = false;
+        for (english_keys) |ek| {
+            if (std.mem.eql(u8, ek, pair.to)) found = true;
+        }
+        try std.testing.expect(found);
+    }
+}
+
+test "a format-1 config with format-2 markers is mixed evidence" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
+
+    try writeV1Store(io, a, &tmp, "src");
+    // An English task key under an explicit format-1 config must not be
+    // silently reinterpreted as a reserved v2 field after conversion.
+    try put(io, a, &tmp, "src", "inbox.md", "- [ ] T-20260101-001 | Mixed | context: personal\n");
+    const before = try snapshot(a, io, src_abs);
+    var diags: std.ArrayList([]const u8) = .empty;
+    defer diags.deinit(a);
+    try std.testing.expectError(error.MixedSignals, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, &diags));
+    var saw_detail = false;
+    for (diags.items) |d| {
+        if (std.mem.indexOf(u8, d, "format-1 config with format-2 markers") != null) saw_detail = true;
+    }
+    try std.testing.expect(saw_detail);
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+    try std.testing.expectError(error.FileNotFound, readStoreFile(a, io, dest_abs, "config.json"));
+    try expectSourceUnchanged(a, io, src_abs, &before);
+
+    // The English `Context` header under an explicit format-1 config is the
+    // same refusal.
+    try writeV1Store(io, a, &tmp, "src");
+    try put(io, a, &tmp, "src", "contexts.md", "# Contexts\n\n| Context | Use |\n| --- | --- |\n| personal | Personal |\n");
+    diags.clearRetainingCapacity();
+    try std.testing.expectError(error.MixedSignals, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, &diags));
+    saw_detail = false;
+    for (diags.items) |d| {
+        if (std.mem.indexOf(u8, d, "format-1 config with format-2 markers") != null) saw_detail = true;
+    }
+    try std.testing.expect(saw_detail);
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+    try std.testing.expectError(error.FileNotFound, readStoreFile(a, io, dest_abs, "config.json"));
+}
+
+test "a dangling destination symlink refuses before any work" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "ghost" });
+    const today = try platform.parseDate("2026-11-11");
+
+    if (builtin.os.tag == .windows) return; // symlink creation is not portable here
+    try writeV1Store(io, a, &tmp, "src");
+    const target_abs = try std.fs.path.join(a, &.{ base, "no-such-target" });
+    const target_z = try a.allocSentinel(u8, target_abs.len, 0);
+    @memcpy(target_z[0..target_abs.len], target_abs);
+    const dest_z = try a.allocSentinel(u8, dest_abs.len, 0);
+    @memcpy(dest_z[0..dest_abs.len], dest_abs);
+    if (std.c.symlink(target_z, dest_z) != 0) return; // filesystem without symlink support
+    const before = try snapshot(a, io, src_abs);
+
+    var diags: std.ArrayList([]const u8) = .empty;
+    defer diags.deinit(a);
+    try std.testing.expectError(error.DestinationExists, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, &diags));
+
+    // Refused at preflight with the honest diagnostic, not later at promotion.
+    var honest = false;
+    var late = false;
+    for (diags.items) |d| {
+        if (std.mem.indexOf(u8, d, "destination already exists") != null) honest = true;
+        if (std.mem.indexOf(u8, d, "appeared during conversion") != null) late = true;
+    }
+    try std.testing.expect(honest);
+    try std.testing.expect(!late);
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+    try expectSourceUnchanged(a, io, src_abs, &before);
+}
+
+test "accented v1 routine days convert Monday-first" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
+
+    try writeV1Store(io, a, &tmp, "src");
+    try put(io, a, &tmp, "src", "routines/state.md", "# Routines\n\n| rutina | cadencia | última |\n| --- | --- | --- |\n| a | semanal:mié | 2026-01-05 |\n| b | semanal:sáb | 2026-01-03 |\n");
+
+    const report = try run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = false }, null);
+    try std.testing.expect(report.checked);
+    const routines = try readStoreFile(a, io, dest_abs, "routines/state.md");
+    try std.testing.expect(std.mem.indexOf(u8, routines, "| a | weekly:wed | 2026-01-05 |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, routines, "| b | weekly:sat | 2026-01-03 |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, routines, "mié") == null);
+    try std.testing.expect(std.mem.indexOf(u8, routines, "sáb") == null);
+    try std.testing.expect(std.mem.indexOf(u8, routines, "semanal:") == null);
+}
+
+test "a dry run against an invalid store writes nothing" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+    const src_abs = try std.fs.path.join(a, &.{ base, "src" });
+    const dest_abs = try std.fs.path.join(a, &.{ base, "v2" });
+    const today = try platform.parseDate("2026-11-11");
+
+    try writeV1Store(io, a, &tmp, "src");
+    try put(io, a, &tmp, "src", ".state/pending.json", "{}\n");
+    const before = try snapshot(a, io, src_abs);
+
+    try std.testing.expectError(error.PendingTransaction, run(io, a, .{ .from = src_abs, .to = dest_abs, .today = today, .dry_run = true }, null));
+    try std.testing.expectEqual(@as(usize, 0), try countStages(a, io, base));
+    try std.testing.expectError(error.FileNotFound, readStoreFile(a, io, dest_abs, "config.json"));
+    try expectSourceUnchanged(a, io, src_abs, &before);
+}
+
+test "error names are stable CLI codes" {
+    const pairs = [_]struct { err: anyerror, code: []const u8 }{
+        .{ .err = error.AmbiguousSource, .code = "ambiguous_source" },
+        .{ .err = error.MixedSignals, .code = "mixed_signals" },
+        .{ .err = error.UnsupportedFormat, .code = "unsupported_format" },
+        .{ .err = error.KeyCollision, .code = "key_collision" },
+        .{ .err = error.DestinationExists, .code = "destination_exists" },
+        .{ .err = error.PathOverlap, .code = "path_overlap" },
+        .{ .err = error.UnsupportedEntry, .code = "unsupported_entry" },
+        .{ .err = error.StageInvalid, .code = "stage_invalid" },
+        .{ .err = error.SourceChanged, .code = "source_changed" },
+        .{ .err = error.SourceNotFound, .code = "invalid_workspace" },
+        .{ .err = error.DestinationParentMissing, .code = "invalid_workspace" },
+        .{ .err = error.InvalidDestination, .code = "invalid_workspace" },
+        .{ .err = error.InvalidStoreStructure, .code = "invalid_workspace" },
+        // Engine-vocabulary fallbacks.
+        .{ .err = error.PendingTransaction, .code = "pending_transaction" },
+        .{ .err = error.MalformedTask, .code = "invalid_field" },
+        .{ .err = error.DuplicateId, .code = "duplicate_id" },
+        .{ .err = error.MalformedRoutine, .code = "invalid_field" },
+        .{ .err = error.InvalidConfig, .code = "unsupported_format" },
+    };
+    for (pairs) |pair| {
+        try std.testing.expectEqualStrings(pair.code, errorName(pair.err));
+    }
 }

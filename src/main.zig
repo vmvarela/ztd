@@ -898,6 +898,11 @@ fn cmdMigrate(ctx: *Ctx, args: []const []const u8, dry_run: bool, today: platfor
         try stdout(ctx, rep.config);
         try stdout(ctx, "\n  routines: ");
         try stdout(ctx, rep.routines);
+        if (rep.seed_date) |date| {
+            try stdout(ctx, " (");
+            try stdout(ctx, date);
+            try stdout(ctx, ")");
+        }
         try stdout(ctx, "\n  files: ");
         try printInt(ctx, rep.files);
         try stdout(ctx, "\n  tasks: ");

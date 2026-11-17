@@ -471,3 +471,12 @@ but cannot run the full store check on a staged copy. A real conversion
 validates the staged result before promotion. The original remains unchanged,
 but this is a forward-only conversion: keeping the source does not provide a
 lossless rollback after new work is written to the format-2 destination.
+
+The report names the destination format (`rewritten` or `synthesized`), the
+routine outcome (`transformed` or `seeded`), the captured `seed_date` when rows
+were seeded, file and task counts, renamed fields, and whether the staged store
+passed the strict check (always false for `--dry-run`). Conversion reads the
+source without creating locks or state; a concurrent writer is detected by
+comparing a content inventory before and after, so writers must be paused for
+the duration, and a writer that ignores that rule can still race the final
+promotion window.
