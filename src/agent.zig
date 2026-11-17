@@ -1177,30 +1177,30 @@ test "capture inserts at rev 1 and replays idempotently" {
     defer s.close();
 
     const r1 = try s.capture(.{
-        .scope = "trabajo",
-        .project = "komorebi",
-        .request = "implementar continuidad",
+        .scope = "work",
+        .project = "demo",
+        .request = "implement continuity",
         .objective = null,
-        .constraints = "sin dependencias nuevas",
+        .constraints = "no new dependencies",
         .idempotency_key = "op-1",
     });
     defer s.deinitCaptureResult(r1);
     try std.testing.expect(!r1.replayed);
     try std.testing.expectEqual(@as(i64, 1), r1.assignment.rev);
     try std.testing.expectEqualStrings("open", r1.assignment.status);
-    try std.testing.expectEqualStrings("trabajo", r1.assignment.scope);
-    try std.testing.expectEqualStrings("komorebi", r1.assignment.project.?);
+    try std.testing.expectEqualStrings("work", r1.assignment.scope);
+    try std.testing.expectEqualStrings("demo", r1.assignment.project.?);
     try std.testing.expect(r1.assignment.objective == null);
-    try std.testing.expectEqualStrings("sin dependencias nuevas", r1.assignment.constraints.?);
+    try std.testing.expectEqualStrings("no new dependencies", r1.assignment.constraints.?);
     try std.testing.expect(std.mem.startsWith(u8, r1.assignment.id, "A-"));
     try std.testing.expectEqualStrings("001", r1.assignment.id[11..]);
 
     const r2 = try s.capture(.{
-        .scope = "trabajo",
-        .project = "komorebi",
-        .request = "implementar continuidad",
+        .scope = "work",
+        .project = "demo",
+        .request = "implement continuity",
         .objective = null,
-        .constraints = "sin dependencias nuevas",
+        .constraints = "no new dependencies",
         .idempotency_key = "op-1",
     });
     defer s.deinitCaptureResult(r2);
@@ -1211,18 +1211,18 @@ test "capture inserts at rev 1 and replays idempotently" {
     try std.testing.expect(r2.assignment.objective == null);
 
     try std.testing.expectError(error.IdempotencyConflict, s.capture(.{
-        .scope = "trabajo",
+        .scope = "work",
         .project = null,
-        .request = "otra cosa",
+        .request = "something else",
         .objective = null,
         .constraints = null,
         .idempotency_key = "op-1",
     }));
 
     const r3 = try s.capture(.{
-        .scope = "trabajo",
+        .scope = "work",
         .project = null,
-        .request = "segunda captura",
+        .request = "second capture",
         .objective = null,
         .constraints = null,
         .idempotency_key = null,
@@ -1246,9 +1246,9 @@ test "checkpoint enforces scope, revision and kind" {
     defer s.close();
 
     const r0 = try s.capture(.{
-        .scope = "trabajo",
+        .scope = "work",
         .project = null,
-        .request = "escribir el spec",
+        .request = "write the spec",
         .objective = null,
         .constraints = null,
         .idempotency_key = null,
@@ -1258,7 +1258,7 @@ test "checkpoint enforces scope, revision and kind" {
 
     try std.testing.expectError(error.InvalidArgument, s.checkpoint(.{
         .assignment_id = id,
-        .scope = "trabajo",
+        .scope = "work",
         .expect_rev = 1,
         .kind = "bogus",
         .result = "x",
@@ -1268,7 +1268,7 @@ test "checkpoint enforces scope, revision and kind" {
     }));
     try std.testing.expectError(error.UnknownAssignment, s.checkpoint(.{
         .assignment_id = "A-19990101-001",
-        .scope = "trabajo",
+        .scope = "work",
         .expect_rev = 1,
         .kind = "progress",
         .result = "x",
@@ -1278,7 +1278,7 @@ test "checkpoint enforces scope, revision and kind" {
     }));
     try std.testing.expectError(error.ScopeDenied, s.checkpoint(.{
         .assignment_id = id,
-        .scope = "salud",
+        .scope = "health",
         .expect_rev = 1,
         .kind = "progress",
         .result = "x",
@@ -1289,12 +1289,12 @@ test "checkpoint enforces scope, revision and kind" {
 
     const c1 = try s.checkpoint(.{
         .assignment_id = id,
-        .scope = "trabajo",
+        .scope = "work",
         .expect_rev = 1,
         .kind = "progress",
-        .result = "avancé con el diseño",
+        .result = "advanced the design",
         .evidence = "commit abc123",
-        .next_action = "implementar db.zig",
+        .next_action = "implement db.zig",
         .idempotency_key = null,
     });
     defer s.deinitCheckpointResult(c1);
@@ -1309,30 +1309,30 @@ test "checkpoint enforces scope, revision and kind" {
     // Stale expect_rev: rejected, row untouched (still rev 2, status open).
     try std.testing.expectError(error.RevisionConflict, s.checkpoint(.{
         .assignment_id = id,
-        .scope = "trabajo",
+        .scope = "work",
         .expect_rev = 1,
         .kind = "done",
-        .result = "ya estaba hecho",
+        .result = "already done",
         .evidence = null,
         .next_action = null,
         .idempotency_key = null,
     }));
 
-    const p1 = try s.prepare(id, "trabajo");
+    const p1 = try s.prepare(id, "work");
     defer s.deinitPrepareResult(p1);
     try std.testing.expectEqual(@as(i64, 2), p1.assignment.rev);
     try std.testing.expectEqualStrings("open", p1.assignment.status);
     try std.testing.expectEqualStrings(c1.checkpoint.id, p1.latest.?.id);
 
-    try std.testing.expectError(error.ScopeDenied, s.prepare(id, "salud"));
-    try std.testing.expectError(error.UnknownAssignment, s.prepare("A-19990101-001", "trabajo"));
+    try std.testing.expectError(error.ScopeDenied, s.prepare(id, "health"));
+    try std.testing.expectError(error.UnknownAssignment, s.prepare("A-19990101-001", "work"));
 
     const c2 = try s.checkpoint(.{
         .assignment_id = id,
-        .scope = "trabajo",
+        .scope = "work",
         .expect_rev = 2,
         .kind = "done",
-        .result = "terminado",
+        .result = "finished",
         .evidence = null,
         .next_action = null,
         .idempotency_key = null,
@@ -1340,7 +1340,7 @@ test "checkpoint enforces scope, revision and kind" {
     defer s.deinitCheckpointResult(c2);
     try std.testing.expectEqual(@as(i64, 3), c2.assignment_rev);
 
-    const p2 = try s.prepare(id, "trabajo");
+    const p2 = try s.prepare(id, "work");
     defer s.deinitPrepareResult(p2);
     try std.testing.expectEqualStrings("done", p2.assignment.status);
     try std.testing.expectEqual(@as(i64, 3), p2.assignment.rev);
@@ -1350,7 +1350,7 @@ test "checkpoint enforces scope, revision and kind" {
     // Idempotent checkpoint: replay wins over the now-stale expect_rev.
     const c3 = try s.checkpoint(.{
         .assignment_id = id,
-        .scope = "trabajo",
+        .scope = "work",
         .expect_rev = 3,
         .kind = "progress",
         .result = "post ✓",
@@ -1362,7 +1362,7 @@ test "checkpoint enforces scope, revision and kind" {
     try std.testing.expectEqual(@as(i64, 4), c3.assignment_rev);
 
     // Lifecycle: a progress note after completion is recorded, and status stays done.
-    const p3 = try s.prepare(id, "trabajo");
+    const p3 = try s.prepare(id, "work");
     defer s.deinitPrepareResult(p3);
     try std.testing.expectEqualStrings("done", p3.assignment.status);
     try std.testing.expectEqual(@as(i64, 4), p3.assignment.rev);
@@ -1370,7 +1370,7 @@ test "checkpoint enforces scope, revision and kind" {
 
     const c4 = try s.checkpoint(.{
         .assignment_id = id,
-        .scope = "trabajo",
+        .scope = "work",
         .expect_rev = 3,
         .kind = "progress",
         .result = "post ✓",
@@ -1386,10 +1386,10 @@ test "checkpoint enforces scope, revision and kind" {
 
     try std.testing.expectError(error.IdempotencyConflict, s.checkpoint(.{
         .assignment_id = id,
-        .scope = "trabajo",
+        .scope = "work",
         .expect_rev = 3,
         .kind = "progress",
-        .result = "otro resultado",
+        .result = "other result",
         .evidence = null,
         .next_action = null,
         .idempotency_key = "ck-1",
@@ -1413,9 +1413,9 @@ test "a second connection with a stale rev is rejected and the row is unchanged"
     defer b.close();
 
     const r = try a.capture(.{
-        .scope = "trabajo",
+        .scope = "work",
         .project = null,
-        .request = "tarea compartida",
+        .request = "shared task",
         .objective = null,
         .constraints = null,
         .idempotency_key = null,
@@ -1425,10 +1425,10 @@ test "a second connection with a stale rev is rejected and the row is unchanged"
 
     const c1 = try a.checkpoint(.{
         .assignment_id = id,
-        .scope = "trabajo",
+        .scope = "work",
         .expect_rev = 1,
         .kind = "progress",
-        .result = "avance desde a",
+        .result = "progress from a",
         .evidence = null,
         .next_action = null,
         .idempotency_key = null,
@@ -1439,16 +1439,16 @@ test "a second connection with a stale rev is rejected and the row is unchanged"
     // b still believes rev 1: conflict, and nothing changes on disk.
     try std.testing.expectError(error.RevisionConflict, b.checkpoint(.{
         .assignment_id = id,
-        .scope = "trabajo",
+        .scope = "work",
         .expect_rev = 1,
         .kind = "done",
-        .result = "no debe grabarse",
+        .result = "must not be written",
         .evidence = null,
         .next_action = null,
         .idempotency_key = null,
     }));
 
-    const p = try b.prepare(id, "trabajo");
+    const p = try b.prepare(id, "work");
     defer b.deinitPrepareResult(p);
     try std.testing.expectEqual(@as(i64, 2), p.assignment.rev);
     try std.testing.expectEqualStrings("open", p.assignment.status);
@@ -1474,10 +1474,10 @@ test "export and restore round trip preserves revisions and digests" {
     defer src.close();
 
     const input = CaptureInput{
-        .scope = "trabajo",
-        .project = "komorebi",
-        .request = "exportar la tienda",
-        .objective = "recuperar el estado",
+        .scope = "work",
+        .project = "demo",
+        .request = "export the store",
+        .objective = "restore the state",
         .constraints = null,
         .idempotency_key = "op-1",
     };
@@ -1487,10 +1487,10 @@ test "export and restore round trip preserves revisions and digests" {
 
     const c1 = try src.checkpoint(.{
         .assignment_id = id,
-        .scope = "trabajo",
+        .scope = "work",
         .expect_rev = 1,
         .kind = "progress",
-        .result = "avance",
+        .result = "progress",
         .evidence = null,
         .next_action = null,
         .idempotency_key = "ck-1",
@@ -1498,10 +1498,10 @@ test "export and restore round trip preserves revisions and digests" {
     defer src.deinitCheckpointResult(c1);
     const c2 = try src.checkpoint(.{
         .assignment_id = id,
-        .scope = "trabajo",
+        .scope = "work",
         .expect_rev = 2,
         .kind = "done",
-        .result = "terminado",
+        .result = "finished",
         .evidence = "commit abc",
         .next_action = null,
         .idempotency_key = null,
@@ -1527,7 +1527,7 @@ test "export and restore round trip preserves revisions and digests" {
     try std.testing.expectEqual(@as(usize, 2), counts.checkpoints);
     try std.testing.expectEqual(@as(usize, 2), counts.operations);
 
-    const p = try dst.prepare(id, "trabajo");
+    const p = try dst.prepare(id, "work");
     defer dst.deinitPrepareResult(p);
     try std.testing.expectEqualStrings(input.request, p.assignment.request);
     try std.testing.expectEqualStrings("done", p.assignment.status);
@@ -1570,9 +1570,9 @@ test "restore refuses a non-empty store" {
     var src = try Store.open(alloc, io, src_path);
     defer src.close();
     const exported = try src.capture(.{
-        .scope = "trabajo",
+        .scope = "work",
         .project = null,
-        .request = "para exportar",
+        .request = "for export",
         .objective = null,
         .constraints = null,
         .idempotency_key = null,
@@ -1584,9 +1584,9 @@ test "restore refuses a non-empty store" {
     var dst = try Store.open(alloc, io, dst_path);
     defer dst.close();
     const existing = try dst.capture(.{
-        .scope = "otra",
+        .scope = "other",
         .project = null,
-        .request = "ya hay una fila",
+        .request = "row already exists",
         .objective = null,
         .constraints = null,
         .idempotency_key = null,
@@ -1601,10 +1601,10 @@ test "restore refuses a non-empty store" {
     try std.testing.expectEqual(@as(usize, 1), counts.assignments);
     try std.testing.expectEqual(@as(usize, 0), counts.checkpoints);
     try std.testing.expectEqual(@as(usize, 0), counts.operations);
-    const p = try dst.prepare(existing.assignment.id, "otra");
+    const p = try dst.prepare(existing.assignment.id, "other");
     defer dst.deinitPrepareResult(p);
     try std.testing.expectEqual(@as(i64, 1), p.assignment.rev);
-    try std.testing.expectEqualStrings("ya hay una fila", p.assignment.request);
+    try std.testing.expectEqualStrings("row already exists", p.assignment.request);
 }
 
 test "a corrupted export is refused without writing any row" {
@@ -1671,8 +1671,8 @@ test "restore rejects checkpoint shapes the store cannot produce" {
 
     const head =
         \\{"format":"ztd-agent-export","version":1,
-        \\ "scopes":[{"id":"trabajo"}],
-        \\ "assignments":[{"id":"A-20260101-001","scope_id":"trabajo","request":"x","objective":null,"constraints":null,"project":null,"status":"open","rev":2,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}],
+        \\ "scopes":[{"id":"work"}],
+        \\ "assignments":[{"id":"A-20260101-001","scope_id":"work","request":"x","objective":null,"constraints":null,"project":null,"status":"open","rev":2,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}],
         \\ "checkpoints":[
     ;
     const tail = "],\"operations\":[]}";
@@ -1728,9 +1728,9 @@ test "history is newest-first and honours the limit" {
     defer s.close();
 
     const r = try s.capture(.{
-        .scope = "trabajo",
+        .scope = "work",
         .project = null,
-        .request = "historial",
+        .request = "history",
         .objective = null,
         .constraints = null,
         .idempotency_key = null,
@@ -1740,10 +1740,10 @@ test "history is newest-first and honours the limit" {
 
     const c1 = try s.checkpoint(.{
         .assignment_id = id,
-        .scope = "trabajo",
+        .scope = "work",
         .expect_rev = 1,
         .kind = "progress",
-        .result = "uno",
+        .result = "one",
         .evidence = null,
         .next_action = null,
         .idempotency_key = null,
@@ -1751,10 +1751,10 @@ test "history is newest-first and honours the limit" {
     defer s.deinitCheckpointResult(c1);
     const c2 = try s.checkpoint(.{
         .assignment_id = id,
-        .scope = "trabajo",
+        .scope = "work",
         .expect_rev = 2,
         .kind = "progress",
-        .result = "dos",
+        .result = "two",
         .evidence = null,
         .next_action = null,
         .idempotency_key = null,
@@ -1762,17 +1762,17 @@ test "history is newest-first and honours the limit" {
     defer s.deinitCheckpointResult(c2);
     const c3 = try s.checkpoint(.{
         .assignment_id = id,
-        .scope = "trabajo",
+        .scope = "work",
         .expect_rev = 3,
         .kind = "done",
-        .result = "tres",
+        .result = "three",
         .evidence = null,
         .next_action = null,
         .idempotency_key = null,
     });
     defer s.deinitCheckpointResult(c3);
 
-    const h2 = try s.history(alloc, id, "trabajo", 2);
+    const h2 = try s.history(alloc, id, "work", 2);
     defer {
         for (h2) |c| freeCheckpoint(alloc, c);
         alloc.free(h2);
@@ -1783,11 +1783,11 @@ test "history is newest-first and honours the limit" {
     try std.testing.expectEqualStrings(c3.checkpoint.id, h2[0].id);
     try std.testing.expectEqualStrings(c2.checkpoint.id, h2[1].id);
 
-    const h0 = try s.history(alloc, id, "trabajo", 0);
+    const h0 = try s.history(alloc, id, "work", 0);
     try std.testing.expectEqual(@as(usize, 0), h0.len);
     alloc.free(h0);
 
-    const hall = try s.history(alloc, id, "trabajo", 99);
+    const hall = try s.history(alloc, id, "work", 99);
     defer {
         for (hall) |c| freeCheckpoint(alloc, c);
         alloc.free(hall);
@@ -1799,12 +1799,12 @@ test "history is newest-first and honours the limit" {
     try std.testing.expectEqualStrings(c1.checkpoint.id, hall[2].id);
 
     // the newest history entry is the checkpoint prepare reports as latest
-    const p = try s.prepare(id, "trabajo");
+    const p = try s.prepare(id, "work");
     defer s.deinitPrepareResult(p);
     try std.testing.expectEqualStrings(p.latest.?.id, hall[0].id);
 
-    try std.testing.expectError(error.ScopeDenied, s.history(alloc, id, "salud", 2));
-    try std.testing.expectError(error.UnknownAssignment, s.history(alloc, "A-19990101-001", "trabajo", 2));
+    try std.testing.expectError(error.ScopeDenied, s.history(alloc, id, "health", 2));
+    try std.testing.expectError(error.UnknownAssignment, s.history(alloc, "A-19990101-001", "work", 2));
 }
 
 test "a backup opens and passes the gate" {
@@ -1825,9 +1825,9 @@ test "a backup opens and passes the gate" {
     var s = try Store.open(alloc, io, src_path);
     defer s.close();
     const r = try s.capture(.{
-        .scope = "trabajo",
+        .scope = "work",
         .project = null,
-        .request = "respaldar",
+        .request = "backup",
         .objective = null,
         .constraints = null,
         .idempotency_key = "op-1",
@@ -1836,10 +1836,10 @@ test "a backup opens and passes the gate" {
     const id = r.assignment.id;
     const c1 = try s.checkpoint(.{
         .assignment_id = id,
-        .scope = "trabajo",
+        .scope = "work",
         .expect_rev = 1,
         .kind = "done",
-        .result = "listo",
+        .result = "ready",
         .evidence = null,
         .next_action = null,
         .idempotency_key = null,
@@ -1860,7 +1860,7 @@ test "a backup opens and passes the gate" {
     // opening runs the schema gate on the copy
     var b = try Store.open(alloc, io, bpath);
     defer b.close();
-    const p = try b.prepare(id, "trabajo");
+    const p = try b.prepare(id, "work");
     defer b.deinitPrepareResult(p);
     try std.testing.expectEqual(@as(i64, 2), p.assignment.rev);
     try std.testing.expectEqualStrings("done", p.assignment.status);
@@ -1878,9 +1878,9 @@ test "a backup opens and passes the gate" {
         alloc.free(op.result_json);
     }
     const expected = digestCapture(.{
-        .scope = "trabajo",
+        .scope = "work",
         .project = null,
-        .request = "respaldar",
+        .request = "backup",
         .objective = null,
         .constraints = null,
         .idempotency_key = "op-1",
@@ -1903,32 +1903,32 @@ test "remember inserts at rev 1 and recall finds it in its scope" {
     defer s.close();
 
     const r = try s.remember(.{
-        .scope = "trabajo",
+        .scope = "work",
         .kind = "decision",
-        .text = "usar FTS5 para el recall",
+        .text = "use FTS5 for recall",
         .source = "spec 10",
         .idempotency_key = null,
     });
     defer s.deinitRememberResult(r);
     try std.testing.expect(!r.replayed);
     try std.testing.expectEqual(@as(i64, 1), r.knowledge.rev);
-    try std.testing.expectEqualStrings("trabajo", r.knowledge.scope);
+    try std.testing.expectEqualStrings("work", r.knowledge.scope);
     try std.testing.expectEqualStrings("decision", r.knowledge.kind);
-    try std.testing.expectEqualStrings("usar FTS5 para el recall", r.knowledge.text);
+    try std.testing.expectEqualStrings("use FTS5 for recall", r.knowledge.text);
     try std.testing.expectEqualStrings("spec 10", r.knowledge.source.?);
     try std.testing.expect(std.mem.startsWith(u8, r.knowledge.id, "K-"));
     try std.testing.expectEqualStrings("001", r.knowledge.id[11..]);
 
-    const hits = try s.recall(.{ .scope = "trabajo", .query = "FTS5", .limit = 10 });
+    const hits = try s.recall(.{ .scope = "work", .query = "FTS5", .limit = 10 });
     defer s.deinitRecall(hits);
     try std.testing.expectEqual(@as(usize, 1), hits.len);
     try std.testing.expectEqualStrings(r.knowledge.id, hits[0].id);
-    try std.testing.expectEqualStrings("trabajo", hits[0].scope);
+    try std.testing.expectEqualStrings("work", hits[0].scope);
     try std.testing.expectEqual(@as(i64, 1), hits[0].rev);
     try std.testing.expectEqualStrings("spec 10", hits[0].source.?);
 
     // another scope sees nothing even for a matching query
-    const other = try s.recall(.{ .scope = "salud", .query = "FTS5", .limit = 10 });
+    const other = try s.recall(.{ .scope = "health", .query = "FTS5", .limit = 10 });
     defer s.deinitRecall(other);
     try std.testing.expectEqual(@as(usize, 0), other.len);
 }
@@ -1950,7 +1950,7 @@ test "recall ranks by bm25, folds diacritics and refuses bad input" {
     const a = try s.remember(.{
         .scope = "demo",
         .kind = "fact",
-        .text = "el build cache vive en zig-out",
+        .text = "the build cache lives in zig-out",
         .source = null,
         .idempotency_key = null,
     });
@@ -1964,9 +1964,9 @@ test "recall ranks by bm25, folds diacritics and refuses bad input" {
     });
     defer s.deinitRememberResult(b);
     const c = try s.remember(.{
-        .scope = "salud",
+        .scope = "health",
         .kind = "procedure",
-        .text = "revisión del sistema",
+        .text = "naïve approach",
         .source = null,
         .idempotency_key = null,
     });
@@ -1979,14 +1979,14 @@ test "recall ranks by bm25, folds diacritics and refuses bad input" {
     try std.testing.expectEqualStrings(b.knowledge.id, hits[0].id);
     try std.testing.expectEqualStrings(a.knowledge.id, hits[1].id);
 
-    // unicode61 remove_diacritics 2: "revision" finds "revisión"
-    const accented = try s.recall(.{ .scope = "salud", .query = "revision", .limit = 10 });
+    // unicode61 remove_diacritics 2: "naive" finds "naïve"
+    const accented = try s.recall(.{ .scope = "health", .query = "naive", .limit = 10 });
     defer s.deinitRecall(accented);
     try std.testing.expectEqual(@as(usize, 1), accented.len);
     try std.testing.expectEqualStrings(c.knowledge.id, accented[0].id);
 
     // an unknown scope is an empty list, not an error
-    const none = try s.recall(.{ .scope = "inexistente", .query = "build", .limit = 10 });
+    const none = try s.recall(.{ .scope = "nonexistent", .query = "build", .limit = 10 });
     defer s.deinitRecall(none);
     try std.testing.expectEqual(@as(usize, 0), none.len);
 
@@ -2022,8 +2022,8 @@ test "remember replays idempotently and conflicts on a different digest" {
     const input = RememberInput{
         .scope = "demo",
         .kind = "constraint",
-        .text = "sin dependencias nuevas",
-        .source = "revisión técnica",
+        .text = "no new dependencies",
+        .source = "technical review",
         .idempotency_key = "k-1",
     };
     const r1 = try s.remember(input);
@@ -2037,7 +2037,7 @@ test "remember replays idempotently and conflicts on a different digest" {
     try std.testing.expectEqualStrings(r1.knowledge.text, r2.knowledge.text);
     try std.testing.expectEqual(@as(i64, 1), r2.knowledge.rev);
 
-    const hits = try s.recall(.{ .scope = "demo", .query = "dependencias", .limit = 10 });
+    const hits = try s.recall(.{ .scope = "demo", .query = "dependencies", .limit = 10 });
     defer s.deinitRecall(hits);
     try std.testing.expectEqual(@as(usize, 1), hits.len);
 
@@ -2045,11 +2045,11 @@ test "remember replays idempotently and conflicts on a different digest" {
     try std.testing.expectError(error.IdempotencyConflict, s.remember(.{
         .scope = "demo",
         .kind = "constraint",
-        .text = "otro texto",
-        .source = "revisión técnica",
+        .text = "other text",
+        .source = "technical review",
         .idempotency_key = "k-1",
     }));
-    const after = try s.recall(.{ .scope = "demo", .query = "dependencias", .limit = 10 });
+    const after = try s.recall(.{ .scope = "demo", .query = "dependencies", .limit = 10 });
     defer s.deinitRecall(after);
     try std.testing.expectEqual(@as(usize, 1), after.len);
 }
@@ -2075,7 +2075,7 @@ test "export and restore round trip keeps knowledge and recall answers on the co
     const cap = try src.capture(.{
         .scope = "demo",
         .project = null,
-        .request = "tarea con conocimiento",
+        .request = "task with knowledge",
         .objective = null,
         .constraints = null,
         .idempotency_key = null,
@@ -2084,7 +2084,7 @@ test "export and restore round trip keeps knowledge and recall answers on the co
     const a = try src.remember(.{
         .scope = "demo",
         .kind = "fact",
-        .text = "el build cache vive en zig-out",
+        .text = "the build cache lives in zig-out",
         .source = null,
         .idempotency_key = null,
     });
@@ -2119,7 +2119,7 @@ test "export and restore round trip keeps knowledge and recall answers on the co
 
     const p = try dst.prepare(cap.assignment.id, "demo");
     defer dst.deinitPrepareResult(p);
-    try std.testing.expectEqualStrings("tarea con conocimiento", p.assignment.request);
+    try std.testing.expectEqualStrings("task with knowledge", p.assignment.request);
 
     // the restored store answers recall with the original records
     const hits = try dst.recall(.{ .scope = "demo", .query = "build cache", .limit = 10 });
@@ -2194,7 +2194,7 @@ test "restore refuses knowledge rows it cannot produce" {
         // duplicate id
         "{\"id\":\"K-20260101-001\",\"scope\":\"demo\",\"kind\":\"fact\",\"text\":\"x\",\"source\":null,\"rev\":1,\"created_at\":\"2026-01-01T00:00:00Z\"},{\"id\":\"K-20260101-001\",\"scope\":\"demo\",\"kind\":\"fact\",\"text\":\"x\",\"source\":null,\"rev\":1,\"created_at\":\"2026-01-01T00:00:00Z\"}",
         // scope missing from the document
-        "{\"id\":\"K-20260101-001\",\"scope\":\"otra\",\"kind\":\"fact\",\"text\":\"x\",\"source\":null,\"rev\":1,\"created_at\":\"2026-01-01T00:00:00Z\"}",
+        "{\"id\":\"K-20260101-001\",\"scope\":\"other\",\"kind\":\"fact\",\"text\":\"x\",\"source\":null,\"rev\":1,\"created_at\":\"2026-01-01T00:00:00Z\"}",
         // empty id
         "{\"id\":\"\",\"scope\":\"demo\",\"kind\":\"fact\",\"text\":\"x\",\"source\":null,\"rev\":1,\"created_at\":\"2026-01-01T00:00:00Z\"}",
     };

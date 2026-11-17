@@ -10,15 +10,16 @@ ztd - Markdown task manager for humans and agents
 
 # DESCRIPTION
 
-*ztd* reads and edits plain Markdown task lists inside a *ztd/* directory.
-Tasks are stored in *inbox.md*, *lists/next.md*, *lists/waiting.md*,
-*lists/someday.md* and *lists/archive.md*. The binary never runs Git.
+*ztd* reads and edits plain Markdown task lists in the store, a directory of
+task data. The store root resolves as *--root*, *ZTD_ROOT*, then *~/.ztd*; it
+is never discovered from the current directory. Tasks are stored in
+*inbox.md*, *lists/next.md*, *lists/waiting.md*, *lists/someday.md* and
+*lists/archive.md*, relative to that root. The binary never runs Git.
 
 # GLOBAL OPTIONS
 
 *--root* PATH
-	Workspace root or the *ztd/* directory. Defaults to *ZTD_ROOT* or
-	discovery from the current directory.
+	Store root (exact path). Defaults to *ZTD_ROOT*, then *~/.ztd*.
 
 *--json*
 	Machine-readable output. Errors are JSON too.
@@ -31,8 +32,9 @@ Tasks are stored in *inbox.md*, *lists/next.md*, *lists/waiting.md*,
 
 # COMMANDS
 
-*init* [PATH]
-	Create missing workspace files. Never overwrites.
+*init* [PATH] [*--local*]
+	Create missing store files at *~/.ztd* by default, at exactly *PATH*
+	when given, or at *./ztd* with *--local*. Never overwrites.
 
 *capture* TEXT...
 *--stdin*
@@ -51,7 +53,7 @@ Tasks are stored in *inbox.md*, *lists/next.md*, *lists/waiting.md*,
 	Read the daily plan and return the tasks of that context.
 
 *check* [*--strict*]
-	Validate the workspace. Exit 1 on errors.
+	Validate the store. Exit 1 on errors.
 
 *recover*
 	Finish or reject an interrupted transaction.
@@ -62,9 +64,16 @@ Tasks are stored in *inbox.md*, *lists/next.md*, *lists/waiting.md*,
 *routine* *done* ID
 	Record a routine run for today.
 
+*status* [*--json*]
+	Show the store root resolved by precedence, its source (*flag*,
+	*env* or *home*), whether the store exists and its *config.json*
+	format. *--json* returns the same keys (*root*, *source*, *exists*,
+	*format*). Never creates files; works when the store is absent.
+
 *agent-capture* *--scope* S *--request* TEXT [*--project* P] [*--objective* T] [*--constraints* T] [*--idempotency-key* K] [*--db* PATH]
-	Create an assignment in the agent store. Needs no Markdown workspace,
-	rejects the global options and prints the JSON envelope by default.
+	Create an assignment in the agent store. Needs no Markdown store,
+	rejects *--root*, *--today* and *--dry-run*, accepts *--json*, and
+	prints the JSON envelope by default.
 
 *agent-checkpoint* ID *--scope* S *--expect-rev* N *--result* TEXT [*--kind* progress|done] [*--evidence* T] [*--next* T] [*--idempotency-key* K] [*--db* PATH]
 	Record a checkpoint. A stale *--expect-rev* is *revision_conflict*; the

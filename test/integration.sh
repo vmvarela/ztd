@@ -7,19 +7,89 @@ BIN="$ROOT/zig-out/bin/ztd"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# Hermetic root precedence: no ambient ZTD_ROOT.
+unset ZTD_ROOT
+# Native code needs a platform path for HOME (Git Bash reports POSIX paths).
+case "$(uname -s)" in
+MINGW* | MSYS* | CYGWIN*)
+    if command -v cygpath >/dev/null 2>&1; then HOME_BASE="$(cygpath -w "$TMP")"; else HOME_BASE="$TMP"; fi ;;
+*) HOME_BASE="$TMP" ;;
+esac
+
+# An explicit path is the store directory itself: no `ztd` component is appended.
 "$BIN" init "$TMP" >/dev/null
+[ -f "$TMP/config.json" ]
+[ ! -e "$TMP/ztd" ]
 "$BIN" init --root "$TMP/alt" >/dev/null
 "$BIN" --root "$TMP/alt" check >/dev/null
-"$BIN" --root "$TMP" --today 2026-11-11 capture "Primera" "Segunda" >/dev/null
-"$BIN" --root "$TMP" list --json | grep -q 'T-'
-"$BIN" --root "$TMP" move T-20261111-001 next --field contexto:personal >/dev/null
-"$BIN" --root "$TMP" show T-20261111-001 | grep -q 'next'
+"$BIN" --root "$TMP" --today 2026-11-11 capture "First" "Second" >/dev/null
+# Capture before grepping: `grep -q` closes the pipe early and races the
+# writer's remaining chunks (BrokenPipe).
+listing="$("$BIN" --root "$TMP" list --json)"
+printf '%s' "$listing" | grep -q 'T-'
+"$BIN" --root "$TMP" move T-20261111-001 next --field context:personal >/dev/null
+shown="$("$BIN" --root "$TMP" show T-20261111-001)"
+printf '%s' "$shown" | grep -q 'next'
 "$BIN" --root "$TMP" check >/dev/null
 
+# status: active root, source and format; it works without creating a store.
+st="$("$BIN" --root "$TMP" status --json)"
+printf '%s' "$st" | grep -q '"source":"flag"'
+printf '%s' "$st" | grep -q '"exists":true'
+printf '%s' "$st" | grep -q '"format":2'
+human="$("$BIN" --root "$TMP" status)"
+printf '%s' "$human" | grep -q '^source: flag$'
+st="$(HOME="$HOME_BASE/statushome" ZTD_ROOT="$TMP" "$BIN" status --json)"
+printf '%s' "$st" | grep -q '"source":"env"'
+printf '%s' "$st" | grep -q '"exists":true'
+st="$(HOME="$HOME_BASE/statushome" ZTD_ROOT="$TMP" "$BIN" --root "$TMP/alt" status --json)"
+printf '%s' "$st" | grep -q '"source":"flag"'
+printf '%s' "$st" | grep -q 'alt'
+st="$(HOME="$HOME_BASE/statushome" "$BIN" status --json)"
+printf '%s' "$st" | grep -q '"source":"home"'
+printf '%s' "$st" | grep -q '"exists":false'
+[ ! -e "$TMP/statushome" ]
+
+# init: global by default, --local for the portable ./ztd, exact paths only.
+HOME="$HOME_BASE/globalhome" "$BIN" init >/dev/null
+st="$(HOME="$HOME_BASE/globalhome" "$BIN" status --json)"
+printf '%s' "$st" | grep -q '"source":"home"'
+printf '%s' "$st" | grep -q '"exists":true'
+HOME="$HOME_BASE/globalhome" "$BIN" check >/dev/null
+mkdir -p "$TMP/localdir"
+(cd "$TMP/localdir" && "$BIN" init --local >/dev/null)
+st="$(cd "$TMP/localdir" && "$BIN" --root ztd status --json)"
+printf '%s' "$st" | grep -q '"exists":true'
+printf '%s' "$st" | grep -q '"format":2'
+rc=0; "$BIN" init --local "$TMP/conflict" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 2 ]
+rc=0; "$BIN" --local check >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 2 ]
+
+# A foreign format is refused before anything is created.
+mkdir -p "$TMP/foreign"
+printf '{"format":1}\n' >"$TMP/foreign/config.json"
+rc=0; "$BIN" init "$TMP/foreign" >/dev/null 2>&1 || rc=$?
+[ "$rc" -ne 0 ]
+rc=0; "$BIN" --dry-run init "$TMP/foreign" >/dev/null 2>&1 || rc=$?
+[ "$rc" -ne 0 ]
+[ ! -e "$TMP/foreign/.state" ]
+[ ! -e "$TMP/foreign/contexts.md" ]
+[ ! -e "$TMP/foreign/inbox.md" ]
+
+# No upward discovery: a store on the way up is ignored without --root.
+mkdir -p "$TMP/box/sub"
+"$BIN" init "$TMP/box/ztd" >/dev/null
+rc=0
+(cd "$TMP/box/sub" && HOME="$HOME_BASE/nohome" "$BIN" check >/dev/null 2>&1) || rc=$?
+[ "$rc" -ne 0 ]
+st="$(cd "$TMP/box/sub" && HOME="$HOME_BASE/nohome" "$BIN" status --json)"
+printf '%s' "$st" | grep -q '"exists":false'
+
 # dry-run must not write
-BEFORE="$(sha256sum "$TMP/ztd/inbox.md" 2>/dev/null || shasum -a 256 "$TMP/ztd/inbox.md")"
-"$BIN" --root "$TMP" --dry-run move T-20261111-002 someday --field contexto:personal >/dev/null
-AFTER="$(sha256sum "$TMP/ztd/inbox.md" 2>/dev/null || shasum -a 256 "$TMP/ztd/inbox.md")"
+BEFORE="$(sha256sum "$TMP/inbox.md" 2>/dev/null || shasum -a 256 "$TMP/inbox.md")"
+"$BIN" --root "$TMP" --dry-run move T-20261111-002 someday --field context:personal >/dev/null
+AFTER="$(sha256sum "$TMP/inbox.md" 2>/dev/null || shasum -a 256 "$TMP/inbox.md")"
 [ "$BEFORE" = "$AFTER" ]
 
 # Routines: `due` follows the cadence and `routine done` stamps the run date.
@@ -28,13 +98,38 @@ for r in inbox plan review; do
 done
 "$BIN" --root "$TMP" --today 2026-11-14 due | grep -q 'nothing due'
 due15="$("$BIN" --root "$TMP" --today 2026-11-15 due)"
-[[ "$due15" == *"inbox | diaria | 1 day"* ]]
+[[ "$due15" == *"inbox | daily | 1 day"* ]]
 [[ "$due15" != *review* ]]
-[[ "$("$BIN" --root "$TMP" --today 2026-11-21 due)" == *"review | semanal:sab | 7 days"* ]]
+[[ "$("$BIN" --root "$TMP" --today 2026-11-21 due)" == *"review | weekly:sat | 7 days"* ]]
 [[ "$("$BIN" --root "$TMP" --today 2026-11-15 due --json)" == *'"days":1'* ]]
 "$BIN" --root "$TMP" --today 2026-11-15 --dry-run routine done inbox >/dev/null
 [[ "$("$BIN" --root "$TMP" --today 2026-11-15 due)" == *inbox* ]]
 if "$BIN" --root "$TMP" routine done nope >/dev/null 2>&1; then exit 1; fi
+
+# Check fails closed: malformed lines, legacy reserved keys, strict warnings.
+cp "$TMP/inbox.md" "$TMP.inbox.backup"
+printf '%s\n' '- [ ] broken line' >>"$TMP/inbox.md"
+rc=0; out="$("$BIN" --root "$TMP" check --json)" || rc=$?
+[ "$rc" -eq 1 ]
+printf '%s' "$out" | grep -q 'malformed task'
+rc=0; "$BIN" --root "$TMP" list >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 1 ]
+
+cp "$TMP.inbox.backup" "$TMP/inbox.md"
+printf '%s\n' '- [ ] T-20261111-090 | Legacy | context: personal | contexto: personal' >>"$TMP/inbox.md"
+rc=0; out="$("$BIN" --root "$TMP" check --json)" || rc=$?
+[ "$rc" -eq 1 ]
+printf '%s' "$out" | grep -q 'legacy field contexto'
+
+# Strict promotes warnings: captured_at must agree with the id date.
+cp "$TMP.inbox.backup" "$TMP/inbox.md"
+printf '%s\n' '- [ ] T-20261111-091 | Mismatch | captured_at: 2026-01-01' >>"$TMP/inbox.md"
+"$BIN" --root "$TMP" check >/dev/null 2>&1
+rc=0; "$BIN" --root "$TMP" check --strict >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 1 ]
+
+cp "$TMP.inbox.backup" "$TMP/inbox.md"
+"$BIN" --root "$TMP" check >/dev/null
 
 # MCP handshake and one tool call
 printf '%s\n' \
@@ -57,33 +152,33 @@ printf '%s\n' \
 
 # Agent store flow: temp DB only, no Markdown workspace involved.
 ADB="$TMP/agent.db"
-out1="$("$BIN" agent-capture --scope demo --request 'hola' --objective 'terminar el flujo' --idempotency-key k1 --db "$ADB")"
+out1="$("$BIN" agent-capture --scope demo --request 'hello' --objective 'finish the flow' --idempotency-key k1 --db "$ADB")"
 id1="$(printf '%s' "$out1" | grep -o '"id":"A-[^"]*"' | cut -d'"' -f4)"
 [ -n "$id1" ]
 
 # Same key and identical payload replays the same assignment.
-out2="$("$BIN" agent-capture --scope demo --request 'hola' --objective 'terminar el flujo' --idempotency-key k1 --db "$ADB")"
+out2="$("$BIN" agent-capture --scope demo --request 'hello' --objective 'finish the flow' --idempotency-key k1 --db "$ADB")"
 printf '%s' "$out2" | grep -q '"replayed":true'
 id2="$(printf '%s' "$out2" | grep -o '"id":"A-[^"]*"' | cut -d'"' -f4)"
 [ "$id1" = "$id2" ]
 
 # Same key with a different payload is a conflict, exit 1.
 rc=0
-out3="$("$BIN" agent-capture --scope demo --request 'otra cosa' --idempotency-key k1 --db "$ADB")" || rc=$?
+out3="$("$BIN" agent-capture --scope demo --request 'something else' --idempotency-key k1 --db "$ADB")" || rc=$?
 [ "$rc" -eq 1 ]
 printf '%s' "$out3" | grep -q '"code":"idempotency_conflict"'
 
 # Checkpoint at rev 1, then a stale expect-rev conflicts.
-out4="$("$BIN" agent-checkpoint "$id1" --scope demo --expect-rev 1 --result 'avance' --db "$ADB")"
+out4="$("$BIN" agent-checkpoint "$id1" --scope demo --expect-rev 1 --result 'progress' --db "$ADB")"
 printf '%s' "$out4" | grep -q '"assignment_rev":2'
 rc=0
-out5="$("$BIN" agent-checkpoint "$id1" --scope demo --expect-rev 1 --result 'otro avance' --db "$ADB")" || rc=$?
+out5="$("$BIN" agent-checkpoint "$id1" --scope demo --expect-rev 1 --result 'more progress' --db "$ADB")" || rc=$?
 [ "$rc" -eq 1 ]
 printf '%s' "$out5" | grep -q '"code":"revision_conflict"'
 
 # prepare returns the objective and the latest checkpoint.
 out6="$("$BIN" agent-prepare "$id1" --scope demo --db "$ADB")"
-printf '%s' "$out6" | grep -q '"objective":"terminar el flujo"'
+printf '%s' "$out6" | grep -q '"objective":"finish the flow"'
 printf '%s' "$out6" | grep -q '"latest":{"id":"C-'
 # without --history the response keeps its original shape
 if printf '%s' "$out6" | grep -q '"history"'; then
@@ -118,7 +213,7 @@ printf '%s\n' "$mcp_typed" | grep -qF '"isError":true'
 printf '%s\n' "$mcp_typed" | grep -qF 'invalid_field'
 
 # Durability: a second checkpoint, then export, restore and backup.
-out8="$("$BIN" agent-checkpoint "$id1" --scope demo --expect-rev 2 --result 'segundo avance' --db "$ADB")"
+out8="$("$BIN" agent-checkpoint "$id1" --scope demo --expect-rev 2 --result 'second progress' --db "$ADB")"
 printf '%s' "$out8" | grep -q '"assignment_rev":3'
 
 EXPORT="$TMP/export.json"
@@ -249,10 +344,11 @@ for n in 1 2; do
     fi
 done
 [ "$wins" -eq 1 ] || { echo "competing checkpoints: $wins winners" >&2; exit 1; }
-"$BIN" agent-prepare "$cid" --scope demo --db "$CONC" | grep -q '"rev":2'
+prepped="$("$BIN" agent-prepare "$cid" --scope demo --db "$CONC")"
+printf '%s' "$prepped" | grep -q '"rev":2'
 
 # Knowledge: remember two records in demo, recall ranks them, another scope sees none.
-outk1="$("$BIN" agent-remember --scope demo --kind fact --text 'el build cache vive en zig-out' --db "$ADB")"
+outk1="$("$BIN" agent-remember --scope demo --kind fact --text 'the build cache lives in zig-out' --db "$ADB")"
 kid1="$(printf '%s' "$outk1" | grep -o '"id":"K-[^"]*"' | cut -d'"' -f4)"
 [ -n "$kid1" ]
 printf '%s' "$outk1" | grep -q '"rev":1'
@@ -351,7 +447,7 @@ fi
 
 # Every command the binary dispatches must be visible in --help.
 HELP="$("$BIN" --help 2>&1)"
-for c in init capture list show move plan check recover due routine mcp version \
+for c in init status capture list show move plan check recover due routine mcp version \
          agent-capture agent-checkpoint agent-prepare agent-remember agent-recall \
          agent-backup agent-export agent-restore; do
     printf '%s' "$HELP" | grep -q "  $c" || { echo "help omits $c" >&2; exit 1; }

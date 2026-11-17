@@ -45,6 +45,11 @@ pub const List = enum {
 
 pub const lists = [_]List{ .inbox, .next, .waiting, .someday, .archive };
 
+fn hasValue(value: ?[]const u8) bool {
+    const text = value orelse return false;
+    return std.mem.trim(u8, text, " \t\r\n").len > 0;
+}
+
 pub const LoadedTask = struct {
     task: model.Task,
     list: List,
@@ -101,9 +106,14 @@ pub const Engine = struct {
     pub fn init(io: std.Io, alloc: std.mem.Allocator, root: []const u8, today: platform.Date, exclusive: bool) !Engine {
         var store = try Store.open(io, alloc, root);
         errdefer store.deinit();
+        // Format first: an incompatible store is refused before any lock or
+        // state directory exists.
+        _ = try config_mod.load(&store, alloc);
         try store.lock(exclusive);
+        // Re-read under the lock: a config swapped while we were blocked must
+        // be revalidated, and the engine runs on the policy read after the
+        // lock rather than the pre-lock snapshot.
         const cfg = try config_mod.load(&store, alloc);
-        if (cfg.format != 1) return error.InvalidConfig;
         const contexts_list = try config_mod.loadContexts(&store, alloc);
         return .{
             .io = io,
@@ -124,21 +134,62 @@ pub const Engine = struct {
         try self.store.lock(true);
     }
 
+    /// Canonical task loading. Malformed task lines, missing canonical lists
+    /// and format-1 reserved fields fail closed.
     pub fn loadAll(self: *Engine) ![]LoadedTask {
+        return self.loadAllImpl(null);
+    }
+
+    /// Check-only variant: `malformed` records `file:line` entries instead of
+    /// failing, so one pass can report every problem in the store — including
+    /// every missing canonical list, not just the first one it hits. Legacy
+    /// reserved fields load here too; `check` reports them per task instead.
+    fn loadAllImpl(self: *Engine, malformed: ?*std.ArrayList([]const u8)) ![]LoadedTask {
         var out: std.ArrayList(LoadedTask) = .empty;
         errdefer out.deinit(self.alloc);
         for (lists) |list| {
-            const content = (try self.store.readOptional(list.path())) orelse continue;
+            const content = (try self.store.readOptional(list.path())) orelse {
+                if (malformed) |sink| {
+                    try sink.append(self.alloc, try std.fmt.allocPrint(self.alloc, "missing list file {s}", .{list.path()}));
+                    continue;
+                }
+                // A missing canonical list must never read as empty: ID
+                // allocation and moves would run against an incomplete store.
+                return error.InvalidWorkspace;
+            };
             var lines = std.mem.splitScalar(u8, content, '\n');
             var line_no: usize = 0;
             while (lines.next()) |line| {
                 line_no += 1;
                 const parsed = model.parseLine(self.alloc, line) catch |err| switch (err) {
-                    error.MalformedTask, error.InvalidId => continue,
+                    error.MalformedTask, error.InvalidId => {
+                        if (malformed) |sink| {
+                            try sink.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}:{d}: malformed task", .{ list.path(), line_no }));
+                            continue;
+                        }
+                        return err;
+                    },
                     else => return err,
                 };
                 if (parsed) |task| {
                     var t = task;
+                    // Ordinary loading rejects format-1 reserved spellings, so
+                    // they cannot hide behind filters, feed ID allocation or
+                    // reach mutations — including in the inbox.
+                    if (malformed == null) {
+                        for (t.fields.items) |f| {
+                            if (model.isLegacyField(f.key)) {
+                                self.alloc.free(t.id);
+                                self.alloc.free(t.title);
+                                for (t.fields.items) |lf| {
+                                    self.alloc.free(lf.key);
+                                    self.alloc.free(lf.value);
+                                }
+                                t.fields.deinit(self.alloc);
+                                return error.MalformedTask;
+                            }
+                        }
+                    }
                     t.list = list.name();
                     try out.append(self.alloc, .{ .task = t, .list = list, .file = list.path(), .line = line_no });
                 }
@@ -198,7 +249,7 @@ pub const Engine = struct {
                 .title = try self.alloc.dupe(u8, std.mem.trim(u8, text, " \t")),
             };
             const date_str = try self.dateString(self.today);
-            try task.set(self.alloc, "capturada", date_str);
+            try task.set(self.alloc, "captured_at", date_str);
             const line = try task.render(self.alloc);
             try after.appendSlice(self.alloc, line);
             try after.append(self.alloc, '\n');
@@ -321,12 +372,12 @@ pub const Engine = struct {
 
         if (dest == .archive) {
             task.status = .done;
-            if (!task.has("cerrada")) {
-                try task.set(self.alloc, "cerrada", try self.dateString(self.today));
+            if (!hasValue(task.get("closed_at"))) {
+                try task.set(self.alloc, "closed_at", try self.dateString(self.today));
             }
         } else {
             task.status = .open;
-            if (task.has("resolución") or task.has("cerrada")) return error.InvalidTransition;
+            if (task.has("resolution") or task.has("closed_at")) return error.InvalidTransition;
         }
 
         const src_content = self.store.read(found.list.path()) catch |err| switch (err) {
@@ -373,29 +424,36 @@ pub const Engine = struct {
     }
 
     fn validateTask(self: *Engine, task: *model.Task, dest: List) !void {
-        const context = task.get("contexto");
+        // Format-2 tasks carry the English reserved keys only; custom fields
+        // stay free.
+        for (task.fields.items) |f| {
+            if (model.isLegacyField(f.key)) return error.MalformedTask;
+        }
+        const context = task.get("context");
         if (dest == .inbox) return;
-        if (context == null or context.?.len == 0) return error.MissingField;
+        if (!hasValue(context)) return error.MissingField;
         if (!config_mod.contains(self.contexts, context.?)) return error.InvalidContext;
 
-        const client = task.get("cliente");
-        if (client != null and client.?.len > 0) {
+        const client = task.get("client");
+        if (hasValue(client)) {
             if (!config_mod.contains(self.config.policy.clientOnlyIn, context.?)) return error.InvalidClient;
         }
         if (config_mod.contains(self.config.policy.requireClientFor, context.?)) {
-            if (client == null or client.?.len == 0) return error.InvalidClient;
+            if (!hasValue(client)) return error.InvalidClient;
         }
 
-        if (task.get("proyecto")) |project| {
+        if (task.get("project")) |project| {
             if (!config_mod.projectRegistered(&self.store, self.alloc, project)) {
                 if (try self.legacyProject(project) == null) return error.InvalidProject;
             }
         }
         if (dest == .waiting) {
-            if (task.get("espera") == null or task.get("espera").?.len == 0) return error.MissingField;
+            const waiting = task.get("waiting_on");
+            if (!hasValue(waiting)) return error.MissingField;
         }
         if (dest == .archive) {
-            if (task.get("resolución") == null or task.get("resolución").?.len == 0) return error.MissingField;
+            const resolution = task.get("resolution");
+            if (!hasValue(resolution)) return error.MissingField;
         }
     }
 
@@ -429,15 +487,15 @@ pub const Engine = struct {
                 if (lt.list != l) continue;
             } else if (lt.list == .archive) continue;
             if (context) |c| {
-                const v = lt.task.get("contexto") orelse continue;
+                const v = lt.task.get("context") orelse continue;
                 if (!std.mem.eql(u8, v, c)) continue;
             }
             if (client) |c| {
-                const v = lt.task.get("cliente") orelse continue;
+                const v = lt.task.get("client") orelse continue;
                 if (!std.mem.eql(u8, v, c)) continue;
             }
             if (project) |p| {
-                const v = lt.task.get("proyecto") orelse continue;
+                const v = lt.task.get("project") orelse continue;
                 if (!std.mem.eql(u8, v, p)) continue;
             }
             try out.append(self.alloc, lt);
@@ -477,10 +535,10 @@ pub const Engine = struct {
                 error.UnknownId => continue,
                 else => return err,
             };
-            const c = lt.task.get("contexto") orelse continue;
+            const c = lt.task.get("context") orelse continue;
             if (!std.mem.eql(u8, c, context)) continue;
             if (client) |cl| {
-                const v = lt.task.get("cliente") orelse continue;
+                const v = lt.task.get("client") orelse continue;
                 if (!std.mem.eql(u8, v, cl)) continue;
             }
             try out.append(self.alloc, lt);
@@ -492,7 +550,7 @@ pub const Engine = struct {
         if (self.store.exists(".state/pending.json")) return error.PendingTransaction;
         var errors: std.ArrayList([]const u8) = .empty;
         var warnings: std.ArrayList([]const u8) = .empty;
-        const all = try self.loadAll();
+        const all = try self.loadAllImpl(&errors);
 
         var seen: std.ArrayList([]const u8) = .empty;
         for (all) |lt| {
@@ -503,6 +561,11 @@ pub const Engine = struct {
             }
             try seen.append(self.alloc, lt.task.id);
 
+            for (lt.task.fields.items) |f| {
+                if (model.isLegacyField(f.key)) {
+                    try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: legacy field {s}", .{ lt.task.id, f.key }));
+                }
+            }
             if (lt.list != .archive and lt.task.status == .done) {
                 try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: done task outside archive", .{lt.task.id}));
             }
@@ -510,26 +573,43 @@ pub const Engine = struct {
                 try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: archive task is not done", .{lt.task.id}));
             }
             if (lt.list == .archive) {
-                if (lt.task.get("resolución") == null) try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: archive task missing resolución", .{lt.task.id}));
-                if (lt.task.get("cerrada") == null) try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: archive task missing cerrada", .{lt.task.id}));
-            } else if (lt.task.has("resolución") or lt.task.has("cerrada")) {
+                const resolution = lt.task.get("resolution");
+                if (!hasValue(resolution)) try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: archive task missing resolution", .{lt.task.id}));
+                if (!hasValue(lt.task.get("closed_at"))) try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: archive task missing closed_at", .{lt.task.id}));
+            } else if (lt.task.has("resolution") or lt.task.has("closed_at")) {
                 try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: closed fields outside archive", .{lt.task.id}));
             }
-            if (lt.task.get("contexto")) |ctx| {
-                if (!config_mod.contains(self.contexts, ctx)) {
-                    try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: unknown context {s}", .{ lt.task.id, ctx }));
-                }
-                if (lt.task.get("cliente")) |cl| {
-                    if (!config_mod.contains(self.config.policy.clientOnlyIn, ctx)) {
-                        try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: client not allowed in context {s}", .{ lt.task.id, ctx }));
-                    }
-                    _ = cl;
-                }
-                if (config_mod.contains(self.config.policy.requireClientFor, ctx) and lt.task.get("cliente") == null) {
-                    try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: missing client for context {s}", .{ lt.task.id, ctx }));
+            // Required v2 fields: everything out of the inbox carries a
+            // context, and waiting tasks say who they wait on.
+            if (lt.list != .inbox) {
+                const required = lt.task.get("context");
+                if (!hasValue(required)) {
+                    try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: missing context", .{lt.task.id}));
                 }
             }
-            if (lt.task.get("proyecto")) |p| {
+            if (lt.list == .waiting) {
+                const waiting = lt.task.get("waiting_on");
+                if (!hasValue(waiting)) {
+                    try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: missing waiting_on", .{lt.task.id}));
+                }
+            }
+            if (lt.task.get("context")) |ctx| {
+                if (hasValue(ctx)) {
+                    if (!config_mod.contains(self.contexts, ctx)) {
+                        try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: unknown context {s}", .{ lt.task.id, ctx }));
+                    }
+                    const client = lt.task.get("client");
+                    if (hasValue(client) and !config_mod.contains(self.config.policy.clientOnlyIn, ctx)) {
+                        try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: client not allowed in context {s}", .{ lt.task.id, ctx }));
+                    }
+                    if (config_mod.contains(self.config.policy.requireClientFor, ctx)) {
+                        if (!hasValue(client)) {
+                            try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: missing client for context {s}", .{ lt.task.id, ctx }));
+                        }
+                    }
+                }
+            }
+            if (lt.task.get("project")) |p| {
                 if (!config_mod.projectRegistered(&self.store, self.alloc, p)) {
                     if (try self.legacyProject(p)) |resolved| {
                         try warnings.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: legacy project {s} resolves to {s}", .{ lt.task.id, p, resolved }));
@@ -537,7 +617,7 @@ pub const Engine = struct {
                         try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: unknown project {s}", .{ lt.task.id, p }));
                     }
                 }
-                if (lt.task.get("contexto")) |ctx| {
+                if (lt.task.get("context")) |ctx| {
                     if (std.mem.indexOfScalar(u8, p, '/')) |slash| {
                         if (!std.mem.eql(u8, p[0..slash], ctx)) {
                             try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: project {s} is outside context {s}", .{ lt.task.id, p, ctx }));
@@ -545,39 +625,46 @@ pub const Engine = struct {
                     }
                 }
             }
-            if (lt.task.get("capturada")) |captured| {
+            if (lt.task.get("captured_at")) |captured| {
                 if (platform.parseDate(captured)) |captured_date| {
                     if (model.parseIdDate(lt.task.id)) |id_date| {
                         if (id_date.year != captured_date.year or id_date.month != captured_date.month or id_date.day != captured_date.day) {
-                            try warnings.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: capturada does not match id date", .{lt.task.id}));
+                            try warnings.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: captured_at does not match id date", .{lt.task.id}));
                         }
                     }
                 } else |_| {
-                    try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: invalid capturada date", .{lt.task.id}));
+                    try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: invalid captured_at date", .{lt.task.id}));
                 }
             }
-            if (lt.task.get("cerrada")) |closed| {
+            if (lt.task.get("closed_at")) |closed| {
                 if (platform.parseDate(closed)) |_| {} else |_| {
-                    try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: invalid cerrada date", .{lt.task.id}));
+                    try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: invalid closed_at date", .{lt.task.id}));
                 }
             }
         }
 
-        // Malformed task-like lines in the canonical lists.
-        for (lists) |list| {
-            const content = (try self.store.readOptional(list.path())) orelse continue;
-            var lines = std.mem.splitScalar(u8, content, '\n');
-            var n: usize = 0;
-            while (lines.next()) |line| {
-                n += 1;
-                if (!std.mem.startsWith(u8, line, "- [")) continue;
-                _ = model.parseLine(self.alloc, line) catch {
-                    try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}:{d}: malformed task", .{ list.path(), n }));
-                };
+        // The routine table must parse; missing canonical list files were
+        // already collected by loadAllImpl above.
+        if (try self.store.readOptional(routine.path)) |routine_text| {
+            if (routine.parse(self.alloc, routine_text)) |rows| {
+                for (rows) |r| {
+                    self.alloc.free(r.id);
+                    self.alloc.free(r.cadence);
+                }
+                self.alloc.free(rows);
+            } else |err| {
+                switch (err) {
+                    error.DuplicateId => try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: duplicate routine id", .{routine.path})),
+                    error.MalformedRoutine => try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: malformed routine table", .{routine.path})),
+                    else => return err,
+                }
             }
+        } else {
+            try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "missing {s}", .{routine.path}));
         }
 
         // References to unknown IDs anywhere under ztd/ (except templates/state).
+        // An unreadable reference input is reported, never silently skipped.
         var walker = try self.store.dir.walk(self.alloc);
         defer walker.deinit();
         while (try walker.next(self.io)) |entry| {
@@ -586,7 +673,10 @@ pub const Engine = struct {
             defer self.alloc.free(path);
             if (!std.mem.endsWith(u8, path, ".md")) continue;
             if (std.mem.startsWith(u8, path, "templates/") or std.mem.startsWith(u8, path, ".state/")) continue;
-            const content = entry.dir.readFileAlloc(self.io, entry.basename, self.alloc, .limited(store_mod.max_file_bytes)) catch continue;
+            const content = entry.dir.readFileAlloc(self.io, entry.basename, self.alloc, .limited(store_mod.max_file_bytes)) catch |err| {
+                try errors.append(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}: unreadable ({s})", .{ path, @errorName(err) }));
+                continue;
+            };
             var i: usize = 0;
             while (i + 3 <= content.len) : (i += 1) {
                 if (!std.mem.startsWith(u8, content[i..], "T-")) continue;
@@ -664,11 +754,13 @@ pub fn errorName(err: anyerror) []const u8 {
         error.IdExhausted => "id_exhausted",
         error.PendingTransaction => "pending_transaction",
         error.MalformedTask => "invalid_field",
+        error.InvalidId => "invalid_field",
         error.InvalidList => "unknown_list",
         error.InvalidContext => "unknown_context",
         error.InvalidClient => "invalid_client",
         error.InvalidProject => "unknown_project",
         error.MissingField => "invalid_field",
+        error.MalformedRoutine => "invalid_field",
         error.ExternalEdit => "recover_conflict",
         error.CorruptJournal => "corrupt_journal",
         error.StaleTask => "stale_task",
@@ -702,17 +794,17 @@ test "capture, move, archive and list" {
 
     const init_mod = @import("init.zig");
     _ = try init_mod.initWorkspace(io, a, base, false);
-    const root = try std.fs.path.join(a, &.{ base, "ztd" });
+    const root = base;
     const today = try platform.parseDate("2026-11-11");
 
     var eng = try Engine.init(io, a, root, today, true);
     defer eng.deinit();
 
-    const created = try eng.capture(&.{ "Uno", "Dos" }, false);
+    const created = try eng.capture(&.{ "One", "Two" }, false);
     try std.testing.expectEqual(@as(usize, 2), created.len);
     try std.testing.expectEqualStrings("T-20261111-001", created[0].task.id);
 
-    const fields = [_][2][]const u8{.{ "contexto", "personal" }};
+    const fields = [_][2][]const u8{.{ "context", "personal" }};
     const moved = try eng.move(created[0].task.id, .next, null, &fields, &.{}, null, false);
     try std.testing.expectEqual(List.next, moved.list);
     try std.testing.expectEqual(List.inbox, moved.previous.?);
@@ -721,8 +813,8 @@ test "capture, move, archive and list" {
     try std.testing.expectEqual(@as(usize, 2), active.len);
 
     const archive_fields = [_][2][]const u8{
-        .{ "contexto", "personal" },
-        .{ "resolución", "hecha" },
+        .{ "context", "personal" },
+        .{ "resolution", "done" },
     };
     _ = try eng.move(created[1].task.id, .archive, null, &archive_fields, &.{}, null, false);
     const after = try eng.listTasks(null, null, null, null);
@@ -751,14 +843,14 @@ test "capture continues after the maximum suffix and dry-run writes nothing" {
 
     const init_mod = @import("init.zig");
     _ = try init_mod.initWorkspace(io, a, base, false);
-    const root = try std.fs.path.join(a, &.{ base, "ztd" });
+    const root = base;
     const today = try platform.parseDate("2026-11-11");
 
     var eng = try Engine.init(io, a, root, today, true);
     defer eng.deinit();
 
     // A gap does not get reused: the next ID is max + 1.
-    try eng.store.writeAtomic("inbox.md", "- [ ] T-20261111-004 | Gap | capturada: 2026-11-11\n");
+    try eng.store.writeAtomic("inbox.md", "- [ ] T-20261111-004 | Gap | captured_at: 2026-11-11\n");
     const created = try eng.capture(&.{"Next"}, false);
     try std.testing.expectEqualStrings("T-20261111-005", created[0].task.id);
 
@@ -786,14 +878,14 @@ test "recover applies the journal and refuses an external edit" {
 
     const init_mod = @import("init.zig");
     _ = try init_mod.initWorkspace(io, a, base, false);
-    const root = try std.fs.path.join(a, &.{ base, "ztd" });
+    const root = base;
     const today = try platform.parseDate("2026-11-11");
 
     var eng = try Engine.init(io, a, root, today, true);
     defer eng.deinit();
 
     const before = try eng.store.read("inbox.md");
-    const after = try std.fmt.allocPrint(a, "{s}- [ ] T-20261111-001 | Recovered | capturada: 2026-11-11\n", .{before});
+    const after = try std.fmt.allocPrint(a, "{s}- [ ] T-20261111-001 | Recovered | captured_at: 2026-11-11\n", .{before});
     var files = [_]JournalFile{.{ .path = "inbox.md", .before = before, .after = after }};
     const journal = try std.json.Stringify.valueAlloc(a, Journal{ .files = &files }, .{});
     try eng.store.writeAtomic(".state/pending.json", journal);
@@ -804,7 +896,7 @@ test "recover applies the journal and refuses an external edit" {
 
     // A later edit outside ztd must not be overwritten.
     const current = try eng.store.read("inbox.md");
-    const intended = try std.fmt.allocPrint(a, "{s}- [ ] T-20261111-002 | Intended | capturada: 2026-11-11\n", .{current});
+    const intended = try std.fmt.allocPrint(a, "{s}- [ ] T-20261111-002 | Intended | captured_at: 2026-11-11\n", .{current});
     const outside = try std.fmt.allocPrint(a, "{s}external edit\n", .{current});
     files = [_]JournalFile{.{ .path = "inbox.md", .before = current, .after = intended }};
     const journal2 = try std.json.Stringify.valueAlloc(a, Journal{ .files = &files }, .{});
@@ -821,4 +913,422 @@ test "recover applies the journal and refuses an external edit" {
     }, .{});
     try eng.store.writeAtomic(".state/pending.json", unsafe);
     try std.testing.expectError(error.CorruptJournal, eng.recover());
+}
+
+fn hasError(list: []const []const u8, needle: []const u8) bool {
+    for (list) |item| {
+        if (std.mem.indexOf(u8, item, needle) != null) return true;
+    }
+    return false;
+}
+
+test "format v2 lifecycle enforces the reserved fields and rejects legacy keys" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+
+    const init_mod = @import("init.zig");
+    _ = try init_mod.initWorkspace(io, a, base, false);
+    const today = try platform.parseDate("2026-11-11");
+
+    var eng = try Engine.init(io, a, base, today, true);
+    defer eng.deinit();
+
+    const created = try eng.capture(&.{ "First", "Second" }, false);
+    const a_id = created[0].task.id;
+    const b_id = created[1].task.id;
+
+    // Out of the inbox a task carries a context.
+    try std.testing.expectError(error.MissingField, eng.move(a_id, .next, null, &.{}, &.{}, null, false));
+    const ctx_fields = [_][2][]const u8{.{ "context", "personal" }};
+    _ = try eng.move(a_id, .next, null, &ctx_fields, &.{}, null, false);
+
+    // Waiting tasks say who they wait on.
+    try std.testing.expectError(error.MissingField, eng.move(a_id, .waiting, null, &ctx_fields, &.{}, null, false));
+    const wait_fields = [_][2][]const u8{.{ "waiting_on", "the bank" }};
+    _ = try eng.move(a_id, .waiting, null, &wait_fields, &.{}, null, false);
+
+    // Archiving needs a resolution; closed_at is stamped automatically.
+    try std.testing.expectError(error.MissingField, eng.move(a_id, .archive, null, &.{}, &.{}, null, false));
+    const res_fields = [_][2][]const u8{.{ "resolution", "done" }};
+    const archived = try eng.move(a_id, .archive, null, &res_fields, &.{}, null, false);
+    try std.testing.expectEqual(List.archive, archived.list);
+    try std.testing.expect(archived.task.has("closed_at"));
+    const blank_closed_at = [_][2][]const u8{.{ "closed_at", " \t " }};
+    const restamped = try eng.move(a_id, .archive, null, &blank_closed_at, &.{}, null, false);
+    try std.testing.expectEqualStrings("2026-11-11", restamped.task.get("closed_at").?);
+
+    // Format-1 reserved keys are rejected; the English key is accepted.
+    _ = try eng.move(b_id, .next, null, &ctx_fields, &.{}, null, false);
+    const legacy = [_][2][]const u8{.{ "contexto", "personal" }};
+    try std.testing.expectError(error.MalformedTask, eng.move(b_id, .next, null, &legacy, &.{}, null, false));
+
+    const result = try eng.check(false);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+    try std.testing.expectEqual(@as(usize, 0), result.warnings.len);
+}
+
+test "canonical loading fails closed and check reports malformed and legacy lines" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+
+    const init_mod = @import("init.zig");
+    _ = try init_mod.initWorkspace(io, a, base, false);
+    const today = try platform.parseDate("2026-11-11");
+
+    var eng = try Engine.init(io, a, base, today, true);
+    defer eng.deinit();
+
+    // A malformed task line stops canonical loading instead of vanishing.
+    try eng.store.writeAtomic("inbox.md", "# Inbox\n\n- [ ] not a task\n");
+    try std.testing.expectError(error.MalformedTask, eng.loadAll());
+    const malformed = try eng.check(false);
+    try std.testing.expect(hasError(malformed.errors, "inbox.md:3: malformed task"));
+
+    // A legacy reserved key is an error, not a custom field.
+    try eng.store.writeAtomic("inbox.md", "# Inbox\n\n- [ ] T-20261111-001 | Legacy | contexto: personal\n");
+    const legacy = try eng.check(false);
+    try std.testing.expect(hasError(legacy.errors, "T-20261111-001: legacy field contexto"));
+
+    // Strict promotes warnings: a captured_at that disagrees with the id date.
+    try eng.store.writeAtomic("inbox.md", "# Inbox\n\n- [ ] T-20261111-002 | Mismatch | captured_at: 2026-01-01\n");
+    const lenient = try eng.check(false);
+    try std.testing.expectEqual(@as(usize, 0), lenient.errors.len);
+    try std.testing.expect(hasError(lenient.warnings, "captured_at does not match id date"));
+    const strict = try eng.check(true);
+    try std.testing.expectEqual(@as(usize, 1), strict.errors.len);
+    try std.testing.expectEqual(@as(usize, 0), strict.warnings.len);
+}
+
+test "a legacy reserved key blocks ordinary loading while check reports it once" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+
+    const init_mod = @import("init.zig");
+    _ = try init_mod.initWorkspace(io, a, base, false);
+    const today = try platform.parseDate("2026-11-11");
+
+    var eng = try Engine.init(io, a, base, today, true);
+    defer eng.deinit();
+
+    const legacy_inbox = "# Inbox\n\n- [ ] T-20261111-001 | Legacy | contexto: personal | captured_at: 2026-11-11\n";
+    try eng.store.writeAtomic("inbox.md", legacy_inbox);
+    try eng.store.writeAtomic("plans/daily/2026-11-11.md", "T-20261111-001\n");
+
+    // Ordinary commands reject the format-1 spelling — list (listTasks), show
+    // (loadAll + find), plan (planTasks) and capture all go through loadAll,
+    // inbox tasks included.
+    try std.testing.expectError(error.MalformedTask, eng.loadAll());
+    try std.testing.expectError(error.MalformedTask, eng.listTasks(null, null, null, null));
+    try std.testing.expectError(error.MalformedTask, eng.planTasks(today, "personal", null));
+    try std.testing.expectError(error.MalformedTask, eng.capture(&.{"New"}, false));
+
+    // The refusal wrote nothing and minted no ID.
+    try std.testing.expect(!eng.pending());
+    try std.testing.expectEqualStrings(legacy_inbox, try eng.store.read("inbox.md"));
+
+    // check loads the task and reports the specific diagnostic exactly once.
+    const result = try eng.check(false);
+    try std.testing.expect(hasError(result.errors, "T-20261111-001: legacy field contexto"));
+    var legacy_reports: usize = 0;
+    for (result.errors) |e| {
+        if (std.mem.indexOf(u8, e, "legacy field") != null) legacy_reports += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), legacy_reports);
+
+    // Custom fields stay extensible in ordinary loading.
+    try eng.store.writeAtomic("inbox.md", "# Inbox\n\n- [ ] T-20261111-002 | Custom | estimate: 2d | captured_at: 2026-11-11\n");
+    const custom = try eng.listTasks(null, null, null, null);
+    try std.testing.expectEqual(@as(usize, 1), custom.len);
+    try std.testing.expectEqualStrings("2d", custom[0].task.get("estimate").?);
+
+    // A mutation argument carrying a reserved legacy key stays rejected, and
+    // the rejection writes nothing.
+    const legacy_fields = [_][2][]const u8{.{ "contexto", "personal" }};
+    try std.testing.expectError(error.MalformedTask, eng.move(custom[0].task.id, .next, null, &legacy_fields, &.{}, null, false));
+    try std.testing.expect(!eng.pending());
+    const after = try eng.listTasks(null, null, null, null);
+    try std.testing.expectEqual(@as(usize, 1), after.len);
+    try std.testing.expectEqual(List.inbox, after[0].list);
+}
+
+test "check reports missing list files and broken routines instead of passing" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+
+    const init_mod = @import("init.zig");
+    _ = try init_mod.initWorkspace(io, a, base, false);
+    const today = try platform.parseDate("2026-11-11");
+
+    var eng = try Engine.init(io, a, base, today, true);
+    defer eng.deinit();
+
+    try eng.store.dir.deleteFile(io, "lists/next.md");
+    try eng.store.writeAtomic(routine.path, "| inbox | hourly | 2026-11-11 |\n");
+    const broken = try eng.check(false);
+    try std.testing.expect(hasError(broken.errors, "missing list file lists/next.md"));
+    try std.testing.expect(hasError(broken.errors, "malformed routine table"));
+
+    // With the routine table restored only the missing list file remains.
+    try eng.store.writeAtomic(routine.path, "| routine | cadence | last |\n| --- | --- | --- |\n| inbox | daily | 2026-11-11 |\n");
+    try eng.store.writeAtomic("lists/next.md", "# Next actions\n\n");
+    const clean = try eng.check(false);
+    try std.testing.expectEqual(@as(usize, 0), clean.errors.len);
+
+    // A missing routine file is reported too.
+    try eng.store.dir.deleteFile(io, routine.path);
+    const missing = try eng.check(false);
+    try std.testing.expect(hasError(missing.errors, "missing routines/state.md"));
+}
+
+test "missing canonical lists stop ordinary commands while check reports them all" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+
+    const init_mod = @import("init.zig");
+    _ = try init_mod.initWorkspace(io, a, base, false);
+    const today = try platform.parseDate("2026-11-11");
+
+    var eng = try Engine.init(io, a, base, today, true);
+    defer eng.deinit();
+
+    const created = try eng.capture(&.{"Seed"}, false);
+    const inbox_before = try eng.store.read("inbox.md");
+
+    // A missing canonical list stops loading and every mutation: capture must
+    // not mint IDs against an incomplete store, and nothing is written.
+    try eng.store.dir.deleteFile(io, "lists/next.md");
+    try std.testing.expectError(error.InvalidWorkspace, eng.loadAll());
+    try std.testing.expectError(error.InvalidWorkspace, eng.listTasks(null, null, null, null));
+    try std.testing.expectError(error.InvalidWorkspace, eng.capture(&.{"New"}, false));
+    try std.testing.expectError(error.InvalidWorkspace, eng.move(created[0].task.id, .next, null, &.{}, &.{}, null, false));
+    try std.testing.expect(!eng.pending());
+    try std.testing.expectEqualStrings(inbox_before, try eng.store.read("inbox.md"));
+
+    // The inbox itself missing: capture still refuses instead of reusing IDs
+    // that live only in the absent file.
+    try eng.store.writeAtomic("lists/next.md", "# Next actions\n\n");
+    try eng.store.dir.deleteFile(io, "inbox.md");
+    try std.testing.expectError(error.InvalidWorkspace, eng.capture(&.{"New"}, false));
+
+    // check collects every missing file rather than failing on the first.
+    try eng.store.dir.deleteFile(io, "lists/someday.md");
+    const result = try eng.check(false);
+    try std.testing.expect(hasError(result.errors, "missing list file inbox.md"));
+    try std.testing.expect(hasError(result.errors, "missing list file lists/someday.md"));
+
+    // Restoring the files makes check clean again.
+    try eng.store.writeAtomic("inbox.md", "# Inbox\n\n");
+    try eng.store.writeAtomic("lists/someday.md", "# Someday\n\n");
+    const clean = try eng.check(false);
+    try std.testing.expectEqual(@as(usize, 0), clean.errors.len);
+}
+
+test "an incompatible format is refused before any state is created" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+
+    const store_path = try std.fs.path.join(a, &.{ base, "foreign" });
+    try tmp.dir.createDirPath(io, "foreign");
+    try tmp.dir.writeFile(io, .{ .sub_path = "foreign/config.json", .data = "{\"format\":1}\n" });
+
+    const today = try platform.parseDate("2026-11-11");
+    try std.testing.expectError(error.InvalidConfig, Engine.init(io, a, store_path, today, true));
+
+    const state = try std.fs.path.join(a, &.{ store_path, ".state" });
+    try std.testing.expect(!store_mod.pathExists(io, state));
+}
+
+test "config swapped while blocked on the lock is revalidated after locking" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+
+    const init_mod = @import("init.zig");
+    _ = try init_mod.initWorkspace(io, a, base, false);
+    const today = try platform.parseDate("2026-11-11");
+
+    // The holder keeps the exclusive lock so the init call below passes its
+    // pre-lock format gate and then blocks inside flock on a second fd.
+    var holder = try Store.open(io, a, base);
+    defer holder.deinit();
+    try holder.lock(true);
+
+    var done = std.atomic.Value(bool).init(false);
+    var outcome: ?anyerror = null;
+    const thread = try std.Thread.spawn(.{}, struct {
+        fn run(eng_io: std.Io, eng_root: []const u8, eng_day: platform.Date, done_flag: *std.atomic.Value(bool), out: *?anyerror) void {
+            var thread_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer thread_arena.deinit();
+            if (Engine.init(eng_io, thread_arena.allocator(), eng_root, eng_day, true)) |eng| {
+                var live = eng;
+                live.deinit();
+                out.* = null;
+            } else |err| {
+                out.* = err;
+            }
+            done_flag.store(true, .release);
+        }
+    }.run, .{ io, base, today, &done, &outcome });
+
+    // The engine call must still be blocked on the lock; if it finished, the
+    // lock does not block in-process and this test cannot prove anything.
+    std.Io.sleep(io, .{ .nanoseconds = 200 * std.time.ns_per_ms }, .awake) catch {};
+    try std.testing.expect(!done.load(.acquire));
+
+    // Swap the config while the call is blocked, then release the lock: the
+    // stale pre-lock snapshot must not be used.
+    try holder.writeAtomic("config.json", "{\"format\":1}\n");
+    holder.unlock();
+
+    thread.join();
+    try std.testing.expectEqual(@as(?anyerror, error.InvalidConfig), outcome);
+}
+
+test "check --strict rejects empty required values and keeps optional clients" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+
+    const init_mod = @import("init.zig");
+    _ = try init_mod.initWorkspace(io, a, base, false);
+
+    // `work` requires a client and allows clients; `personal` stays optional.
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "config.json",
+        .data = "{\"format\":2,\"policy\":{\"requireClientFor\":[\"work\"],\"clientOnlyIn\":[\"work\"]}}\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "contexts.md",
+        .data = "# Active contexts\n\n| Context | Use |\n| --- | --- |\n| personal | Personal matters |\n| work | Work |\n",
+    });
+
+    const today = try platform.parseDate("2026-11-11");
+    var eng = try Engine.init(io, a, base, today, true);
+    defer eng.deinit();
+
+    // Whitespace-only required values are missing during mutation validation too.
+    var missing_context = (try model.parseLine(a, "- [ ] T-20261111-004 | Missing context | context:  ")).?;
+    try std.testing.expectError(error.MissingField, eng.validateTask(&missing_context, .next));
+    var missing_client = (try model.parseLine(a, "- [ ] T-20261111-005 | Missing client | context: work | client:  ")).?;
+    try std.testing.expectError(error.InvalidClient, eng.validateTask(&missing_client, .next));
+    var missing_waiting_on = (try model.parseLine(a, "- [ ] T-20261111-006 | Missing dependency | context: personal | waiting_on:  ")).?;
+    try std.testing.expectError(error.MissingField, eng.validateTask(&missing_waiting_on, .waiting));
+    var missing_resolution = (try model.parseLine(a, "- [x] T-20261111-007 | Missing resolution | context: personal | resolution:  ")).?;
+    try std.testing.expectError(error.MissingField, eng.validateTask(&missing_resolution, .archive));
+
+    // An archived task needs a nonempty resolution; an empty value is missing.
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "lists/archive.md",
+        .data = "- [x] T-20261111-001 | Done | context: personal | resolution:  | closed_at: 2026-11-11\n",
+    });
+    // A required-client context needs a nonempty client; empty counts as missing.
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "inbox.md",
+        .data = "- [ ] T-20261111-002 | Needs client | context: work | client:  | captured_at: 2026-11-11\n",
+    });
+    // An empty optional client is equivalent to no client in mutation validation.
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "lists/next.md",
+        .data = "- [ ] T-20261111-003 | Optional client | context: personal | client:  \n",
+    });
+
+    const result = try eng.check(true);
+    try std.testing.expect(hasError(result.errors, "T-20261111-001: archive task missing resolution"));
+    try std.testing.expect(hasError(result.errors, "T-20261111-002: missing client for context work"));
+    try std.testing.expect(!hasError(result.errors, "T-20261111-003: missing client"));
+    try std.testing.expectEqual(@as(usize, 2), result.errors.len);
 }

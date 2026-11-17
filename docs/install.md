@@ -99,3 +99,12 @@ install -m 0755 zig-out/bin/ztd ~/.local/bin/ztd
 ```
 
 Requirements: Zig 0.17.0. No runtime dependencies.
+
+## First run
+
+`ztd init` creates the global store at `~/.ztd` by default. Use
+`ztd init PATH` to create the store at exactly that root, or
+`ztd init --local` for `./ztd`.
+
+Root precedence for every command: `--root` > `ZTD_ROOT` > `~/.ztd`.
+The root is never discovered from the current directory.

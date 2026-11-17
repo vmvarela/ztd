@@ -3,12 +3,12 @@
 This document is the contract for the data format and the engine. The tests in
 `src/` and `test/` are executable examples.
 
-## 1. Workspace
+## 1. Store
 
-A workspace is a directory containing `ztd/`:
+The store is a directory of Markdown task data:
 
 ```text
-ztd/
+<store>/
   contexts.md          # Markdown table; first column is the context name
   config.json          # format and client policy
   inbox.md
@@ -16,7 +16,7 @@ ztd/
   lists/waiting.md
   lists/someday.md
   lists/archive.md
-  lists/projects/<contexto>[/<cliente>]/<proyecto>.md
+  lists/projects/<context>[/<client>]/<project>.md
   plans/daily/YYYY-MM-DD.md
   plans/weekly/
   routines/state.md    # recurring routines and their last run date
@@ -27,22 +27,36 @@ ztd/
   README.md
 ```
 
-`ztd/.gitignore` contains `.state/`. `.gitattributes` keeps the Markdown LF
+`contexts.md` is a Markdown table with `Context` and `Use` columns; optional
+`Clients` and `Knowledge` columns follow.
+
+`<store>/.gitignore` contains `.state/`. `.gitattributes` keeps the Markdown LF
 across platforms. The binary never runs Git.
 
 Root resolution:
 
 1. `--root PATH`
 2. `ZTD_ROOT`
-3. walk from the current directory upwards until `ztd/contexts.md`,
-   `ztd/config.json` or `ztd/inbox.md` exists.
+3. `~/.ztd`
 
-`--root` accepts either the repository root or the `ztd/` directory.
+`--root` names the store root exactly. The root is never discovered from the
+current directory. `ztd status` is the single state probe: it applies root
+precedence and reports `root`, `source` (`flag` for `--root`, `env` for
+`ZTD_ROOT`, `home` for `$HOME/.ztd`), `exists` and `format` (the `config.json`
+format when readable, else `null`). With `--json` those four keys are the
+`data` payload of the standard envelope, in that order; human output prints
+`root:`, `source:` and `store:` lines (`absent`, `present, format N` or
+`present, format unknown`). Status never creates the store and exits `0`
+whether or not it exists.
 
 ## 2. Task line
 
+The data format is version 2: `config.json` carries `"format":2`. Reserved
+field names on a task line: `context`, `client`, `project`, `captured_at`,
+`closed_at`, `waiting_on`, `resolution`.
+
 ```text
-- [ ] T-20261111-001 | Título | contexto: trabajo | cliente: acme | proyecto: trabajo/acme/demo | capturada: 2026-11-11
+- [ ] T-20261111-001 | Title | context: work | client: acme | project: work/acme/demo | captured_at: 2026-11-11
 ```
 
 - The checkbox is `[ ]` outside `archive` and `[x]` inside it.
@@ -50,7 +64,7 @@ Root resolution:
 - Fields are `key: value`, separated by ` | `.
 - `|` inside a title or value is escaped as `\|`.
 - Field order is preserved. New fields are appended.
-- `capturada` is the capture date. `cerrada` is set when a task enters
+- `captured_at` is the capture date. `closed_at` is set when a task enters
   `archive`.
 
 ### Required fields
@@ -58,14 +72,14 @@ Root resolution:
 | Situation | Requirement |
 | --- | --- |
 | `inbox` | none |
-| any other active list | `contexto` registered in `contexts.md` |
-| `contexto` in `requireClientFor` | `cliente` |
-| `cliente` present | `contexto` in `clientOnlyIn` |
-| `waiting` | `espera` |
-| `archive` | `resolución`; `cerrada` is added if missing |
-| active list | no `resolución` and no `cerrada` |
+| any other active list | `context` registered in `contexts.md` |
+| `context` in `requireClientFor` | `client` |
+| `client` present | `context` in `clientOnlyIn` |
+| `waiting` | `waiting_on` |
+| `archive` | `resolution`; `closed_at` is added if missing |
+| active list | no `resolution` and no `closed_at` |
 
-`proyecto` must be a registered path under `lists/projects/`, or a suffix that
+`project` must be a registered path under `lists/projects/`, or a suffix that
 resolves to exactly one registered path. A suffix with zero or multiple matches
 is `unknown_project`.
 
@@ -74,7 +88,7 @@ is `unknown_project`.
 | From | To | Allowed |
 | --- | --- | --- |
 | any active | any active | yes, after validation |
-| any active | archive | yes, with `resolución` |
+| any active | archive | yes, with `resolution` |
 | archive | any | no (`invalid_transition`) |
 | same list | same list | yes; the task moves to the end |
 
@@ -84,8 +98,8 @@ is `unknown_project`.
 2. `--field k:v` sets fields.
 3. `--unset k` removes fields.
 4. Destination validation.
-5. On archive: `[x]`, `cerrada` if missing.
-6. On active: `[ ]`; reject `resolución`/`cerrada`.
+5. On archive: `[x]`, `closed_at` if missing.
+6. On active: `[ ]`; reject `resolution`/`closed_at`.
 
 `--expect-line N` checks the 1-based line of the task in its source file before
 any write. A mismatch is `stale_task`.
@@ -170,19 +184,19 @@ Given the inbox content `inbox0` and texts `t1..tk`:
 - `M+1 > 999` is `id_exhausted`; no file is written.
 - All texts are validated before the journal. One invalid text aborts the batch.
 - The inbox is appended to; a missing final newline is added first.
-- `capturada` is the local date.
+- `captured_at` is the local date.
 
 ## 7. Check
 
-`check` reads every canonical list and every `.md` under `ztd/` except
+`check` reads every canonical list and every `.md` under the store root except
 `templates/` and `.state/`.
 
 Errors:
 
 - duplicate IDs;
 - `[x]` outside archive, `[ ]` inside archive;
-- missing `resolución` or `cerrada` in archive;
-- `resolución`/`cerrada` outside archive;
+- missing `resolution` or `closed_at` in archive;
+- `resolution`/`closed_at` outside archive;
 - unknown context;
 - client outside `clientOnlyIn`, or missing in `requireClientFor`;
 - unknown project;
@@ -196,8 +210,8 @@ Warnings: legacy project names that resolve to exactly one registered path.
 ## 8. Plan
 
 `plan --context C` reads `plans/daily/YYYY-MM-DD.md`, extracts IDs matching
-`T-\d{8}-\d{3,}`, deduplicates them, and returns only tasks whose `contexto` is
-`C` (and `cliente` when given). Unknown IDs are ignored. Archive tasks are
+`T-\d{8}-\d{3,}`, deduplicates them, and returns only tasks whose `context` is
+`C` (and `client` when given). Unknown IDs are ignored. Archive tasks are
 included if referenced.
 
 The plan file is a human document; `ztd` does not rewrite it.
@@ -207,33 +221,33 @@ The plan file is a human document; `ztd` does not rewrite it.
 `routines/state.md` is a Markdown table with one row per recurring routine:
 
 ```text
-| rutina | cadencia | última |
+| routine | cadence | last |
 | --- | --- | --- |
-| inbox | diaria | 2026-11-14 |
-| review | semanal:sab | 2026-11-07 |
+| inbox | daily | 2026-11-14 |
+| review | weekly:sat | 2026-11-07 |
 ```
 
-`cadencia` is `diaria` or `semanal:` followed by a day (`lun`, `mar`, `mie`,
-`jue`, `vie`, `sab`, `dom`); `última` is the date of the last run. Each row is
-validated: an unknown cadence, a bad date or a duplicate id fails with
-`invalid_field`. Monthly and yearly reviews are dated entries in `calendar.md`,
-not routines.
+`cadence` is `daily` or `weekly:` followed by a day token (`mon`, `tue`,
+`wed`, `thu`, `fri`, `sat`, `sun`; Monday-first); `last` is the date of the
+last run. Each row is validated: an unknown cadence, a bad date or a duplicate
+id fails with `invalid_field`. Monthly and yearly reviews are dated entries in
+`calendar.md`, not routines.
 
 `due` lists the rows whose cadence has elapsed. A daily routine is due when
-`última` is before today. A weekly routine is due when the latest occurrence of
-its day, counting back from today, is later than `última`. Text output is one
-line per routine, `id | cadencia | N day(s)`, where N is the number of days
-since `última`; an empty result prints `nothing due`. JSON:
+`last` is before today. A weekly routine is due when the latest occurrence of
+its day, counting back from today, is later than `last`. Text output is one
+line per routine, `id | cadence | N day(s)`, where N is the number of days
+since `last`; an empty result prints `nothing due`. JSON:
 
 ```json
-{"ok":true,"command":"due","data":{"routines":[{"id":"inbox","cadence":"diaria","last":"2026-11-14","days":1}]}}
+{"ok":true,"command":"due","data":{"routines":[{"id":"inbox","cadence":"daily","last":"2026-11-14","days":1}]}}
 ```
 
-`routine done <id>` sets that row's `última` to `--today`, preserving every
+`routine done <id>` sets that row's `last` to `--today`, preserving every
 other byte of the file, and commits through the journal. An unknown id fails
 with `unknown_id`. With `--dry-run` it reports the change and writes nothing.
 
-`init` seeds `inbox`, `plan` and `review` dated at creation, so a new workspace
+`init` seeds `inbox`, `plan` and `review` dated at creation, so a new store
 starts with nothing due.
 
 ## 10. MCP
@@ -248,7 +262,7 @@ Tools and resources are described in [README.md](../README.md). Tool results
 use `content:[{type:"text",text:"<json>"}]` and `isError` for domain errors.
 Protocol errors use JSON-RPC error objects.
 
-The server starts without a workspace. Every tool then returns
+The server starts even when the store root is missing. Every tool then returns
 `invalid_workspace`.
 
 `--read-only` rejects mutations with `read_only`. `--scope C` rejects access to
@@ -258,7 +272,7 @@ another context with `scope_denied`.
 
 The agent-continuity store is a SQLite database that records what an agent was
 asked to do and how far it got: assignments and checkpoints. It is independent
-of the Markdown lists and does not replace them — `ztd/` stays the
+of the Markdown lists and does not replace them — the store root keeps the
 human-facing task lists.
 
 Schema version 2 (`PRAGMA user_version`): tables `scope`, `assignment`,
@@ -270,8 +284,8 @@ verified against the version-2 object set, and any other version fails with
 A zero-version database is initialised only when it has no tables, indexes,
 views or triggers of its own; any other database is rejected, never adopted.
 The default database path is `--db` > `ZTD_AGENT_DB` > a per-OS default under
-the user data directory. Only the default is guaranteed to stay outside a
-workspace `ztd/`; an explicit path or environment variable can point anywhere
+the user data directory. Only the default is guaranteed to stay outside the
+Markdown store; an explicit path or environment variable can point anywhere
 the caller chooses.
 
 Operations, exposed as `ztd agent-capture`, `ztd agent-checkpoint`,

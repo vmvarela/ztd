@@ -1,18 +1,26 @@
 const std = @import("std");
 const Store = @import("store.zig").Store;
 
+/// Store format this binary reads and writes. Format 1 stores are refused
+/// before any lock or state is created; their migration is a separate pass.
+pub const supported_format: u32 = 2;
+
 pub const Policy = struct {
     requireClientFor: []const []const u8 = &.{},
     clientOnlyIn: []const []const u8 = &.{},
 };
 
 pub const Config = struct {
-    format: u32 = 1,
+    /// Declared store format; null when config.json omits the key.
+    format: ?u32 = null,
     policy: Policy = .{},
 };
 
+/// Fails closed: a store must carry a readable config.json declaring
+/// `supported_format`. Callers invoke this before creating locks or state.
 pub fn load(store: *Store, alloc: std.mem.Allocator) !Config {
-    const text = try store.readOptional("config.json") orelse return .{};
+    const text = (try store.readOptional("config.json")) orelse return error.InvalidWorkspace;
+    defer alloc.free(text); // parsed strings are copied (alloc_always)
     const parsed = std.json.parseFromSlice(Config, alloc, text, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
@@ -22,7 +30,21 @@ pub fn load(store: *Store, alloc: std.mem.Allocator) !Config {
             else => error.InvalidConfig,
         };
     };
+    if (parsed.value.format != supported_format) return error.InvalidConfig;
     return parsed.value;
+}
+
+/// Read-only probe for `ztd status`: the declared format, or null when
+/// config.json is absent or unreadable. Never fails and never writes.
+pub fn formatOf(store: *Store, alloc: std.mem.Allocator) ?u32 {
+    const text = (store.readOptional("config.json") catch return null) orelse return null;
+    defer alloc.free(text); // parsed strings are copied (alloc_always)
+    var parsed = std.json.parseFromSlice(Config, alloc, text, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    }) catch return null;
+    defer parsed.deinit();
+    return parsed.value.format;
 }
 
 pub fn contains(list: []const []const u8, needle: []const u8) bool {
@@ -46,7 +68,7 @@ pub fn loadContexts(store: *Store, alloc: std.mem.Allocator) !std.ArrayList([]co
         const end = std.mem.indexOfScalarPos(u8, trimmed, 1, '|') orelse continue;
         const cell = std.mem.trim(u8, trimmed[1..end], " \t");
         if (cell.len == 0) continue;
-        if (std.mem.eql(u8, cell, "Contexto")) continue;
+        if (std.mem.eql(u8, cell, "Context")) continue;
         if (std.mem.allEqual(u8, cell, '-')) continue;
         try out.append(alloc, try alloc.dupe(u8, cell));
     }

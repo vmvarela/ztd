@@ -221,7 +221,7 @@ fn toolSchema(ctx: *Ctx, name: []const u8) std.json.Value {
         var fields_prop: std.json.ObjectMap = .empty;
         fields_prop.put(ctx.alloc, "type", .{ .string = "object" }) catch {};
         fields_prop.put(ctx.alloc, "additionalProperties", prop(ctx, "string", "")) catch {};
-        fields_prop.put(ctx.alloc, "description", .{ .string = "Fields to set, e.g. contexto, espera, resolución." }) catch {};
+        fields_prop.put(ctx.alloc, "description", .{ .string = "Fields to set, e.g. context, waiting_on, resolution." }) catch {};
         props.put(ctx.alloc, "fields", .{ .object = fields_prop }) catch {};
         props.put(ctx.alloc, "unset", stringListProp(ctx, "Field names to remove.")) catch {};
         props.put(ctx.alloc, "text", prop(ctx, "string", "Replace the task title.")) catch {};
@@ -349,7 +349,7 @@ fn filterContexts(alloc: std.mem.Allocator, text: []const u8, scope: []const u8)
         if (std.mem.startsWith(u8, trimmed, "|")) {
             const end = std.mem.indexOfScalarPos(u8, trimmed, 1, '|') orelse trimmed.len;
             const cell = std.mem.trim(u8, trimmed[1..end], " \t");
-            keep = cell.len == 0 or std.mem.eql(u8, cell, "Contexto") or std.mem.allEqual(u8, cell, '-') or std.mem.eql(u8, cell, scope);
+            keep = cell.len == 0 or std.mem.eql(u8, cell, "Context") or std.mem.allEqual(u8, cell, '-') or std.mem.eql(u8, cell, scope);
         }
         if (!keep) continue;
         if (!first) try out.append(alloc, '\n');
@@ -413,7 +413,7 @@ fn handleTool(ctx: *Ctx, name: []const u8, args: std.json.ObjectMap) !std.json.V
         defer eng.deinit();
         const all = try eng.loadAll();
         const lt = try eng.find(id, all);
-        try checkScopeOpt(ctx, lt.task.get("contexto"));
+        try checkScopeOpt(ctx, lt.task.get("context"));
         var out: std.json.ObjectMap = .empty;
         out.put(ctx.alloc, "task", try taskValue(ctx, lt)) catch {};
         out.put(ctx.alloc, "file", .{ .string = lt.file }) catch {};
@@ -429,8 +429,8 @@ fn handleTool(ctx: *Ctx, name: []const u8, args: std.json.ObjectMap) !std.json.V
         defer eng.deinit();
         const all = try eng.loadAll();
         const before = try eng.find(id, all);
-        try checkScopeOpt(ctx, before.task.get("contexto"));
-        var target_context = before.task.get("contexto");
+        try checkScopeOpt(ctx, before.task.get("context"));
+        var target_context = before.task.get("context");
         var set_fields: std.ArrayList([2][]const u8) = .empty;
         if (args.get("fields")) |fields_val| {
             if (fields_val != .object) return error.BadParams;
@@ -441,7 +441,7 @@ fn handleTool(ctx: *Ctx, name: []const u8, args: std.json.ObjectMap) !std.json.V
             for (keys.items) |k| {
                 const v = fields_val.object.get(k) orelse continue;
                 if (v != .string) return error.BadParams;
-                if (std.mem.eql(u8, k, "contexto")) target_context = v.string;
+                if (std.mem.eql(u8, k, "context")) target_context = v.string;
                 try set_fields.append(ctx.alloc, .{ k, v.string });
             }
         }

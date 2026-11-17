@@ -29,20 +29,21 @@ AUR and Nix. See [docs/install.md](docs/install.md).
 ## Quick start
 
 ```bash
-mkdir my-tasks && cd my-tasks
-ztd init
+ztd init                 # global store at ~/.ztd (--local for ./ztd)
 
-ztd capture "Revisar el plan de la semana" "Preparar demo"
+ztd capture "Review the week's plan" "Prepare demo"
 ztd list
-ztd move T-20261111-001 next --field contexto:personal
+ztd move T-20261111-001 next --field context:personal
 ztd show T-20261111-001
 ztd check
 ```
 
-`ztd init` creates `ztd/` in the current directory:
+`ztd init` creates the store layout. The global store at `~/.ztd` is the
+default; `ztd init PATH` uses *PATH* as the exact root and `ztd init --local`
+creates `./ztd`:
 
 ```text
-ztd/
+<store>/
   contexts.md
   config.json
   inbox.md
@@ -50,6 +51,7 @@ ztd/
   lists/projects/index.md
   plans/daily/
   plans/weekly/
+  routines/state.md   # recurring routines; created by init
   templates/
   .state/            # lock, journal; ignored by Git
   .gitignore
@@ -62,26 +64,28 @@ The binary only edits files. Commit them with your own Git workflow.
 ## Task format
 
 ```text
-- [ ] T-20261111-001 | Título | contexto: trabajo | cliente: acme | proyecto: trabajo/acme/demo | capturada: 2026-11-11
+- [ ] T-20261111-001 | Title | context: work | client: acme | project: work/acme/demo | captured_at: 2026-11-11
 ```
 
 - ID: `T-YYYYMMDD-NNN`, at least three digits.
-- `contexto` is required outside `inbox` and must exist in `contexts.md`.
-- `cliente` and `proyecto` are optional, subject to `config.json` policy.
-- Projects are registered by path: `ztd/lists/projects/<contexto>[/<cliente>]/<proyecto>.md`.
-- `archive` entries use `[x]`, require `resolución`, and get `cerrada`.
-- `waiting` entries require `espera`.
+- `context` is required outside `inbox` and must exist in `contexts.md`.
+- `client` and `project` are optional, subject to `config.json` policy.
+- Projects are registered by path: `lists/projects/<context>[/<client>]/<project>.md`.
+- `archive` entries use `[x]`, require `resolution`, and get `closed_at`.
+- `waiting` entries require `waiting_on`.
+- `captured_at` and `closed_at` hold dates.
 
 `config.json` controls client rules:
 
 ```json
-{"format":1,"policy":{"requireClientFor":["trabajo"],"clientOnlyIn":["trabajo"]}}
+{"format":2,"policy":{"requireClientFor":["work"],"clientOnlyIn":["work"]}}
 ```
 
 ## Commands
 
 ```text
-ztd init [path]
+ztd init [path] [--local]
+ztd status [--json]
 ztd capture <text>... | --stdin
 ztd list [--context C] [--client X] [--project P] [--list L]
 ztd show <id>
@@ -104,7 +108,14 @@ ztd version
 ```
 
 Global flags: `--root PATH`, `--json`, `--today YYYY-MM-DD`, `--dry-run`.
-`ZTD_ROOT` is used when `--root` is absent.
+Root precedence: `--root` > `ZTD_ROOT` > `~/.ztd`; the root is never
+discovered from the current directory.
+
+`ztd status [--json]` reports the resolved store root, its source (`flag`,
+`env` or `home`), whether the store exists and its `config.json` format. The
+JSON envelope carries those four keys in order — `root`, `source`, `exists`,
+`format` (`format` is `null` when unreadable). It never creates files, so it
+works when the store is absent.
 
 `list` without `--list` returns `inbox`, `next`, `waiting` and `someday`.
 `--client` and `--project` require `--context`.
@@ -116,7 +127,7 @@ Global flags: `--root PATH`, `--json`, `--today YYYY-MM-DD`, `--dry-run`.
 
 The `agent-*` commands record assignments and checkpoints in a local
 SQLite store (`--db` > `ZTD_AGENT_DB` > per-OS default). They need no Markdown
-workspace, reject `--root`, `--today` and `--dry-run`, accept `--json`, and
+store, reject `--root`, `--today` and `--dry-run`, accept `--json`, and
 print the JSON envelope by default. The store is independent of the Markdown
 lists; it does not replace them. Details and error codes: [docs/spec.md](docs/spec.md).
 
@@ -159,7 +170,7 @@ Exit codes: `0` success, `1` domain error, `2` usage.
 
 `ztd mcp --agent-scope S [--agent-db PATH]` runs the agent-mode server instead:
 only `ztd_agent_capture`, `ztd_agent_checkpoint` and `ztd_agent_prepare`, and no
-resources, because the legacy handlers resolve a Markdown workspace that the
+resources, because the legacy handlers resolve a Markdown store that the
 agent scope does not constrain. The scope comes from server configuration and
 is never a tool argument; `--read-only` rejects capture and checkpoint and
 allows prepare.
@@ -167,18 +178,22 @@ allows prepare.
 OpenCode:
 
 ```jsonc
-"mcp": {
-  "servers": {
-    "ztd": {
-      "type": "local",
-      "command": ["ztd", "mcp"],
-      "enabled": true
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "ztd": {
+        "type": "local",
+        "command": ["ztd", "mcp"]
+      }
     }
   }
 }
 ```
 
-The server starts even without a workspace; tools return `invalid_workspace`.
+The server resolves the root by precedence (`--root` > `ZTD_ROOT` > `~/.ztd`);
+add `--root PATH` to pin a different store. It starts even when the store root
+is missing; tools return `invalid_workspace`.
 
 With `--agent-scope`, the server exposes only the three `ztd_agent_*` tools and
 no resources; the Markdown tools are not listed in that mode.
@@ -202,7 +217,7 @@ zig build test
 zig fmt --check build.zig src
 ```
 
-The test suite uses synthetic workspaces only. It never reads user data.
+The test suite uses synthetic stores only. It never reads user data.
 
 See [docs/spec.md](docs/spec.md) for the data model, transition rules and the
 methodical specifications behind the engine.

@@ -129,7 +129,7 @@ pub const Store = struct {
     }
 };
 
-fn existsPath(io: std.Io, path: []const u8) bool {
+pub fn pathExists(io: std.Io, path: []const u8) bool {
     if (std.fs.path.isAbsolute(path)) {
         std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
     } else {
@@ -138,45 +138,64 @@ fn existsPath(io: std.Io, path: []const u8) bool {
     return true;
 }
 
-fn hasWorkspace(io: std.Io, base: []const u8, alloc: std.mem.Allocator) bool {
-    for ([_][]const u8{ "contexts.md", "config.json", "inbox.md" }) |name| {
-        const p = std.fs.path.join(alloc, &.{ base, "ztd", name }) catch continue;
-        defer alloc.free(p);
-        if (existsPath(io, p)) return true;
-    }
-    return false;
+/// Platform home directory: `$HOME`, then `$USERPROFILE` on Windows. A missing
+/// home is a workspace error because the default root cannot be located.
+pub fn homeDir(io: std.Io, alloc: std.mem.Allocator) ![]const u8 {
+    _ = io;
+    const raw = std.c.getenv("HOME") orelse std.c.getenv("USERPROFILE") orelse return error.InvalidWorkspace;
+    const home = std.mem.sliceTo(raw, 0);
+    if (home.len == 0) return error.InvalidWorkspace;
+    return alloc.dupe(u8, home);
 }
 
-/// Returns the ztd directory. Accepts a repository root or a ztd directory.
+/// Store directory from root precedence alone: an explicit `--root`/`ZTD_ROOT`
+/// path verbatim, otherwise `$HOME/.ztd`. It never inspects the filesystem and
+/// never walks the working directory looking for a `ztd/`.
+pub fn rootPath(io: std.Io, alloc: std.mem.Allocator, explicit: ?[]const u8) ![]const u8 {
+    if (explicit) |path| return alloc.dupe(u8, path);
+    const home = try homeDir(io, alloc);
+    defer alloc.free(home);
+    return std.fs.path.join(alloc, &.{ home, ".ztd" });
+}
+
+/// `rootPath` plus existence: everything except `status` and `init` needs a
+/// store that is already there.
 pub fn resolveRoot(io: std.Io, alloc: std.mem.Allocator, explicit: ?[]const u8) ![]const u8 {
-    if (explicit) |base| {
-        const contexts = try std.fs.path.join(alloc, &.{ base, "contexts.md" });
-        defer alloc.free(contexts);
-        if (existsPath(io, contexts)) {
-            return alloc.dupe(u8, base);
-        }
-        if (hasWorkspace(io, base, alloc)) {
-            return std.fs.path.join(alloc, &.{ base, "ztd" });
-        }
-        return error.InvalidWorkspace;
-    }
-
-    const cwd = try std.process.currentPathAlloc(io, alloc);
-    var p: []const u8 = cwd;
-    while (true) {
-        if (hasWorkspace(io, p, alloc)) {
-            return std.fs.path.join(alloc, &.{ p, "ztd" });
-        }
-        const parent = std.fs.path.dirname(p) orelse break;
-        if (std.mem.eql(u8, parent, p)) break;
-        p = parent;
-    }
-    return error.InvalidWorkspace;
+    const path = try rootPath(io, alloc, explicit);
+    errdefer alloc.free(path);
+    if (!pathExists(io, path)) return error.InvalidWorkspace;
+    return path;
 }
 
-test "resolve rejects missing workspace" {
+test "root precedence uses the explicit path verbatim and never walks upward" {
     const alloc = std.testing.allocator;
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
-    try std.testing.expectError(error.InvalidWorkspace, resolveRoot(threaded.io(), alloc, "/definitely/not/here"));
+    const io = threaded.io();
+
+    // An explicit path is the store itself: no `ztd` component is appended,
+    // whatever it looks like.
+    const explicit_path = try rootPath(io, alloc, "/tmp/store");
+    defer alloc.free(explicit_path);
+    try std.testing.expectEqualStrings("/tmp/store", explicit_path);
+    try std.testing.expectError(error.InvalidWorkspace, resolveRoot(io, alloc, "/definitely/not/here"));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const existing = try resolveRoot(io, alloc, path_buf[0..n]);
+    defer alloc.free(existing);
+    try std.testing.expectEqualStrings(path_buf[0..n], existing);
+
+    // The default is `$HOME/.ztd`, independent of the working directory: the
+    // resolution result is built from the environment alone (the no-cwd-walk
+    // behaviour with a store on the way up is covered by the integration test).
+    const home = try homeDir(io, alloc);
+    defer alloc.free(home);
+    const expected = try std.fs.path.join(alloc, &.{ home, ".ztd" });
+    defer alloc.free(expected);
+    const default_root = try rootPath(io, alloc, null);
+    defer alloc.free(default_root);
+    try std.testing.expectEqualStrings(expected, default_root);
 }

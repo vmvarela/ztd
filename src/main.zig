@@ -11,8 +11,10 @@ const db = @import("db.zig");
 
 const builtin = @import("builtin");
 const build_options = @import("build_options");
+const config_mod = @import("config.zig");
 pub const version = build_options.version;
-pub const format = 1;
+/// Store format this binary reads and writes.
+pub const format = config_mod.supported_format;
 
 const Ctx = struct {
     io: std.Io,
@@ -75,6 +77,19 @@ const RoutineData = struct {
     routine: RoutineView,
 };
 
+/// `ztd status` payload. The JSON contract is deterministic: fixed keys in
+/// declaration order — `root` (store path exactly as root precedence resolved
+/// it), `source` (`flag` for --root, `env` for ZTD_ROOT, `home` for
+/// $HOME/.ztd), `exists` (store directory present) and `format` (the
+/// config.json format when readable, else null). Reading status never
+/// creates the store, so it works when the store is absent.
+const StatusData = struct {
+    root: []const u8,
+    source: []const u8,
+    exists: bool,
+    format: ?u32,
+};
+
 pub fn main(init: std.process.Init) !void {
     const alloc = init.arena.allocator();
     const argv = try init.minimal.args.toSlice(alloc);
@@ -99,7 +114,9 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
         if (d.legacy) return usage(ctx, "agent commands do not accept global options");
         return runAgent(ctx, args[d.idx], args[d.idx + 1 ..]);
     }
-    var root: ?[]const u8 = ctx.root_env;
+    var root: ?[]const u8 = if (ctx.root_env) |env| (if (env.len > 0) env else null) else null;
+    var root_flag = false;
+    var local = false;
     var today_arg: ?[]const u8 = null;
     var dry_run = false;
     var filtered: std.ArrayList([]const u8) = .empty;
@@ -115,7 +132,13 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
         if (std.mem.eql(u8, a, "--root")) {
             if (i + 1 >= args.len) return usage(ctx, "--root needs a path");
             root = args[i + 1];
+            root_flag = true;
             i += 2;
+            continue;
+        }
+        if (std.mem.eql(u8, a, "--local")) {
+            local = true;
+            i += 1;
             continue;
         }
         if (std.mem.eql(u8, a, "--today")) {
@@ -143,7 +166,7 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
                 try stdout(ctx, version);
                 try stdout(ctx, " ");
                 try stdout(ctx, targetName());
-                try stdout(ctx, " format 1\n");
+                try stdout(ctx, " format " ++ std.fmt.comptimePrint("{d}", .{format}) ++ "\n");
             }
             return 0;
         }
@@ -155,6 +178,7 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
     const cmd = filtered.items[0];
     ctx.command = cmd;
     const rest = filtered.items[1..];
+    if (local and !std.mem.eql(u8, cmd, "init")) return usage(ctx, "--local is only valid for init");
 
     if (std.mem.eql(u8, cmd, "version")) {
         if (ctx.json) {
@@ -164,7 +188,7 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
             try stdout(ctx, version);
             try stdout(ctx, " ");
             try stdout(ctx, targetName());
-            try stdout(ctx, " format 1\n");
+            try stdout(ctx, " format " ++ std.fmt.comptimePrint("{d}", .{format}) ++ "\n");
         }
         return 0;
     }
@@ -173,7 +197,21 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
         return 0;
     }
     if (std.mem.eql(u8, cmd, "init")) {
-        const target = if (rest.len > 0) rest[0] else if (root) |r| r else ".";
+        // Store selection: --local > explicit path > --root/ZTD_ROOT > $HOME/.ztd.
+        // An explicit path is the store directory itself, never a parent to
+        // which a `ztd` component is appended.
+        if (local) {
+            if (rest.len > 0) return usage(ctx, "init --local takes no path");
+            if (root_flag) return usage(ctx, "init --local conflicts with --root");
+        }
+        const target: []const u8 = if (local)
+            "ztd"
+        else if (rest.len > 0)
+            rest[0]
+        else if (root) |r|
+            r
+        else
+            try store_mod.rootPath(ctx.io, ctx.alloc, null);
         const res = try init_mod.initWorkspace(ctx.io, ctx.alloc, target, dry_run);
         if (ctx.json) {
             try success(ctx, "init", .{ .dry_run = dry_run, .root = res.root, .created = res.created });
@@ -188,6 +226,13 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
             }
         }
         return 0;
+    }
+
+    // Status never needs an existing store: it reports what the precedence
+    // resolved and what is actually on disk, without creating anything.
+    if (std.mem.eql(u8, cmd, "status")) {
+        const source: []const u8 = if (root_flag) "flag" else if (root != null) "env" else "home";
+        return cmdStatus(ctx, root, source);
     }
 
     const today = if (today_arg) |t| platform.parseDate(t) catch return usage(ctx, "--today must be YYYY-MM-DD") else platform.today(ctx.io);
@@ -741,6 +786,45 @@ fn cmdCheck(ctx: *Ctx, eng: *engine.Engine, args: []const []const u8) !u8 {
     return if (result.errors.len == 0) 0 else 1;
 }
 
+fn cmdStatus(ctx: *Ctx, root: ?[]const u8, source: []const u8) !u8 {
+    const root_path = try store_mod.rootPath(ctx.io, ctx.alloc, root);
+    const exists = store_mod.pathExists(ctx.io, root_path);
+    const store_format: ?u32 = if (exists) peekFormat(ctx, root_path) else null;
+    if (ctx.json) {
+        try success(ctx, "status", StatusData{
+            .root = root_path,
+            .source = source,
+            .exists = exists,
+            .format = store_format,
+        });
+    } else {
+        try stdout(ctx, "root: ");
+        try stdout(ctx, root_path);
+        try stdout(ctx, "\nsource: ");
+        try stdout(ctx, source);
+        try stdout(ctx, "\nstore: ");
+        if (!exists) {
+            try stdout(ctx, "absent\n");
+        } else if (store_format) |f| {
+            try stdout(ctx, "present, format ");
+            var buf: [8]u8 = undefined;
+            const printed = std.fmt.bufPrint(&buf, "{d}", .{f}) catch "";
+            try stdout(ctx, printed);
+            try stdout(ctx, "\n");
+        } else {
+            try stdout(ctx, "present, format unknown\n");
+        }
+    }
+    return 0;
+}
+
+/// Read-only format probe for an existing store directory.
+fn peekFormat(ctx: *Ctx, root_path: []const u8) ?u32 {
+    var store = store_mod.Store.open(ctx.io, ctx.alloc, root_path) catch return null;
+    defer store.deinit();
+    return config_mod.formatOf(&store, ctx.alloc);
+}
+
 fn cmdRecover(ctx: *Ctx, eng: *engine.Engine, args: []const []const u8) !u8 {
     if (args.len != 0) return usage(ctx, "recover takes no arguments");
     const did = try eng.recover();
@@ -906,7 +990,8 @@ fn printHelp(ctx: *Ctx) !void {
     try stderr(ctx,
         \\usage: ztd <command> [options]
         \\
-        \\  init [path]                 create a ztd workspace
+        \\  init [path] [--local]       create a store (default $HOME/.ztd; --local = ./ztd)
+        \\  status                      show root, source, exists, format (same keys with --json)
         \\  capture <text>... | --stdin capture tasks into the inbox
         \\  list [--context C] [--client X] [--project P] [--list L]
         \\  show <id>                   show one task

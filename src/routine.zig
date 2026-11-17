@@ -1,21 +1,22 @@
 const std = @import("std");
 const platform = @import("platform.zig");
 
-/// Última ejecución de cada rutina recurrente. Markdown como el resto del
-/// workspace: el archivo es legible y diffeable, y `ztd` solo reescribe la fila.
+/// Last run of each recurring routine. Markdown like the rest of the
+/// workspace: the file stays readable and diffable, and `ztd` only rewrites
+/// the row.
 pub const path = "routines/state.md";
 
 pub const Row = struct {
     id: []const u8,
     cadence: []const u8,
     last: platform.Date,
-    /// 0 = lunes … 6 = domingo; null para cadencia diaria.
+    /// 0 = Monday … 6 = Sunday; null for the daily cadence.
     weekday: ?u3,
 };
 
-const names = [_][]const u8{ "lun", "mar", "mie", "jue", "vie", "sab", "dom" };
-const weekly_prefix = "semanal:";
-const daily = "diaria";
+const names = [_][]const u8{ "mon", "tue", "wed", "thu", "fri", "sat", "sun" };
+const weekly_prefix = "weekly:";
+const daily = "daily";
 
 pub fn isDue(entry: Row, today: platform.Date) bool {
     const since = platform.diff(today, entry.last);
@@ -83,7 +84,8 @@ pub fn stamp(alloc: std.mem.Allocator, text: []const u8, id: []const u8, today: 
     return out.toOwnedSlice(alloc);
 }
 
-/// Una fila de la tabla; null para líneas fuera de tabla, cabecera y separador.
+/// One row of the table; null for lines outside the table, the header and the
+/// separator.
 fn row(line: []const u8) !?Row {
     const trimmed = std.mem.trim(u8, line, " \t\r");
     if (trimmed.len == 0 or trimmed[0] != '|') return null;
@@ -101,7 +103,7 @@ fn row(line: []const u8) !?Row {
 
     const id = cells[0];
     const cadence = cells[1];
-    if (std.mem.eql(u8, id, "rutina") or isSeparator(id)) return null;
+    if (std.mem.eql(u8, id, "routine") or isSeparator(id)) return null;
     if (!validId(id)) return error.MalformedRoutine;
 
     const weekday: ?u3 = if (std.mem.eql(u8, cadence, daily))
@@ -137,12 +139,12 @@ fn isSeparator(id: []const u8) bool {
 }
 
 const sample =
-    \\# Estado de rutinas
+    \\# Routine state
     \\
-    \\| rutina | cadencia | última |
+    \\| routine | cadence | last |
     \\| --- | --- | --- |
-    \\| inbox | diaria | 2026-11-14 |
-    \\| review | semanal:sab | 2026-11-07 |
+    \\| inbox | daily | 2026-11-14 |
+    \\| review | weekly:sat | 2026-11-07 |
     \\
 ;
 
@@ -158,7 +160,7 @@ test "parse and due" {
     }
     try std.testing.expectEqual(@as(usize, 2), rows.len);
     try std.testing.expectEqualStrings("inbox", rows[0].id);
-    try std.testing.expectEqualStrings("semanal:sab", rows[1].cadence);
+    try std.testing.expectEqualStrings("weekly:sat", rows[1].cadence);
     try std.testing.expectEqual(@as(?u3, 5), rows[1].weekday);
 
     const sunday = try platform.parseDate("2026-11-15");
@@ -168,9 +170,52 @@ test "parse and due" {
     const saturday = try platform.parseDate("2026-11-14");
     try std.testing.expect(!isDue(rows[0], saturday));
     try std.testing.expect(isDue(rows[1], saturday));
-    // Hecha el sábado, no vuelve a vencer hasta el sábado siguiente.
+    // Run on Saturday: not due again until the next Saturday.
     try std.testing.expect(!isDue(rows[1], try platform.parseDate("2026-11-08")));
     try std.testing.expect(!isDue(rows[1], try platform.parseDate("2026-11-13")));
+}
+
+// Every `weekly:<day>` cadence behaves the same, shifted by the weekday:
+// Monday-first tokens map to 0…6 and the due rule is identical for each day.
+test "every weekday cadence is equivalent and Monday-first" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { today: []const u8, week_ago: []const u8, token: []const u8, wd: u3 }{
+        .{ .today = "2026-11-16", .week_ago = "2026-11-09", .token = "mon", .wd = 0 },
+        .{ .today = "2026-11-17", .week_ago = "2026-11-10", .token = "tue", .wd = 1 },
+        .{ .today = "2026-11-18", .week_ago = "2026-11-11", .token = "wed", .wd = 2 },
+        .{ .today = "2026-11-19", .week_ago = "2026-11-12", .token = "thu", .wd = 3 },
+        .{ .today = "2026-11-20", .week_ago = "2026-11-13", .token = "fri", .wd = 4 },
+        .{ .today = "2026-11-21", .week_ago = "2026-11-14", .token = "sat", .wd = 5 },
+        .{ .today = "2026-11-22", .week_ago = "2026-11-15", .token = "sun", .wd = 6 },
+    };
+    for (cases) |c| {
+        const today = try platform.parseDate(c.today);
+        try std.testing.expectEqual(c.wd, today.weekday());
+        try std.testing.expectEqual(@as(i64, 7), platform.diff(today, try platform.parseDate(c.week_ago)));
+
+        // Last run exactly one week ago: due today.
+        const due_text = try std.fmt.allocPrint(alloc, "| r | weekly:{s} | {s} |\n", .{ c.token, c.week_ago });
+        defer alloc.free(due_text);
+        const due_rows = try parse(alloc, due_text);
+        defer freeRows(alloc, due_rows);
+        try std.testing.expectEqual(@as(?u3, c.wd), due_rows[0].weekday);
+        try std.testing.expect(isDue(due_rows[0], today));
+
+        // Last run today: not due again until the next occurrence.
+        const today_text = try std.fmt.allocPrint(alloc, "| r | weekly:{s} | {s} |\n", .{ c.token, c.today });
+        defer alloc.free(today_text);
+        const today_rows = try parse(alloc, today_text);
+        defer freeRows(alloc, today_rows);
+        try std.testing.expect(!isDue(today_rows[0], today));
+    }
+}
+
+fn freeRows(alloc: std.mem.Allocator, rows: []const Row) void {
+    for (rows) |r| {
+        alloc.free(r.id);
+        alloc.free(r.cadence);
+    }
+    alloc.free(rows);
 }
 
 test "stamp rewrites one row and rejects unknown ids" {
@@ -178,16 +223,16 @@ test "stamp rewrites one row and rejects unknown ids" {
     const today = try platform.parseDate("2026-11-15");
     const text = try stamp(alloc, sample, "inbox", today);
     defer alloc.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "| inbox | diaria | 2026-11-15 |") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "| review | semanal:sab | 2026-11-07 |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "| inbox | daily | 2026-11-15 |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "| review | weekly:sat | 2026-11-07 |") != null);
     try std.testing.expectEqual(sample.len, text.len);
     try std.testing.expectError(error.UnknownId, stamp(alloc, sample, "nope", today));
 }
 
 test "malformed input fails closed" {
     const alloc = std.testing.allocator;
-    try std.testing.expectError(error.MalformedRoutine, parse(alloc, "| inbox | horaria | 2026-11-14 |\n"));
-    try std.testing.expectError(error.MalformedRoutine, parse(alloc, "| inbox | diaria | 2026-13-14 |\n"));
-    try std.testing.expectError(error.MalformedRoutine, parse(alloc, "# sin filas\n"));
-    try std.testing.expectError(error.DuplicateId, parse(alloc, sample ++ "| inbox | diaria | 2026-11-14 |\n"));
+    try std.testing.expectError(error.MalformedRoutine, parse(alloc, "| inbox | hourly | 2026-11-14 |\n"));
+    try std.testing.expectError(error.MalformedRoutine, parse(alloc, "| inbox | daily | 2026-13-14 |\n"));
+    try std.testing.expectError(error.MalformedRoutine, parse(alloc, "# no rows\n"));
+    try std.testing.expectError(error.DuplicateId, parse(alloc, sample ++ "| inbox | daily | 2026-11-14 |\n"));
 }

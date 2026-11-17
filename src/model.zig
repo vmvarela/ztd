@@ -84,6 +84,22 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
+/// Format-1 reserved keys. A format-2 task must not carry them; the canonical
+/// English keys are `context`, `client`, `project`, `captured_at`, `closed_at`,
+/// `resolution` and `waiting_on`. Any other key stays a custom field.
+pub const legacy_fields = [_][]const u8{
+    "contexto", "cliente", "proyecto", "capturada",
+    "cerrada",  "espera",
+    "resolución",
+};
+
+pub fn isLegacyField(key: []const u8) bool {
+    for (legacy_fields) |legacy| {
+        if (std.mem.eql(u8, legacy, key)) return true;
+    }
+    return false;
+}
+
 pub fn validId(id: []const u8) bool {
     if (id.len < 14) return false;
     if (!std.mem.startsWith(u8, id, "T-")) return false;
@@ -221,7 +237,7 @@ pub fn parseIdDate(id: []const u8) ?struct { year: u16, month: u8, day: u8 } {
 
 test "round trip" {
     const alloc = std.testing.allocator;
-    const line = "- [ ] T-20261111-001 | Título con \\| pipe | contexto: trabajo | cliente: acme | capturada: 2026-11-11";
+    const line = "- [ ] T-20261111-001 | Title with \\| pipe | context: work | client: acme | captured_at: 2026-11-11";
     var task = (try parseLine(alloc, line)).?;
     defer {
         alloc.free(task.id);
@@ -233,8 +249,8 @@ test "round trip" {
         task.fields.deinit(alloc);
     }
     try std.testing.expectEqualStrings("T-20261111-001", task.id);
-    try std.testing.expectEqualStrings("Título con | pipe", task.title);
-    try std.testing.expectEqualStrings("trabajo", task.get("contexto").?);
+    try std.testing.expectEqualStrings("Title with | pipe", task.title);
+    try std.testing.expectEqualStrings("work", task.get("context").?);
     const rendered = try task.render(alloc);
     defer alloc.free(rendered);
     var again = (try parseLine(alloc, rendered)).?;
@@ -253,6 +269,13 @@ test "round trip" {
 }
 
 test "duplicate field is malformed" {
-    const line = "- [ ] T-20261111-001 | Title | contexto: trabajo | contexto: personal";
+    const line = "- [ ] T-20261111-001 | Title | context: work | context: personal";
     try std.testing.expectError(error.MalformedTask, parseLine(std.testing.allocator, line));
+}
+
+test "legacy reserved keys are recognised and custom fields are not" {
+    for (legacy_fields) |key| try std.testing.expect(isLegacyField(key));
+    try std.testing.expect(!isLegacyField("context"));
+    try std.testing.expect(!isLegacyField("waiting_on"));
+    try std.testing.expect(!isLegacyField("estimate"));
 }

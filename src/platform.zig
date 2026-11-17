@@ -16,7 +16,7 @@ pub const Date = struct {
         return a.year == b.year and a.month == b.month and a.day == b.day;
     }
 
-    /// Días desde 1970-01-01 (Howard Hinnant); sin tablas ni zona horaria.
+    /// Days since 1970-01-01 (Howard Hinnant); no tables and no time zone.
     pub fn civilDays(self: Date) i64 {
         const y: i64 = @as(i64, self.year) - @as(i64, if (self.month <= 2) 1 else 0);
         const era = @divFloor(y, 400);
@@ -28,7 +28,7 @@ pub const Date = struct {
         return era * 146097 + doe - 719468;
     }
 
-    /// 0 = lunes … 6 = domingo.
+    /// 0 = Monday … 6 = Sunday.
     pub fn weekday(self: Date) u3 {
         return @intCast(@mod(self.civilDays() + 3, 7));
     }

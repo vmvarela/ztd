@@ -477,7 +477,7 @@ test "a version-1 database upgrades to version 2 keeping its rows" {
     try raw.exec(
         \\INSERT INTO scope (id) VALUES ('demo');
         \\INSERT INTO assignment (id, scope_id, request, status, rev, created_at, updated_at)
-        \\VALUES ('A-20260101-001', 'demo', 'tarea antigua', 'open', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+        \\VALUES ('A-20260101-001', 'demo', 'old task', 'open', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
         \\PRAGMA user_version = 1;
     );
     raw.close();
@@ -491,7 +491,7 @@ test "a version-1 database upgrades to version 2 keeping its rows" {
     try std.testing.expect(try kept.step());
     const request = (try kept.columnText(alloc, 0)).?;
     defer alloc.free(request);
-    try std.testing.expectEqualStrings("tarea antigua", request);
+    try std.testing.expectEqualStrings("old task", request);
     try std.testing.expectEqual(@as(i64, 1), kept.columnInt64(1));
 
     var objects = try upgraded.prepare(
