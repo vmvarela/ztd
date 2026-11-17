@@ -9,6 +9,12 @@ Paths relative to the store root; the root resolves as `--root` > `ZTD_ROOT` > `
 the affected scope; read `README.md` for recovery or structural changes.
 Run `ztd check` before repairing: it detects duplicates, invalid states and
 orphan references without modifying data. Use `show ID` to locate them.
+`ztd check --bindings` additionally validates the selected repo binding
+against the resolved store and fails when it is missing or invalid; use
+binding only to scope repo-specific references — it never narrows the
+structural checks above, which always cover the entire store. A malformed
+binding means stop and ask before scoping any repo reference; the binding is
+a routing hint, not authorization, and never changes the store root.
 
 1. A pending transaction cannot be recovered from queries: when executing use
    `ztd recover` and repeat the check. In Plan mode only report.

@@ -9,6 +9,10 @@ Paths relative to the store root; the root resolves as `--root` > `ZTD_ROOT` > `
 `calendar.md`, actions/waitings through `list` with filters, and only the
 relevant project cards. Do not walk knowledge indexes or cards without candidate
 actions. Get the current local date; interpret an explicit date when provided.
+With no scope in the request or from a selected task, default those `list`
+filters from a valid `data.binding` (`ztd status --json`); a malformed binding
+means stop and ask before scope-based work — a routing hint only, never a root
+source.
 
 ## Day
 

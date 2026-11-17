@@ -118,11 +118,14 @@ Tasks are mutated only through the `ztd` CLI; IDs are the canonical reference
 and plans, reviews and cards reference them without duplicating state. Every
 path in this method is relative to the store root.
 
-A repository's `.ztd.json` binding declares exactly its context, client and
-project (a convention; the CLI does not read it yet): it is not the store and
-holds no tasks or paths. Each clone's local
-path is kept in its project card, outside the store root; if the store defines
-a configurable repos root, validate against it when it exists.
+A repository's `.ztd.json` binding declares exactly its `context`, `client` and
+`project`; it is not the store and holds no tasks, clone paths, or repository
+URLs. The CLI discovers the nearest binding from the current directory up to
+the current Git repository boundary. `ztd status --json` reports it, and
+`ztd check --bindings` validates it against the resolved store. A binding is a
+routing hint, not authorization: explicit user scope remains authoritative.
+Each clone's local path lives in its project card, outside the binding and
+store.
 
 The OpenCode adapter —skills, commands and agent— lives in
 [`../integrations/opencode/`](../integrations/opencode/README.md). It is

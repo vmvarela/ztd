@@ -11,8 +11,15 @@ whenever a client is known — the store configuration only decides whether a
 missing client blocks), not the full plan. The view is partial and does not identify priorities; do not infer that a
 reference is a MIT.
 
+When the request and the selected task give no scope, `ztd status --json` may
+supply default filters from `data.binding` (valid `{context, client, project}`
+only, discovered in the current Git repository); a malformed binding means
+stop and ask before any scope-based work. The binding is a routing hint, not
+authorization, and it never changes the store root.
+
 1. Resolve `ztd show ID` or query `list --list next` with the known context,
-   client and project filters. Without a selection, pick an executable MIT whose
+   client and project filters — or the defaults from a valid `data.binding`
+   when no scope exists anywhere. Without a selection, pick an executable MIT whose
    priority you know; if you do not know it, propose a clear next action. In a
    global selection do not dump client details; ask only when there is no clear
    candidate. Do not execute closed or blocked tasks.

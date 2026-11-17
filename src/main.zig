@@ -5,6 +5,8 @@ const platform = @import("platform.zig");
 const model = @import("model.zig");
 const routine_mod = @import("routine.zig");
 const store_mod = @import("store.zig");
+const binding_mod = @import("binding.zig");
+const migrate_mod = @import("migrate.zig");
 const mcp = @import("mcp.zig");
 const agent = @import("agent.zig");
 const db = @import("db.zig");
@@ -88,6 +90,23 @@ const StatusData = struct {
     source: []const u8,
     exists: bool,
     format: ?u32,
+    binding: ?BindingView,
+};
+
+/// `.ztd.json` diagnostic appended to `status`. `value` is exactly the
+/// binding's three fields and is null when the file is absent, malformed or
+/// unreadable; `error` carries the diagnostic in those cases. A malformed
+/// binding never suppresses the root information above it.
+const BindingView = struct {
+    path: []const u8,
+    value: ?BindingValue,
+    @"error": ?[]const u8,
+};
+
+const BindingValue = struct {
+    context: []const u8,
+    client: ?[]const u8,
+    project: []const u8,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -236,6 +255,12 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
     }
 
     const today = if (today_arg) |t| platform.parseDate(t) catch return usage(ctx, "--today must be YYYY-MM-DD") else platform.today(ctx.io);
+    // Conversion names both stores explicitly: the resolved root, the working
+    // directory and ZTD_ROOT never select them.
+    if (std.mem.eql(u8, cmd, "migrate")) {
+        if (root_flag) return usage(ctx, "migrate takes --from/--to, not --root");
+        return cmdMigrate(ctx, rest, dry_run, today);
+    }
     if (std.mem.eql(u8, cmd, "mcp")) {
         try mcp.serve(ctx.io, ctx.alloc, rest, root, today);
         return 0;
@@ -756,46 +781,177 @@ fn cmdPlan(ctx: *Ctx, eng: *engine.Engine, args: []const []const u8) !u8 {
 
 fn cmdCheck(ctx: *Ctx, eng: *engine.Engine, args: []const []const u8) !u8 {
     var strict = false;
+    var bindings = false;
     for (args) |a| {
         if (std.mem.eql(u8, a, "--strict")) {
             strict = true;
+        } else if (std.mem.eql(u8, a, "--bindings")) {
+            bindings = true;
         } else {
             return usage(ctx, "unknown check option");
         }
     }
     const result = try eng.check(strict);
+    var errors: std.ArrayList([]const u8) = .empty;
+    defer errors.deinit(ctx.alloc);
+    try errors.appendSlice(ctx.alloc, result.errors);
+    if (bindings) try checkBinding(ctx, eng, &errors);
+    const found = errors.items;
+    const warnings = result.warnings;
     if (ctx.json) {
         try writeJson(ctx, .{
-            .ok = result.errors.len == 0,
+            .ok = found.len == 0,
             .command = "check",
-            .data = CheckData{ .errors = result.errors, .warnings = result.warnings },
+            .data = CheckData{ .errors = found, .warnings = warnings },
         });
     } else {
-        for (result.errors) |e| {
+        for (found) |e| {
             try stderr(ctx, "error: ");
             try stderr(ctx, e);
             try stderr(ctx, "\n");
         }
-        for (result.warnings) |w| {
+        for (warnings) |w| {
             try stderr(ctx, "warning: ");
             try stderr(ctx, w);
             try stderr(ctx, "\n");
         }
-        if (result.errors.len == 0 and result.warnings.len == 0) try stdout(ctx, "ok\n");
+        if (found.len == 0 and warnings.len == 0) try stdout(ctx, "ok\n");
     }
-    return if (result.errors.len == 0) 0 else 1;
+    return if (found.len == 0) 0 else 1;
+}
+
+/// `check --bindings` validates only the binding of the repository holding the
+/// current directory. A missing or malformed binding is an error: the flag is
+/// an explicit request to check one, never a request to crawl repositories.
+fn checkBinding(ctx: *Ctx, eng: *engine.Engine, errors: *std.ArrayList([]const u8)) !void {
+    switch (try binding_mod.discover(ctx.io, ctx.alloc)) {
+        .absent => try errors.append(ctx.alloc, "no .ztd.json binding in the current repository"),
+        .invalid => |inv| try errors.append(ctx.alloc, try std.fmt.allocPrint(ctx.alloc, "{s}: {s}", .{ inv.path, inv.problem.message() })),
+        .found => |f| binding_mod.validate(&eng.store, ctx.alloc, f.binding) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => try errors.append(ctx.alloc, try std.fmt.allocPrint(ctx.alloc, "{s}: {s}", .{ f.path, bindingErrorText(err) })),
+        },
+    }
+}
+
+fn bindingErrorText(err: anyerror) []const u8 {
+    return switch (err) {
+        error.InvalidContext => "context is not listed in contexts.md",
+        error.InvalidClient => "client is not allowed in this context",
+        error.MissingClient => "context requires a client",
+        error.InvalidProject => "project is not registered under lists/projects",
+        else => @errorName(err),
+    };
+}
+
+/// `migrate --from SOURCE --to DEST [--dry-run]`: copy-only conversion of a
+/// format-1 store into a new format-2 store. Both paths are explicit, so the
+/// resolved root, `ZTD_ROOT` and the working directory never select them.
+fn cmdMigrate(ctx: *Ctx, args: []const []const u8, dry_run: bool, today: platform.Date) !u8 {
+    var from: ?[]const u8 = null;
+    var to: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--from") or std.mem.eql(u8, a, "--to")) {
+            if (i + 1 >= args.len) return usage(ctx, "--from and --to need a path");
+            if (a[2] == 'f') from = args[i + 1] else to = args[i + 1];
+            i += 2;
+            continue;
+        }
+        if (std.mem.startsWith(u8, a, "--from=")) {
+            from = a["--from=".len..];
+        } else if (std.mem.startsWith(u8, a, "--to=")) {
+            to = a["--to=".len..];
+        } else {
+            return usage(ctx, "unknown migrate option");
+        }
+        i += 1;
+    }
+    if (from == null or to == null) return usage(ctx, "migrate needs --from SOURCE and --to DEST");
+
+    var diags: std.ArrayList([]const u8) = .empty;
+    defer diags.deinit(ctx.alloc);
+    const rep = migrate_mod.run(ctx.io, ctx.alloc, .{
+        .from = from.?,
+        .to = to.?,
+        .dry_run = dry_run,
+        .today = today,
+    }, &diags) catch |err| {
+        if (!ctx.json) {
+            for (diags.items) |d| {
+                try stderr(ctx, "detail: ");
+                try stderr(ctx, d);
+                try stderr(ctx, "\n");
+            }
+        }
+        return failCode(ctx, migrate_mod.errorName(err), err);
+    };
+    if (ctx.json) {
+        try success(ctx, "migrate", rep);
+    } else {
+        if (rep.dry_run) try stdout(ctx, "would convert ") else try stdout(ctx, "converted ");
+        try stdout(ctx, rep.from);
+        try stdout(ctx, " -> ");
+        try stdout(ctx, rep.to);
+        try stdout(ctx, "\n  config: ");
+        try stdout(ctx, rep.config);
+        try stdout(ctx, "\n  routines: ");
+        try stdout(ctx, rep.routines);
+        try stdout(ctx, "\n  files: ");
+        try printInt(ctx, rep.files);
+        try stdout(ctx, "\n  tasks: ");
+        try printInt(ctx, rep.tasks);
+        try stdout(ctx, " (");
+        try printInt(ctx, rep.fields_renamed);
+        try stdout(ctx, " fields renamed)\n  checked: ");
+        try stdout(ctx, if (rep.checked) "yes\n" else "no\n");
+    }
+    return 0;
+}
+
+fn printInt(ctx: *Ctx, value: usize) !void {
+    var buf: [24]u8 = undefined;
+    try stdout(ctx, std.fmt.bufPrint(&buf, "{d}", .{value}) catch "");
+}
+
+fn failCode(ctx: *Ctx, code: []const u8, err: anyerror) !u8 {
+    if (ctx.json) {
+        try writeJson(ctx, ErrOut{
+            .command = ctx.command,
+            .@"error" = .{ .code = code, .message = @errorName(err) },
+        });
+    } else {
+        try stderr(ctx, "ztd: ");
+        try stderr(ctx, code);
+        try stderr(ctx, ": ");
+        try stderr(ctx, @errorName(err));
+        try stderr(ctx, "\n");
+    }
+    return 1;
 }
 
 fn cmdStatus(ctx: *Ctx, root: ?[]const u8, source: []const u8) !u8 {
     const root_path = try store_mod.rootPath(ctx.io, ctx.alloc, root);
     const exists = store_mod.pathExists(ctx.io, root_path);
     const store_format: ?u32 = if (exists) peekFormat(ctx, root_path) else null;
+    var binding: ?BindingView = null;
+    switch (try binding_mod.discover(ctx.io, ctx.alloc)) {
+        .absent => {},
+        .invalid => |inv| binding = .{ .path = inv.path, .value = null, .@"error" = inv.problem.message() },
+        .found => |f| binding = .{
+            .path = f.path,
+            .value = .{ .context = f.binding.context, .client = f.binding.client, .project = f.binding.project },
+            .@"error" = null,
+        },
+    }
     if (ctx.json) {
         try success(ctx, "status", StatusData{
             .root = root_path,
             .source = source,
             .exists = exists,
             .format = store_format,
+            .binding = binding,
         });
     } else {
         try stdout(ctx, "root: ");
@@ -814,6 +970,18 @@ fn cmdStatus(ctx: *Ctx, root: ?[]const u8, source: []const u8) !u8 {
         } else {
             try stdout(ctx, "present, format unknown\n");
         }
+        try stdout(ctx, "binding: ");
+        if (binding) |b| {
+            try stdout(ctx, b.path);
+            if (b.@"error") |e| {
+                try stdout(ctx, " (");
+                try stdout(ctx, e);
+                try stdout(ctx, ")");
+            }
+        } else {
+            try stdout(ctx, "none");
+        }
+        try stdout(ctx, "\n");
     }
     return 0;
 }
@@ -991,13 +1159,14 @@ fn printHelp(ctx: *Ctx) !void {
         \\usage: ztd <command> [options]
         \\
         \\  init [path] [--local]       create a store (default $HOME/.ztd; --local = ./ztd)
-        \\  status                      show root, source, exists, format (same keys with --json)
+        \\  migrate --from SRC --to DST [--dry-run]  convert a format-1 store to format 2
+        \\  status                      show root, source, exists, format, binding
         \\  capture <text>... | --stdin capture tasks into the inbox
         \\  list [--context C] [--client X] [--project P] [--list L]
         \\  show <id>                   show one task
         \\  move <id> <list> [--text T] [--field k:v] [--unset k] [--expect-line N]
         \\  plan --context C [--client X] [--date YYYY-MM-DD]
-        \\  check [--strict]            validate the workspace
+        \\  check [--strict] [--bindings]  validate the store and the repo binding
         \\  recover                     finish an interrupted transaction
         \\  due                         list routines past their cadence
         \\  routine done <id>           mark a routine as run today
@@ -1029,4 +1198,6 @@ test {
     _ = @import("mcp.zig");
     _ = @import("db.zig");
     _ = @import("agent.zig");
+    _ = @import("binding.zig");
+    _ = @import("migrate.zig");
 }

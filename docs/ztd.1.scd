@@ -52,8 +52,15 @@ is never discovered from the current directory. Tasks are stored in
 *plan* *--context* C [*--client* X] [*--date* D]
 	Read the daily plan and return the tasks of that context.
 
-*check* [*--strict*]
-	Validate the store. Exit 1 on errors.
+*check* [*--strict*] [*--bindings*]
+	Validate the store. With *--bindings*, also validate the current repository's
+	*.ztd.json*. Exit 1 on errors.
+
+*migrate* *--from* SOURCE *--to* DEST [*--dry-run*]
+	Copy and convert a format-1 store into a new format-2 store. Both paths are
+	explicit exact directories; the destination must not exist. The source is
+	never modified. The converter refuses ambiguous formats, malformed data,
+	collisions and unsafe paths.
 
 *recover*
 	Finish or reject an interrupted transaction.
@@ -67,8 +74,10 @@ is never discovered from the current directory. Tasks are stored in
 *status* [*--json*]
 	Show the store root resolved by precedence, its source (*flag*,
 	*env* or *home*), whether the store exists and its *config.json*
-	format. *--json* returns the same keys (*root*, *source*, *exists*,
-	*format*). Never creates files; works when the store is absent.
+	format, plus the current repository binding. *--json* returns
+	(*root*, *source*, *exists*, *format*, *binding*) in that order. A missing or
+	malformed binding does not suppress root information. Never creates files;
+	works when the store is absent.
 
 *agent-capture* *--scope* S *--request* TEXT [*--project* P] [*--objective* T] [*--constraints* T] [*--idempotency-key* K] [*--db* PATH]
 	Create an assignment in the agent store. Needs no Markdown store,

@@ -9,18 +9,31 @@ Every path in the ZTD skills is relative to the store root: the task-data
 directory. The root resolves as `--root` > `ZTD_ROOT` > `~/.ztd`; never derive
 it from the current directory or look for a `ztd/` from the working directory.
 `ztd status [--json]` reports that root, its source (`flag`/`env`/`home`),
-whether the store exists and its format, without creating files. Do not use
-this skill's directory as the root.
+whether the store exists and its format — without creating files — plus
+`data.binding` (step 2). Do not use this skill's directory as the root.
 
 1. For initial orientation, read `adoption.md`; for formats or structural
    changes, `README.md` (both at the store root). Neither is a prerequisite
    for each operation.
 2. Resolve and verify the root with `ztd status --json`: it reports `root`,
    `source` (`flag`, `env` or `home`), `exists` and `format`, and never creates
-   files (it works when the store is absent). Then use `ztd list`, `ztd show`
-   and `ztd plan` for task state, filtered to the requested scope, the goal and
-   today's plan if any. A global state summarizes coverage without client
-   details. Do not open every card or create empty plans.
+   files (it works when the store is absent). The same payload carries
+   `data.binding`: `null`, or `{path, value, error}` where a valid `value` is
+   exactly `{context, client, project}`, discovered within the current Git
+   repository only — a malformed nearest binding is reported and never falls
+   through to another file. The binding is a routing hint, not authorization,
+   and it never changes the store root (`--root` > `ZTD_ROOT` > `~/.ztd`
+   stays independent of the cwd and of the binding). An explicit request scope
+   or the selected task's scope always wins; only when no scope exists
+   anywhere and the binding is valid, default the filters to its context, its
+   non-null client (a known optional client is kept) and its project, where
+   the CLI supports them. If the binding is malformed, stop and ask before any
+   scope-based work. `ztd check --bindings` validates the selected repo
+   binding against the resolved store and fails when it is missing or invalid.
+   Then use `ztd list`, `ztd show` and `ztd plan` for task state, filtered to
+   the resolved scope, the goal and today's plan if any. A global state
+   summarizes coverage without client details. Do not open every card or
+   create empty plans.
 3. When the intent is already clear, load the specific skill directly with no
    preliminary tour:
 

@@ -13,11 +13,21 @@ the method on the task store (store root `~/.ztd`).
 | `commands/` | The commands `/ztd`, `/collect`, `/inbox`, `/plan`, `/focus`, `/week`, `/goal`, `/journal`, `/routine`, `/simplify`, `/learn`, `/repo`, `/ztd-review` |
 | `agents/ztd.md` | The `ztd` agent: a thin role that orchestrates capture, process, plan, do and review |
 
-## Manual installation
+## Install globally
 
-There is no installer in this version. The blocks below run from the root of
-this repository (where `method/` and `integrations/` live); edit the paths to
-your case. OpenCode discovers assets per project and globally.
+The bundled installer publishes the global assets to
+`$HOME/.config/opencode/{skills,commands,agents}`. It resolves its assets
+relative to itself, so it can be run from any working directory:
+
+```bash
+./integrations/opencode/install.sh
+```
+
+The installer preflights the complete bundle before writing. Identical files
+are left unchanged; differing files, symlinks and unexpected file types abort
+without overwriting. If an I/O error occurs after publication starts, rerun it:
+already installed files are safe no-ops. It does not initialize the store,
+modify OpenCode configuration or configure MCP.
 
 ### 1. Store and templates (prerequisite)
 
@@ -32,33 +42,14 @@ ztd init "$STORE"           # creates the store structure in $STORE
 cp method/templates/*.md "$STORE/templates/"
 ```
 
-### 2. OpenCode assets
-
-Choose a per-project or global install; both blocks create the directories
-before copying:
-
-```bash
-# a) per project: run from the root of this repository
-SRC="$PWD/integrations/opencode"
-PROJ="$HOME/src/my-project"   # project root (edit it)
-mkdir -p "$PROJ/.opencode/skills" "$PROJ/.opencode/commands" "$PROJ/.opencode/agents"
-cp -R "$SRC/skills/"*   "$PROJ/.opencode/skills/"
-cp -R "$SRC/commands/"* "$PROJ/.opencode/commands/"
-cp "$SRC/agents/ztd.md" "$PROJ/.opencode/agents/ztd.md"
-
-# b) or global (every session): same SRC, run from the repo root
-mkdir -p "$HOME/.config/opencode/skills" "$HOME/.config/opencode/commands" "$HOME/.config/opencode/agents"
-cp -R "$SRC/skills/"*   "$HOME/.config/opencode/skills/"
-cp -R "$SRC/commands/"* "$HOME/.config/opencode/commands/"
-cp "$SRC/agents/ztd.md" "$HOME/.config/opencode/agents/ztd.md"
-```
-
-The commands are OpenCode prompts: they run as `/name` from any session that
-discovers `commands/`; the agent is selected by the `ztd` ID. Never copy assets
-into a task-data directory: only the store lives there. The data paths cited by
-skills and commands (`lists/…`, `goals/…`, `templates/…`) are relative to the
-store root; pass it with `--root "$STORE"` or `ZTD_ROOT` (precedence
-`--root` > `ZTD_ROOT` > `~/.ztd`).
+The commands are OpenCode prompts: they run as `/name` in sessions that discover
+`commands/`; the agent has ID `ztd`. The script installs globally; for
+project-only discovery, copy the same `skills/`, `commands/` and `agents/`
+directories into that project's `.opencode/` tree. Never copy assets into a
+task-data directory: only the store lives there. Paths cited by skills and
+commands (`lists/…`, `goals/…`, `templates/…`) are relative to the store root;
+pass it with `--root "$STORE"` or `ZTD_ROOT` (precedence `--root` > `ZTD_ROOT`
+> `~/.ztd`).
 
 ### MCP
 
@@ -92,23 +83,26 @@ Requirements: the `ztd` binary on the `PATH`, the store root resolved
 - The store root is the task-data directory. It resolves as `--root` >
   `ZTD_ROOT` > `~/.ztd`, never from the current directory (configuration can
   pin it, e.g. the MCP above).
-- A repository's `.ztd.json` is a `{context, client, project}` binding (a
-  convention; the CLI does not read it yet): it is
-  not the store and holds no tasks or clone paths. Each clone's local path
-  lives in its project card and, if the store defines a configurable repos
-  root, is validated against it when it exists.
+- A repository's `.ztd.json` contains exactly `{context, client, project}`.
+  The CLI discovers the nearest file up to the current Git repository
+  boundary, reports it in `status`, and validates it with `check --bindings`.
+  The binding is a routing hint, not authorization; explicit user scope is
+  authoritative. It contains no task, clone-path, or repository-URL data.
+  Each clone's local path lives in its project card.
 - The paths cited by skills and commands are store paths, not this
   repository's.
 
 ## State contract
 
-`ztd status [--json]` is implemented. It applies root precedence and reports
-`root`, `source` (`flag` for `--root`, `env` for `ZTD_ROOT`, `home` for
-`$HOME/.ztd`), `exists` and `format` (the `config.json` format when readable,
-else `null`); human output prints the same values as `root:`, `source:` and
-`store:` lines. It never creates files, so it works when the store is absent.
-Use it to resolve and verify the root; task state still comes from `list`,
-`show` and `plan`, never from inferred local roots.
+`ztd status [--json]` applies root precedence and reports `root`, `source`
+(`flag` for `--root`, `env` for `ZTD_ROOT`, `home` for `$HOME/.ztd`), `exists`,
+`format` and `binding`, in that order. The binding is `null` when absent, or an
+object with `path`, `value` and `error`; a malformed binding has an error and
+does not suppress root information. `value` contains only `context`, `client`
+and `project`. Human output reports the same root and binding state. Status
+never creates files and works when the store is absent. Use a valid binding as
+a default task scope only when the request supplies none; explicit user scope
+remains authoritative. Task state still comes from `list`, `show` and `plan`.
 
 ## Adapter rules
 

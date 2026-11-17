@@ -13,6 +13,11 @@ only when context is missing or they changed.
 1. Resolve the task scope: context, client when one is known, and project if
    any. The store configuration only decides whether a missing client blocks
    (`requireClientFor`); a known client is always used, even when optional.
+   When neither the request nor the task gives a scope, default from a valid
+   `data.binding` (`ztd status --json`): its context, its non-null client (a
+   known optional client is kept) and its project. A malformed binding means
+   stop and ask before scope-based work; binding is a routing hint, not
+   authorization and never a root source.
 2. Read the context, client and project indexes in that order. Follow their
    links to relevant cards and read their operational parts in full, including
    state, scope and limits; titles are not enough. Read separate/linked history

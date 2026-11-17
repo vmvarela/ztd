@@ -65,6 +65,13 @@ other scopes. A local capture without context is not skipped when processing
 the whole local inbox. Resolve what is unambiguous directly and group only
 ambiguous questions; apply each move transactionally, preserving order.
 
+When a classification or action is repo-related and nothing scopes it, a valid
+`data.binding` from `ztd status --json` may default the scope (`context`,
+non-null client kept, `project`). A malformed binding means stop and ask
+first; the binding is a routing hint, not authorization, and never changes the
+store root. It never filters the inbox: local and global inbox processing
+stays as defined above, and captures stay scope-free.
+
 1. Clarify the outcome and whether it requires action; ask only when ambiguous.
 2. Decide from the request and the available data:
    - No use: archive with `resolution: discarded` and a reason.

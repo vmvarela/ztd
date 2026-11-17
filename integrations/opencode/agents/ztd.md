@@ -29,7 +29,16 @@ only adds the ZTD circuit over the task store.
    directory. Resolve and verify the root with `ztd status --json` (`root`,
    `source` = `flag`/`env`/`home`, `exists`, `format`; it never creates files)
    and read task state with `ztd list`, `ztd show` and `ztd plan`, never
-   inferring local roots.
+   inferring local roots. That payload may carry `data.binding`: `null`, or
+   `{path, value, error}` where a valid `value` is exactly
+   `{context, client, project}`, discovered within the current Git repository
+   and never falling through a malformed nearest file. The binding is a
+   routing hint, not authorization, and never a source for the root. An
+   explicit request or task scope always wins; with no scope anywhere and a
+   valid binding, default filters to its context, its non-null client (keep
+   known optional clients) and its project where the CLI supports them. If the
+   binding is malformed, stop and ask before scope-based work; validate repo
+   bindings with `ztd check --bindings`.
 3. You do not authorize external writes (push, publications, comments or
    closes in services) nor destructive ones (deletion, reset, mass overwrite):
    ask for explicit authorization describing the concrete change. In Plan mode,

@@ -42,12 +42,31 @@ Root resolution:
 `--root` names the store root exactly. The root is never discovered from the
 current directory. `ztd status` is the single state probe: it applies root
 precedence and reports `root`, `source` (`flag` for `--root`, `env` for
-`ZTD_ROOT`, `home` for `$HOME/.ztd`), `exists` and `format` (the `config.json`
-format when readable, else `null`). With `--json` those four keys are the
-`data` payload of the standard envelope, in that order; human output prints
-`root:`, `source:` and `store:` lines (`absent`, `present, format N` or
-`present, format unknown`). Status never creates the store and exits `0`
-whether or not it exists.
+`ZTD_ROOT`, `home` for `$HOME/.ztd`), `exists`, `format` (the `config.json`
+format when readable, else `null`) and `binding`. With `--json` these five keys
+are the `data` payload of the standard envelope, in that order. `binding` is
+`null` when no repository binding is found; otherwise it is
+`{path,value,error}`, where `value` is the exact `{context,client,project}`
+object or `null` for a malformed binding. A malformed or absent binding does
+not prevent root reporting or change status's exit code. Human output prints
+`root:`, `source:`, `store:` and `binding:` diagnostics. Status never creates
+the store and exits `0` whether or not it exists.
+
+### Repository binding
+
+A `.ztd.json` contains exactly three required keys: nonblank string `context`,
+nullable nonblank string `client`, and nonblank fully qualified `project`.
+Duplicate, missing or extra keys, invalid types and scope inconsistencies are
+errors. The CLI finds the nearest `.ztd.json` from the current directory,
+stopping at the current Git repository boundary (including worktrees); a
+nested repository does not inherit a parent binding. A malformed nearest
+binding is reported without falling back. Discovery never affects root
+resolution. A binding is a routing hint, not authorization.
+
+`ztd check --bindings` validates only the selected current-repository binding
+against the resolved store: registered context, client policy and registered
+project path. It fails if the binding is missing or invalid. It does not scan
+other repositories, inspect remotes or resolve clone paths.
 
 ## 2. Task line
 
@@ -127,7 +146,9 @@ Stable codes: `usage`, `invalid_workspace`, `unsupported_format`, `unknown_id`,
 `unknown_project`, `invalid_field`, `id_exhausted`, `scope_denied`, `read_only`,
 `io_error`, plus the agent-store codes of section 11: `unknown_assignment`,
 `revision_conflict`, `idempotency_conflict`, `db_busy`, `db_incompatible`,
-`invalid_argument`.
+`invalid_argument`, and the conversion codes of section 12:
+`ambiguous_source`, `mixed_signals`, `key_collision`, `destination_exists`,
+`path_overlap`, `unsupported_entry`, `stage_invalid`, `source_changed`.
 
 Exit: `0` success, `1` domain error, `2` usage.
 
@@ -190,6 +211,8 @@ Given the inbox content `inbox0` and texts `t1..tk`:
 
 `check` reads every canonical list and every `.md` under the store root except
 `templates/` and `.state/`.
+`--bindings` additionally requires and validates the current repository's
+`.ztd.json`; without the flag, check does not discover repositories.
 
 Errors:
 
@@ -398,3 +421,53 @@ Durability, exposed only as `ztd agent-backup`, `ztd agent-export` and
 The agent MCP mode (`ztd mcp --agent-scope S [--agent-db PATH]`) exposes only
 these three tools and no resources; `--read-only` rejects `capture` and
 `checkpoint` and allows `prepare`.
+
+## 12. Format-1 conversion
+
+`ztd migrate --from SOURCE --to DEST [--dry-run] [--json]` converts a format-1
+Markdown store into format 2. `SOURCE` and `DEST` are exact store directories;
+this command does not use the configured root, infer either path from the
+current directory, or modify the source. The destination must not exist, its
+parent must already exist, and source and destination must not overlap. A
+destination that appears during conversion is never replaced.
+
+The converter accepts an explicit `config.json` format of `1`. A missing
+configuration is accepted only when the canonical format-1 store structure and
+at least one legacy structural marker agree: the `Contexto` table header, a
+legacy reserved task field, or a format-1 routine token. Legitimate v1 stores
+initialized before a given file existed are covered by that rule. The converter
+then creates format-2 configuration with empty client-policy arrays and reports
+that inference. Malformed, unreadable, mixed-format, or ambiguous inputs are
+refused. Existing unknown configuration properties are preserved.
+
+Only structural tokens are translated:
+
+- The reserved task fields in the five canonical lists become `context`,
+  `client`, `project`, `captured_at`, `closed_at`, `waiting_on`, and
+  `resolution`.
+- The contexts-table header becomes English.
+- An existing routine table uses the format-2 header and cadence tokens:
+  `daily` and Monday-first `weekly:mon` through `weekly:sun`.
+
+Task IDs, checkboxes, titles, values, custom fields, field order, context and
+client identifiers, project paths, routine IDs, and existing routine dates are
+preserved. Other regular files are copied byte-for-byte. The converter never
+translates prose or arbitrary Markdown. It refuses malformed task/routine
+data, duplicate IDs or fields, key collisions (including collisions with
+custom fields), pending transactions, symlinks, special files, and traversal
+or access errors. A top-level `.git` or `.state` is not copied; nested ones are
+copied as ordinary content.
+
+If `routines/state.md` is genuinely absent, the converter seeds the current
+`inbox`, `plan`, and `review` routine rows using one captured conversion date.
+These rows establish an initial scheduling baseline; they do not represent
+completed reviews or recovered history. Existing routine state is never
+re-seeded.
+
+Conversion is staged beside the destination, checked as a format-2 store, and
+promoted without replacement. `--dry-run` writes nothing, including temporary
+files; it performs source preflight and in-memory structural conversion checks
+but cannot run the full store check on a staged copy. A real conversion
+validates the staged result before promotion. The original remains unchanged,
+but this is a forward-only conversion: keeping the source does not provide a
+lossless rollback after new work is written to the format-2 destination.

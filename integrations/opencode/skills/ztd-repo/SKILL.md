@@ -12,6 +12,12 @@ explicit registered URL; ask when missing. Each clone's path lives in its
 project card (if the store defines a configurable repos root, validate against
 it when it exists): never anchor it inside the store root and never escape `..`
 or leave that path through symlinks.
+For any repo operation with no explicit scope, a valid `data.binding` from
+`ztd status --json` (exactly `{context, client, project}`, discovered within
+the current Git repository, with a malformed nearest binding reported and
+never falling through) may supply the default scope; a malformed binding means
+stop and ask before scope-based work. The binding is a routing hint, not
+authorization, and it never changes the store root.
 Pass arguments as properly shell-quoted data.
 
 ## add <scope> <project> [URL]
@@ -39,6 +45,17 @@ Without a URL, ask; do not invent remotes or per-scope defaults.
    URL and state. Create the project knowledge index and link it from the
    parent and the card.
 7. Read the clone's instructions and development guide before running code.
+
+## bind — explicit repo binding/setup only
+
+Create or update `.ztd.json` only when the user explicitly requests a repo
+binding/setup, and only after the repository identity and the scope
+(`context`, `client` when it applies, `project`) are confirmed with them. The
+file holds exactly the three keys `context`, `client` and `project` — no path,
+no URL. If the existing binding is identical, do nothing. If it differs, stop
+and ask for a decision; never overwrite it. Validate with `ztd check --bindings`,
+which checks the selected repo binding against the resolved store and fails
+when it is missing or invalid.
 
 ## list
 

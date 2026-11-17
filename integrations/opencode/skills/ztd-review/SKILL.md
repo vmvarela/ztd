@@ -18,6 +18,9 @@ requested period. Limit journal, calendar and reviews to the requested period.
    inaccessible external source, ask for its relevant commitments and record
    that limitation.
 4. Review next actions, waitings, someday and projects with filtered queries.
+   With no requested or selected scope, a valid `data.binding`
+   (`ztd status --json`) may default those filters; a malformed binding means
+   stop and ask first — a routing hint only, never a root source.
    Reuse the week's external coverage records; update only pending or
    invalidated sources, or all if requested. Use `ztd-trusted-system` for
    inconsistencies and `ztd-simplify` to reduce load.

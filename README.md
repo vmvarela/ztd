@@ -91,7 +91,8 @@ ztd list [--context C] [--client X] [--project P] [--list L]
 ztd show <id>
 ztd move <id> <list> [--text T] [--field k:v] [--unset k] [--expect-line N]
 ztd plan --context C [--client X] [--date YYYY-MM-DD]
-ztd check [--strict]
+ztd check [--strict] [--bindings]
+ztd migrate --from SOURCE --to DEST [--dry-run]
 ztd recover
 ztd due
 ztd routine done <id>
@@ -112,13 +113,45 @@ Root precedence: `--root` > `ZTD_ROOT` > `~/.ztd`; the root is never
 discovered from the current directory.
 
 `ztd status [--json]` reports the resolved store root, its source (`flag`,
-`env` or `home`), whether the store exists and its `config.json` format. The
-JSON envelope carries those four keys in order — `root`, `source`, `exists`,
-`format` (`format` is `null` when unreadable). It never creates files, so it
-works when the store is absent.
+`env` or `home`), whether the store exists, its `config.json` format, and the
+current repository binding. The JSON envelope carries `root`, `source`,
+`exists`, `format` (`null` when unreadable), then `binding`. `binding` is `null`
+when none is found; otherwise it contains `path`, `value` and `error`. A valid
+`value` has exactly `context`, `client` and `project`; malformed bindings appear
+with a null value and an error. Status still reports the root and exits 0 if a
+binding is missing or malformed. It never creates files, so it works when the
+store is absent.
 
 `list` without `--list` returns `inbox`, `next`, `waiting` and `someday`.
 `--client` and `--project` require `--context`.
+
+### Repository binding
+
+Each repository can contain a `.ztd.json` with exactly three keys: `context`
+and `project` are nonblank strings; `client` is a nonblank string or `null`.
+The CLI discovers the nearest binding from the current directory up to the
+current Git repository boundary. A nested repository does not inherit its
+parent's binding. The binding is a routing hint, not authorization, and never
+changes store-root resolution.
+
+`ztd check --bindings` validates the current repository's binding against the
+store's contexts, client policy and registered project. It fails when the
+binding is missing or invalid. It does not inspect remotes or clone paths.
+
+### Format-1 conversion
+
+`ztd migrate --from SOURCE --to DEST` makes a copy-only conversion into a new
+format-2 store. Both paths are explicit exact directories; `DEST` must not
+exist. The source is never modified, and `.git` administration and `.state/`
+are not copied. `--dry-run` performs validation and previews any inferred
+format/config or new routine baseline without writing. The converter preserves
+task titles, values, custom fields, unknown configuration properties and
+unrelated files; it rejects ambiguous formats, malformed data, field
+collisions and unsafe paths rather than guessing. If a historical source has
+no `config.json`, conversion requires format-1 structural evidence and uses
+empty client-policy arrays. If routine state is genuinely absent, the
+converter starts the current default routines at the conversion date as a new
+scheduling baseline; it does not claim past work.
 
 `move --expect-line N` is optimistic concurrency: if the task is not on line
 `N` of its source file, `ztd` returns `stale_task` and writes nothing.
