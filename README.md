@@ -141,8 +141,9 @@ store is absent.
 group, project, plan, review, knowledge card, journal entry and routine, with
 the selected document on the right. Keys: arrows or `j`/`k`, `enter` to
 expand a group, `tab` to switch panes, `/` to filter, `?` for help, `q` to
-quit. It polls the store once a second, so edits made in another terminal show
-up without restarting, and it never writes or holds the store lock.
+quit. The mouse scrolls, selects, and drags the divider between panes. It
+polls the store once a second, so edits made in another terminal show up
+without restarting, and it never writes or holds the store lock.
 
 ### Repository binding
 

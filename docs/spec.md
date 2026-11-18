@@ -477,7 +477,8 @@ rebuilds the index from complete files.
 Key handling is `q` quit, arrows or `j`/`k` move, `ctrl+d`/`ctrl+u` page,
 `g`/`G` first/last, `enter`/`space` expand, `tab` switch pane, `h`/`l` collapse
 or focus, `/` filter, `?` help, `r` reload. Mouse wheel scrolls the pane under
-the pointer and a click selects and focuses. Below 100 columns the browser
+the pointer, a click selects and focuses, and dragging the divider moves the
+split between 20 columns and the width minus 30. Below 100 columns the browser
 shows one pane at a time; below 40x8 it prints a size notice.
 
 The tree polls the store once a second by hashing path, mtime and size. When

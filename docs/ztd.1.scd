@@ -76,8 +76,8 @@ is never discovered from the current directory. Tasks are stored in
 	every task group, project, plan, review, knowledge card, journal entry
 	and routine; the right pane shows the selected document. Keys: arrows or
 	*j*/*k*, *enter* to expand a group, *tab* to switch panes, */* to filter,
-	*?* for help, *q* to quit. The tree refreshes once a second when store
-	files change, and the command never writes or holds the store lock.
+	*?* for help, *q* to quit. The mouse scrolls, selects rows and drags the
+	divider between panes. The tree refreshes once a second when store files change, and the command never writes or holds the store lock.
 
 *status* [*--json*]
 	Show the store root resolved by precedence, its source (*flag*,

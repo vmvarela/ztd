@@ -118,6 +118,8 @@ const Model = struct {
     width: u16 = 0,
     height: u16 = 0,
     hover: ?u16 = null,
+    tree_w_user: ?u16 = null,
+    drag_sep: bool = false,
     doc_arena: std.heap.ArenaAllocator,
     doc_lines: []const []const u8 = &.{},
     doc_key: ?[]const u8 = null,
@@ -224,7 +226,7 @@ const Model = struct {
         defer walker.deinit();
         while (try walker.next(self.io)) |entry| {
             if (entry.kind != .file) continue;
-            const path = entry.path;
+            const path = try a.dupe(u8, entry.path);
             if (!std.mem.endsWith(u8, path, ".md")) continue;
             const sec = docSection(path) orelse continue;
             if (sec == .routines) continue; // rendered from parsed routine rows
@@ -423,6 +425,7 @@ const Model = struct {
             },
             .key_press => |key| try self.handleKey(ctx, key),
             .mouse => |mouse| try self.handleMouse(ctx, mouse),
+            .mouse_leave => self.hover = null,
             else => {},
         }
         ctx.redraw = true;
@@ -550,8 +553,19 @@ const Model = struct {
         const in_body = mouse.row >= body_top and mouse.row < body_top + body_h;
 
         switch (mouse.type) {
-            .motion => {
+            .motion, .drag => {
+                if (self.drag_sep) {
+                    if (mouse.col >= 0) {
+                        const max: u16 = self.width -| 30;
+                        self.tree_w_user = std.math.clamp(@as(u16, @intCast(mouse.col)), 20, max);
+                    }
+                    return;
+                }
                 self.hover = if (in_body) @intCast(mouse.row) else null;
+            },
+            .release => {
+                self.drag_sep = false;
+                self.hover = null;
             },
             .press => switch (mouse.button) {
                 .wheel_up => {
@@ -569,6 +583,10 @@ const Model = struct {
                     }
                 },
                 .left => {
+                    if (self.width >= 100 and mouse.col >= 0 and @abs(mouse.col - tree_w) <= 1) {
+                        self.drag_sep = true;
+                        return;
+                    }
                     if (!in_body) return;
                     const y: usize = @intCast(mouse.row - body_top);
                     if (mouse.col >= 0 and mouse.col < tree_w) {
@@ -584,7 +602,6 @@ const Model = struct {
                 },
                 else => {},
             },
-            else => {},
         }
     }
 
@@ -594,6 +611,7 @@ const Model = struct {
 
     fn treeWidth(self: *Model) u16 {
         if (self.width < 100) return self.width;
+        if (self.tree_w_user) |w| return @min(@max(w, 20), self.width -| 30);
         return @min(44, @max(28, self.width * 35 / 100));
     }
 
@@ -690,13 +708,13 @@ const Model = struct {
             const entry = self.rows.items[idx];
             const is_selected = idx == selected;
             const is_hover = !is_selected and self.hover != null and self.hover.? == y;
-            const base: Style = if (is_selected and self.focus == .tree)
-                .{ .reverse = true }
+            const base: Style = if (is_selected)
+                (if (self.focus == .tree) .{ .reverse = true } else .{ .bg = .{ .index = 238 }, .bold = true })
             else if (is_hover)
                 .{ .bg = .{ .index = 236 } }
             else
                 .{};
-            if (is_selected and self.focus == .tree) self.fill(surface, x0, x1, y, base);
+            if (is_selected) self.fill(surface, x0, x1, y, base);
 
             switch (entry.kind) {
                 .group => {
@@ -708,9 +726,8 @@ const Model = struct {
                     }) catch sectionName(entry.section);
                     self.paint(ctx, surface, x0 + 1, y, x1, label, .{
                         .bold = true,
-                        .reverse = base.reverse,
                         .bg = base.bg,
-                        .fg = if (is_selected and self.focus == .tree) .default else self.accent(),
+                        .fg = if (is_selected) .default else self.accent(),
                     });
                 },
                 .item => {
