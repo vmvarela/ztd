@@ -108,6 +108,7 @@ ztd migrate --from SOURCE --to DEST [--dry-run]
 ztd recover
 ztd due
 ztd routine done <id>
+ztd tui
 ztd agent-capture --scope S --request TEXT [--project P] [--objective T] [--constraints T] [--idempotency-key K] [--db PATH]
 ztd agent-checkpoint ID --scope S --expect-rev N --result TEXT [--kind progress|done] [--evidence T] [--next T] [--idempotency-key K] [--db PATH]
 ztd agent-prepare ID --scope S [--history N] [--db PATH]
@@ -135,6 +136,13 @@ store is absent.
 
 `list` without `--list` returns `inbox`, `next`, `waiting` and `someday`.
 `--client` and `--project` require `--context`.
+
+`ztd tui` opens a read-only terminal browser for the whole store: every list
+group, project, plan, review, knowledge card, journal entry and routine, with
+the selected document on the right. Keys: arrows or `j`/`k`, `enter` to
+expand a group, `tab` to switch panes, `/` to filter, `?` for help, `q` to
+quit. It polls the store once a second, so edits made in another terminal show
+up without restarting, and it never writes or holds the store lock.
 
 ### Repository binding
 

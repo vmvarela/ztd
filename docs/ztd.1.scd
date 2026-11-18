@@ -71,6 +71,14 @@ is never discovered from the current directory. Tasks are stored in
 *routine* *done* ID
 	Record a routine run for today.
 
+*tui*
+	Open a read-only terminal browser for the store. The left tree lists
+	every task group, project, plan, review, knowledge card, journal entry
+	and routine; the right pane shows the selected document. Keys: arrows or
+	*j*/*k*, *enter* to expand a group, *tab* to switch panes, */* to filter,
+	*?* for help, *q* to quit. The tree refreshes once a second when store
+	files change, and the command never writes or holds the store lock.
+
 *status* [*--json*]
 	Show the store root resolved by precedence, its source (*flag*,
 	*env* or *home*), whether the store exists and its *config.json*

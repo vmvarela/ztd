@@ -460,3 +460,28 @@ source without creating locks or state; a concurrent writer is detected by
 comparing a content inventory before and after, so writers must be paused for
 the duration, and a writer that ignores that rule can still race the final
 promotion window.
+
+## 12. TUI
+
+`ztd tui` opens an interactive, read-only browser over the same store. It
+builds the index from `Engine.loadAll()` plus one walk of the store
+(`lists/projects/`, `plans/`, `reviews/`, `knowledge/`, `journal/`, `goals/`)
+and reads `routines/` through the routine parser. Documents are loaded from
+Markdown on selection; nothing is cached to disk.
+
+The command takes no arguments and rejects `--json` and `--dry-run`. It opens
+the store in shared mode and releases the lock immediately, so `ztd` writers in
+another terminal are never blocked and never see a partial read: each reload
+rebuilds the index from complete files.
+
+Key handling is `q` quit, arrows or `j`/`k` move, `ctrl+d`/`ctrl+u` page,
+`g`/`G` first/last, `enter`/`space` expand, `tab` switch pane, `h`/`l` collapse
+or focus, `/` filter, `?` help, `r` reload. Mouse wheel scrolls the pane under
+the pointer and a click selects and focuses. Below 100 columns the browser
+shows one pane at a time; below 40x8 it prints a size notice.
+
+The tree polls the store once a second by hashing path, mtime and size. When
+the signature changes it reloads and keeps the selection by task ID or document
+path. Polling runs on the UI thread, so there are no background readers and no
+extra file descriptors. Colors follow the terminal's reported light or dark
+scheme and are disabled by `NO_COLOR`.
