@@ -1302,4 +1302,6 @@ test {
     _ = @import("migrate.zig");
     _ = @import("install.zig");
     _ = @import("tui.zig");
+    _ = @import("hoy.zig");
+    _ = @import("theme.zig");
 }

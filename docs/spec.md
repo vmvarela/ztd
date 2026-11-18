@@ -486,3 +486,20 @@ the signature changes it reloads and keeps the selection by task ID or document
 path. Polling runs on the UI thread, so there are no background readers and no
 extra file descriptors. Colors follow the terminal's reported light or dark
 scheme and are disabled by `NO_COLOR`.
+
+### Hoy, themes and zen
+
+Hoy is the entry index: the active goal from `goals/active.md` plus today's
+MITs from the daily plan; a missing goal or plan omits those rows.
+
+| Key | Name | Character |
+| --- | --- | --- |
+| `paper` | Paper | neutral accent |
+| `tea` | Tea | green accent |
+| `amber` | Amber | amber accent |
+
+`t` cycles the themes; the default comes from `config.json` →
+`"tui": { "theme": "tea" }`, and an absent or invalid value falls back to
+`paper`. Selection and theme are session-only and never written back: the TUI
+never writes to the store, not even preferences. `z` toggles zen reading mode;
+keys, selection, navigation and the once-a-second refresh are unchanged.

@@ -9,8 +9,10 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const engine = @import("engine.zig");
+const hoy = @import("hoy.zig");
 const model = @import("model.zig");
 const platform = @import("platform.zig");
+const theme = @import("theme.zig");
 
 const Allocator = std.mem.Allocator;
 const Style = vaxis.Style;
@@ -30,7 +32,7 @@ pub fn run(
     // A viewer must not block writers in another terminal.
     eng.store.unlock();
 
-    var m = try Model.init(io, gpa, &eng, root, env_map.get("NO_COLOR") != null);
+    var m = try Model.init(io, gpa, &eng, root, env_map.get("HOME") orelse "", env_map.get("NO_COLOR") != null);
     defer m.deinit();
 
     const buffer = try gpa.alloc(u8, 64 * 1024);
@@ -42,14 +44,14 @@ pub fn run(
     return 0;
 }
 
-const section_count = 12;
+const section_count = 13;
 
 const Section = enum(u8) {
+    hoy,
     inbox,
     next,
     waiting,
     someday,
-    archive,
     projects,
     plans,
     reviews,
@@ -57,17 +59,18 @@ const Section = enum(u8) {
     journal,
     goals,
     routines,
+    archive,
 };
 
 const sections = std.enums.values(Section);
 
 fn sectionName(s: Section) []const u8 {
     return switch (s) {
+        .hoy => "Hoy",
         .inbox => "Bandeja",
         .next => "Next",
         .waiting => "Waiting",
         .someday => "Someday",
-        .archive => "Archivo",
         .projects => "Proyectos",
         .plans => "Planes",
         .reviews => "Revisiones",
@@ -75,6 +78,7 @@ fn sectionName(s: Section) []const u8 {
         .journal => "Diario",
         .goals => "Metas",
         .routines => "Rutinas",
+        .archive => "Archivo",
     };
 }
 
@@ -90,18 +94,28 @@ const Item = struct {
 };
 
 const Row = struct {
-    kind: enum { group, item },
+    kind: enum { group, item, blank },
     section: Section,
     item: usize = 0,
 };
 
 const Focus = enum { tree, doc };
 
+const DocKind = enum { body, h1, h2, h3, list, code };
+
+const DocLine = struct {
+    text: []const u8,
+    kind: DocKind = .body,
+    /// Only the first wrapped line of a list entry carries the muted dash.
+    dash: bool = false,
+};
+
 const Model = struct {
     io: std.Io,
     alloc: Allocator,
     eng: *engine.Engine,
     root: []const u8,
+    home: []const u8,
     mono: bool,
 
     idx: std.heap.ArenaAllocator,
@@ -115,25 +129,35 @@ const Model = struct {
     filter: std.ArrayList(u8),
     filtering: bool = false,
     help: bool = false,
+    zen: bool = false,
     width: u16 = 0,
     height: u16 = 0,
     hover: ?u16 = null,
     tree_w_user: ?u16 = null,
     drag_sep: bool = false,
     doc_arena: std.heap.ArenaAllocator,
-    doc_lines: []const []const u8 = &.{},
+    doc_lines: []const DocLine = &.{},
     doc_key: ?[]const u8 = null,
     doc_width: u16 = 0,
     sig: u64 = 0,
     armed: bool = false,
     error_text: ?[]const u8 = null,
+    theme: theme.Theme,
+    dark: bool = true,
+    /// Ticks since the last key or mouse event; the footer fades after 8.
+    idle: u16 = 0,
+    /// Ticks left to show the theme notice in the footer.
+    toast_left: u16 = 0,
+    hoy_label: ?[]u8 = null,
+    hoy_plan: ?[]u8 = null,
 
-    fn init(io: std.Io, alloc: Allocator, eng: *engine.Engine, root: []const u8, mono: bool) !Model {
+    fn init(io: std.Io, alloc: Allocator, eng: *engine.Engine, root: []const u8, home: []const u8, mono: bool) !Model {
         var m: Model = .{
             .io = io,
             .alloc = alloc,
             .eng = eng,
             .root = root,
+            .home = home,
             .mono = mono,
             .idx = .init(alloc),
             .items = undefined,
@@ -141,6 +165,7 @@ const Model = struct {
             .collapsed = undefined,
             .filter = .empty,
             .doc_arena = .init(alloc),
+            .theme = theme.byKey(eng.config.tui.theme),
         };
         for (&m.items) |*list| list.* = .empty;
         for (sections) |s| m.collapsed[@backingInt(s)] = s == .archive or s == .knowledge;
@@ -154,6 +179,8 @@ const Model = struct {
         self.filter.deinit(self.alloc);
         self.doc_arena.deinit();
         self.idx.deinit();
+        if (self.hoy_label) |l| self.alloc.free(l);
+        if (self.hoy_plan) |p| self.alloc.free(p);
     }
 
     fn widget(self: *Model) vxfw.Widget {
@@ -254,14 +281,61 @@ const Model = struct {
             });
         }
 
+        const day = try hoy.load(self.io, a, &self.eng.store, self.eng.today);
+        try self.setHoy(day.label, day.plan_path);
+        if (day.goal) |g| {
+            try self.items[@backingInt(Section.hoy)].append(a, .{
+                .section = .hoy,
+                .key = "hoy:meta",
+                .title = g,
+                .detail = "",
+                .path = day.goal_path,
+            });
+        }
+        for (day.mits, 0..) |mit, i| {
+            const task: ?Item = if (mit.task_id) |id| self.findTask(id) else null;
+            try self.items[@backingInt(Section.hoy)].append(a, .{
+                .section = .hoy,
+                .key = try std.fmt.allocPrint(a, "hoy:mit:{d}", .{i + 1}),
+                .title = mit.text,
+                .detail = mit.task_id orelse "plan",
+                .path = if (task) |t| t.path else (day.plan_path orelse day.goal_path),
+                .doc = if (task) |t| t.doc else null,
+            });
+        }
+
         for (sections) |s| {
             const list = &self.items[@backingInt(s)];
+            if (s == .hoy) continue; // keeps meta first, then MITs in order
             if (s == .projects or s == .knowledge) {
                 std.mem.sort(Item, list.items, {}, itemAsc);
             } else {
                 std.mem.sort(Item, list.items, {}, itemDesc);
             }
         }
+    }
+
+    /// Keeps the day label and plan path alive across reloads in the model
+    /// allocator: the index arena is reset on every reload.
+    fn setHoy(self: *Model, label: []const u8, plan: ?[]const u8) !void {
+        const new_label = try self.alloc.dupe(u8, label);
+        errdefer self.alloc.free(new_label);
+        var new_plan: ?[]u8 = null;
+        errdefer if (new_plan) |p| self.alloc.free(p);
+        if (plan) |p| new_plan = try self.alloc.dupe(u8, p);
+        if (self.hoy_label) |l| self.alloc.free(l);
+        if (self.hoy_plan) |p| self.alloc.free(p);
+        self.hoy_label = new_label;
+        self.hoy_plan = new_plan;
+    }
+
+    fn findTask(self: *Model, id: []const u8) ?Item {
+        for ([_]Section{ .inbox, .next, .waiting, .someday, .archive }) |s| {
+            for (self.items[@backingInt(s)].items) |it| {
+                if (std.mem.eql(u8, it.key, id)) return it;
+            }
+        }
+        return null;
     }
 
     fn itemAsc(_: void, a: Item, b: Item) bool {
@@ -333,14 +407,23 @@ const Model = struct {
     fn rebuildRows(self: *Model) !void {
         self.rows.clearRetainingCapacity();
         const filtering = self.filter.items.len > 0;
+        // An empty inbox is information; every other empty group stays hidden.
+        var groups_shown: usize = 0;
         for (sections) |s| {
             const list = self.items[@backingInt(s)].items;
+            if (list.len == 0 and s != .inbox) continue;
             var matches: usize = 0;
             if (filtering) {
                 for (list) |item| {
                     if (matchesFilter(item, self.filter.items)) matches += 1;
                 }
                 if (matches == 0) continue;
+            }
+            if (!filtering) {
+                if (groups_shown > 0) {
+                    try self.rows.append(self.alloc, .{ .kind = .blank, .section = s });
+                }
+                groups_shown += 1;
             }
             try self.rows.append(self.alloc, .{ .kind = .group, .section = s });
             if (!filtering and self.collapsed[@backingInt(s)]) continue;
@@ -353,12 +436,41 @@ const Model = struct {
         self.ensureVisible();
     }
 
+    fn nearestItemRow(self: *Model, idx0: usize, forward: bool) usize {
+        const rows = self.rows.items;
+        if (rows.len == 0) return 0;
+        const idx = @min(idx0, rows.len - 1);
+        if (rows[idx].kind != .blank) return idx;
+        var lo = idx;
+        var hi = idx;
+        while (lo > 0 or hi + 1 < rows.len) {
+            if (forward and hi + 1 < rows.len) {
+                hi += 1;
+                if (rows[hi].kind != .blank) return hi;
+            }
+            if (!forward and lo > 0) {
+                lo -= 1;
+                if (rows[lo].kind != .blank) return lo;
+            }
+            if (!forward and hi + 1 < rows.len) {
+                hi += 1;
+                if (rows[hi].kind != .blank) return hi;
+            }
+            if (forward and lo > 0) {
+                lo -= 1;
+                if (rows[lo].kind != .blank) return lo;
+            }
+        }
+        return idx;
+    }
+
     fn clampSelection(self: *Model) void {
         if (self.rows.items.len == 0) {
             self.selected = 0;
             return;
         }
         if (self.selected >= self.rows.items.len) self.selected = self.rows.items.len - 1;
+        self.selected = self.nearestItemRow(self.selected, false);
     }
 
     fn currentRow(self: *Model) ?Row {
@@ -382,7 +494,7 @@ const Model = struct {
         const len: isize = @intCast(self.rows.items.len);
         var next = @as(isize, @intCast(self.selected)) + delta;
         next = @max(0, @min(len - 1, next));
-        self.selected = @intCast(next);
+        self.selected = self.nearestItemRow(@intCast(next), delta > 0);
         self.ensureVisible();
     }
 
@@ -393,9 +505,20 @@ const Model = struct {
 
     fn ensureVisible(self: *Model) void {
         const h = self.bodyHeight();
-        if (h == 0) return;
-        if (self.selected < self.tree_top) self.tree_top = self.selected;
-        if (self.selected >= self.tree_top + h) self.tree_top = self.selected - h + 1;
+        if (h == 0 or self.rows.items.len == 0) return;
+        const sel = self.selected;
+        if (sel < self.tree_top) {
+            self.tree_top = sel -| 3;
+        } else if (sel >= self.tree_top + h) {
+            self.tree_top = if (h > 6) sel + 3 - (h - 1) else sel;
+        } else if (h > 6) {
+            if (sel < self.tree_top + 3) {
+                self.tree_top = sel -| 3;
+            } else if (sel + 3 >= self.tree_top + h) {
+                self.tree_top = sel + 3 - (h - 1);
+            }
+        }
+        self.tree_top = @min(self.tree_top, self.maxTreeTop());
     }
 
     fn activate(self: *Model) void {
@@ -404,9 +527,19 @@ const Model = struct {
             const i = @backingInt(row.section);
             self.collapsed[i] = !self.collapsed[i];
             self.rebuildRows() catch {};
-        } else {
+        } else if (row.kind == .item) {
             self.focus = .doc;
         }
+    }
+
+    fn matchCount(self: *Model) usize {
+        var n: usize = 0;
+        for (sections) |s| {
+            for (self.items[@backingInt(s)].items) |it| {
+                if (matchesFilter(it, self.filter.items)) n += 1;
+            }
+        }
+        return n;
     }
 
     // ---- events ----------------------------------------------------------
@@ -421,11 +554,14 @@ const Model = struct {
             },
             .tick => {
                 self.poll();
+                self.idle = @min(self.idle + 1, 9);
+                if (self.toast_left > 0) self.toast_left -= 1;
                 try ctx.tick(1000, self.widget());
             },
             .key_press => |key| try self.handleKey(ctx, key),
             .mouse => |mouse| try self.handleMouse(ctx, mouse),
             .mouse_leave => self.hover = null,
+            .color_scheme => |scheme| self.dark = scheme == .dark,
             else => {},
         }
         ctx.redraw = true;
@@ -458,8 +594,48 @@ const Model = struct {
     }
 
     fn handleKey(self: *Model, ctx: *vxfw.EventContext, key: vaxis.Key) !void {
+        self.idle = 0;
         if (self.help) {
             self.help = false;
+            return;
+        }
+        if (self.zen) {
+            if (key.matches('z', .{}) or key.matches(vaxis.Key.escape, .{})) {
+                self.zen = false;
+                return;
+            }
+            if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
+                ctx.quit = true;
+                return;
+            }
+            if (key.matches('?', .{}) or key.matches(vaxis.Key.f1, .{})) {
+                self.help = true;
+                return;
+            }
+            if (key.matches('j', .{}) or key.matches('J', .{})) {
+                self.doc_top +|= 1;
+                return;
+            }
+            if (key.matches('k', .{}) or key.matches('K', .{})) {
+                self.doc_top -|= 1;
+                return;
+            }
+            if (key.matches('d', .{ .ctrl = true })) {
+                self.doc_top +|= self.docVisible();
+                return;
+            }
+            if (key.matches('u', .{ .ctrl = true })) {
+                self.doc_top -|= self.docVisible();
+                return;
+            }
+            if (key.matches('g', .{})) {
+                self.doc_top = 0;
+                return;
+            }
+            if (key.matches('G', .{})) {
+                self.doc_top = self.maxDocTop();
+                return;
+            }
             return;
         }
         if (self.filtering) {
@@ -496,16 +672,57 @@ const Model = struct {
             self.focus = .tree;
             return;
         }
-        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) return self.move(1);
-        if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) return self.move(-1);
-        if (key.matches('d', .{ .ctrl = true }) or key.matches(vaxis.Key.page_down, .{})) return self.page(true);
-        if (key.matches('u', .{ .ctrl = true }) or key.matches(vaxis.Key.page_up, .{})) return self.page(false);
+        if (key.matches('t', .{})) {
+            self.theme = theme.next(self.theme);
+            self.toast_left = 2;
+            return;
+        }
+        if (key.matches('z', .{})) {
+            self.zen = true;
+            return;
+        }
+        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+            if (self.focus == .doc) {
+                self.doc_top = @min(self.doc_top + 1, self.maxDocTop());
+                return;
+            }
+            return self.move(1);
+        }
+        if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+            if (self.focus == .doc) {
+                if (self.doc_top > 0) self.doc_top -= 1;
+                return;
+            }
+            return self.move(-1);
+        }
+        if (key.matches('d', .{ .ctrl = true }) or key.matches(vaxis.Key.page_down, .{})) {
+            if (self.focus == .doc) {
+                self.doc_top = @min(self.doc_top + self.docVisible(), self.maxDocTop());
+                return;
+            }
+            return self.page(true);
+        }
+        if (key.matches('u', .{ .ctrl = true }) or key.matches(vaxis.Key.page_up, .{})) {
+            if (self.focus == .doc) {
+                self.doc_top -|= self.docVisible();
+                return;
+            }
+            return self.page(false);
+        }
         if (key.matches('g', .{})) {
+            if (self.focus == .doc) {
+                self.doc_top = 0;
+                return;
+            }
             self.selected = 0;
             self.ensureVisible();
             return;
         }
         if (key.matches('G', .{})) {
+            if (self.focus == .doc) {
+                self.doc_top = self.maxDocTop();
+                return;
+            }
             if (self.rows.items.len > 0) self.selected = self.rows.items.len - 1;
             self.ensureVisible();
             return;
@@ -547,6 +764,18 @@ const Model = struct {
 
     fn handleMouse(self: *Model, ctx: *vxfw.EventContext, mouse: vaxis.Mouse) !void {
         _ = ctx;
+        self.idle = 0;
+        if (self.zen) {
+            switch (mouse.type) {
+                .press => switch (mouse.button) {
+                    .wheel_up => self.doc_top -|= 3,
+                    .wheel_down => self.doc_top = @min(self.doc_top + 3, self.maxDocTop()),
+                    else => {},
+                },
+                else => {},
+            }
+            return;
+        }
         const body_h: i16 = @intCast(self.bodyHeight());
         const body_top: i16 = 1;
         const tree_w: i16 = @intCast(self.treeWidth());
@@ -593,7 +822,7 @@ const Model = struct {
                         self.focus = .tree;
                         const idx = self.tree_top + y;
                         if (idx < self.rows.items.len) {
-                            self.selected = idx;
+                            self.selected = self.nearestItemRow(idx, false);
                             self.activate();
                         }
                     } else {
@@ -609,6 +838,11 @@ const Model = struct {
         return if (self.height > 2) self.height - 2 else 0;
     }
 
+    fn docVisible(self: *Model) u16 {
+        if (self.zen) return self.height -| 2;
+        return self.bodyHeight() -| 6;
+    }
+
     fn treeWidth(self: *Model) u16 {
         if (self.width < 100) return self.width;
         if (self.tree_w_user) |w| return @min(@max(w, 20), self.width -| 30);
@@ -622,9 +856,17 @@ const Model = struct {
     }
 
     fn maxDocTop(self: *Model) usize {
-        const h = self.bodyHeight();
+        const h = self.docVisible();
         if (self.doc_lines.len <= h) return 0;
         return self.doc_lines.len - h;
+    }
+
+    /// Reading width for the document pane: 90 columns centered, or the full
+    /// pane minus two margins when narrow.
+    fn readWidth(w: u16) u16 {
+        var rw: u16 = @min(@as(u16, 90), w -| 4);
+        if (w < 60) rw = w -| 2;
+        return @max(rw, 1);
     }
 
     // ---- painting --------------------------------------------------------
@@ -643,6 +885,12 @@ const Model = struct {
             return surface;
         }
 
+        if (self.zen) {
+            self.paintZen(ctx, surface);
+            if (self.help) self.paintHelp(ctx, surface);
+            return surface;
+        }
+
         self.paintHeader(ctx, surface);
         self.paintBody(ctx, surface);
         self.paintFooter(ctx, surface);
@@ -651,28 +899,53 @@ const Model = struct {
     }
 
     fn paintHeader(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface) void {
-        self.fill(surface, 0, self.width, 0, .{ .bg = self.chromeBg(), .fg = self.chromeFg() });
-        const text = std.fmt.allocPrint(ctx.arena, " ztd · {s}", .{self.root}) catch self.root;
-        self.paint(ctx, surface, 0, 0, self.width - 12, text, .{ .bg = self.chromeBg(), .fg = self.accent(), .bold = true });
         if (self.filtering or self.filter.items.len > 0) {
-            const f = std.fmt.allocPrint(ctx.arena, "/{s} ", .{self.filter.items}) catch "/";
-            const start = self.width -| @as(u16, @intCast(ctx.stringWidth(f)));
-            self.paint(ctx, surface, start, 0, self.width, f, .{ .bg = self.chromeBg(), .fg = self.chromeFg(), .bold = true });
+            const f = std.fmt.allocPrint(ctx.arena, "/{s}", .{self.filter.items}) catch "/";
+            self.paint(ctx, surface, 0, 0, self.width, f, .{ .bold = true });
+            const caret_x: u16 = @intCast(@min(ctx.stringWidth(f), self.width - 1));
+            surface.writeCell(caret_x, 0, .{
+                .char = .{ .grapheme = "▌", .width = 1 },
+                .style = .{ .fg = self.accent(), .bold = true },
+            });
+            const t = std.fmt.allocPrint(ctx.arena, "{d} coincidencias", .{self.matchCount()}) catch "";
+            const tw: u16 = @intCast(@min(ctx.stringWidth(t), @as(usize, self.width)));
+            self.paint(ctx, surface, self.width -| tw, 0, self.width, t, self.mutedStyle());
+            return;
         }
+        self.paint(ctx, surface, 0, 0, self.width, "ztd", .{ .fg = self.accent(), .bold = true });
+        self.paint(ctx, surface, 3, 0, self.width, " · ", self.mutedStyle());
+        const date = self.hoy_label orelse "";
+        const dw: u16 = if (date.len == 0) 0 else @intCast(@min(ctx.stringWidth(date), @as(usize, self.width)));
+        self.paint(ctx, surface, 6, 0, self.width -| dw, self.rootShort(ctx), self.mutedStyle());
+        if (dw > 0) self.paint(ctx, surface, self.width -| dw, 0, self.width, date, self.mutedStyle());
+    }
+
+    fn rootShort(self: *Model, ctx: vxfw.DrawContext) []const u8 {
+        if (self.home.len > 0 and std.mem.startsWith(u8, self.root, self.home)) {
+            return std.fmt.allocPrint(ctx.arena, "~{s}", .{self.root[self.home.len..]}) catch self.root;
+        }
+        return self.root;
     }
 
     fn paintFooter(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface) void {
         const row = self.height - 1;
-        self.fill(surface, 0, self.width, row, .{ .bg = self.chromeBg(), .fg = self.chromeFg() });
         if (self.error_text) |err| {
-            self.paint(ctx, surface, 0, row, self.width, err, .{ .bg = self.chromeBg(), .fg = .{ .index = 203 } });
+            // Errors never fade.
+            self.paint(ctx, surface, 0, row, self.width, err, .{ .fg = .{ .index = 203 }, .bold = true });
             return;
         }
-        const text = if (self.filtering)
-            " escribiendo filtro · enter aplicar · esc limpiar"
-        else
-            " ↑↓ mover · enter abrir · espacio plegar · / filtrar · tab panel · ? ayuda · q salir";
-        self.paint(ctx, surface, 0, row, self.width, text, .{ .bg = self.chromeBg(), .fg = self.chromeFg(), .dim = !self.mono });
+        var text: ?[]const u8 = null;
+        if (self.toast_left > 0) {
+            text = std.fmt.allocPrint(ctx.arena, "tema · {s}", .{self.theme.name}) catch "tema";
+        } else if (self.filtering) {
+            text = "enter aplicar · esc limpiar";
+        } else if (self.idle < 8) {
+            text = if (self.focus == .tree)
+                "j/k mover · ↵ abrir · / filtrar · t tema · ? ayuda"
+            else
+                "j/k leer · tab volver · z zen · ? ayuda";
+        }
+        if (text) |t| self.paint(ctx, surface, 0, row, self.width, t, self.mutedStyle());
     }
 
     fn paintBody(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface) void {
@@ -690,7 +963,7 @@ const Model = struct {
         for (1..self.height - 1) |row| {
             surface.writeCell(tree_w, @intCast(row), .{
                 .char = .{ .grapheme = "│", .width = 1 },
-                .style = .{ .fg = .{ .index = 238 } },
+                .style = .{ .fg = self.rule() },
             });
         }
         self.paintDoc(ctx, surface, tree_w + 1, self.width);
@@ -698,89 +971,145 @@ const Model = struct {
 
     fn paintTree(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface, x0: u16, x1: u16) void {
         const h = self.bodyHeight();
-        const selected = self.selected;
-        const dirty = self.tree_top;
+        const tree_focus = self.focus == .tree;
         var row: u16 = 0;
         while (row < h) : (row += 1) {
-            const idx = dirty + row;
+            const idx = self.tree_top + row;
             const y = 1 + row;
             if (idx >= self.rows.items.len) break;
             const entry = self.rows.items[idx];
-            const is_selected = idx == selected;
+            if (entry.kind == .blank) continue;
+            const is_selected = idx == self.selected;
             const is_hover = !is_selected and self.hover != null and self.hover.? == y;
-            const base: Style = if (is_selected)
-                (if (self.focus == .tree) .{ .reverse = true } else .{ .bg = .{ .index = 238 }, .bold = true })
-            else if (is_hover)
-                .{ .bg = .{ .index = 236 } }
-            else
-                .{};
-            if (is_selected) self.fill(surface, x0, x1, y, base);
+            var style: Style = .{};
+            if (!tree_focus) style.dim = true;
+            if (is_hover) style.ul_style = .single;
+            if (is_selected) {
+                style.bold = true;
+                surface.writeCell(x0, y, .{
+                    .char = .{ .grapheme = "▌", .width = 1 },
+                    .style = .{ .fg = if (tree_focus) self.accent() else self.muted() },
+                });
+            }
 
             switch (entry.kind) {
                 .group => {
                     const list = self.items[@backingInt(entry.section)].items;
-                    const label = std.fmt.allocPrint(ctx.arena, "{s} {s} ({d})", .{
+                    style.bold = true;
+                    var cw: u16 = 0;
+                    var count: []const u8 = "";
+                    if (self.width >= 60 and list.len > 0) {
+                        count = std.fmt.allocPrint(ctx.arena, "{d}", .{list.len}) catch "";
+                        cw = @intCast(@min(ctx.stringWidth(count), @as(usize, x1 -| x0)));
+                    }
+                    const label = std.fmt.allocPrint(ctx.arena, "{s} {s}", .{
                         if (self.collapsed[@backingInt(entry.section)]) "▸" else "▾",
                         sectionName(entry.section),
-                        list.len,
                     }) catch sectionName(entry.section);
-                    self.paint(ctx, surface, x0 + 1, y, x1, label, .{
-                        .bold = true,
-                        .bg = base.bg,
-                        .fg = if (is_selected) .default else self.accent(),
-                    });
+                    self.paint(ctx, surface, x0 + 1, y, x1 -| (cw + 1), label, style);
+                    if (cw > 0) self.paint(ctx, surface, x1 -| cw, y, x1, count, self.mutedStyle());
                 },
                 .item => {
                     const item = self.items[@backingInt(entry.section)].items[entry.item];
-                    const indent: u16 = if (self.width < 100) 2 else 3;
-                    const line = if (item.detail.len > 0)
-                        std.fmt.allocPrint(ctx.arena, "{s}  · {s}", .{ item.title, item.detail }) catch item.title
-                    else
-                        item.title;
-                    self.paint(ctx, surface, x0 + indent, y, x1 -| 1, line, base);
+                    const tw: u16 = @intCast(@min(ctx.stringWidth(item.title), @as(usize, x1 -| (x0 + 3))));
+                    self.paint(ctx, surface, x0 + 3, y, x0 + 3 + tw, item.title, style);
+                    if (item.detail.len > 0) {
+                        const sep = std.fmt.allocPrint(ctx.arena, "  · {s}", .{item.detail}) catch "";
+                        self.paint(ctx, surface, x0 + 3 + tw, y, x1 -| 1, sep, self.mutedStyle());
+                    }
                 },
+                .blank => {},
             }
         }
     }
 
     fn paintDoc(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface, x0: u16, x1: u16) void {
         const h = self.bodyHeight();
-        const width = x1 -| x0;
-        if (width < 4) return;
-
+        const w = x1 -| x0;
+        if (w < 4) return;
+        const rw = readWidth(w);
+        const dx = x0 + (w - rw) / 2;
         const item = self.currentItem();
         const group_row = self.currentRow();
-        const key: ?[]const u8 = if (item) |it| it.key else if (group_row) |gr| @tagName(gr.section) else null;
-        if (self.doc_key == null or key == null or !std.mem.eql(u8, self.doc_key.?, key.?) or self.doc_width != width) {
-            self.loadDoc(ctx, item, group_row, width);
-        }
+        self.ensureDoc(ctx, item, group_row, rw);
 
-        if (item) |it| {
-            self.paint(ctx, surface, x0 + 2, 1, x1 -| 2, it.title, if (it.doc != null)
-                .{ .bold = true, .fg = self.accent() }
-            else
-                .{ .bold = true });
-            self.paint(ctx, surface, x0 + 2, 2, x1 -| 2, it.key, .{ .fg = .{ .index = 244 } });
-        } else if (group_row) |gr| {
-            self.paint(ctx, surface, x0 + 2, 1, x1 -| 2, sectionName(gr.section), .{ .bold = true, .fg = self.accent() });
+        self.paint(ctx, surface, dx, 1, dx + rw, self.docCrumb(ctx, item, group_row), self.mutedStyle());
+        const title = if (item) |it| it.title else if (group_row) |gr| sectionName(gr.section) else "";
+        self.paint(ctx, surface, dx, 2, dx + rw, title, .{ .bold = true });
+        const meta: []const u8 = if (item) |it| it.detail else if (group_row) |gr|
+            std.fmt.allocPrint(ctx.arena, "{d} elementos", .{self.items[@backingInt(gr.section)].items.len}) catch ""
+        else
+            "";
+        self.paint(ctx, surface, dx, 3, dx + rw, meta, self.mutedStyle());
+        var col = dx;
+        while (col < dx + rw) : (col += 1) {
+            surface.writeCell(col, 4, .{
+                .char = .{ .grapheme = "─", .width = 1 },
+                .style = .{ .fg = self.rule() },
+            });
         }
+        self.paintDocLines(ctx, surface, dx, dx + rw, 6, h -| 6);
+    }
 
-        const top: u16 = 4;
-        const visible = if (h > top) h - top else 0;
+    fn paintZen(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface) void {
+        const w = self.width;
+        const h = self.height;
+        if (h < 3) return;
+        const rw = readWidth(w);
+        const dx = (w - rw) / 2;
+        const item = self.currentItem();
+        const group_row = self.currentRow();
+        self.ensureDoc(ctx, item, group_row, rw);
+        self.paint(ctx, surface, dx, 0, dx + rw, self.docCrumb(ctx, item, group_row), self.mutedStyle());
+        self.paintDocLines(ctx, surface, dx, dx + rw, 2, h -| 2);
+    }
+
+    fn paintDocLines(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface, dx: u16, limit: u16, top: u16, visible: u16) void {
         if (self.doc_top > self.maxDocTop()) self.doc_top = self.maxDocTop();
         var row: u16 = 0;
         while (row < visible) : (row += 1) {
             const idx = self.doc_top + row;
             if (idx >= self.doc_lines.len) break;
             const line = self.doc_lines[idx];
-            const style: Style = if (std.mem.startsWith(u8, line, "#"))
-                .{ .bold = true, .fg = self.accent() }
-            else if (std.mem.startsWith(u8, line, "```"))
-                .{ .dim = true }
-            else
-                .{};
-            self.paint(ctx, surface, x0 + 2, top + row, x1 -| 2, line, style);
+            const y = top + row;
+            const style: Style = switch (line.kind) {
+                .h1, .h2 => .{ .bold = true, .fg = self.accent() },
+                .h3 => .{ .bold = true },
+                .code => .{ .dim = true },
+                else => .{},
+            };
+            self.paint(ctx, surface, dx, y, limit, line.text, style);
+            if (line.dash) {
+                surface.writeCell(dx, y, .{
+                    .char = .{ .grapheme = "–", .width = 1 },
+                    .style = self.mutedStyle(),
+                });
+            }
         }
+    }
+
+    fn ensureDoc(self: *Model, ctx: vxfw.DrawContext, item: ?Item, group_row: ?Row, width: u16) void {
+        const key: ?[]const u8 = if (item) |it| it.key else if (group_row) |gr| @tagName(gr.section) else null;
+        if (self.doc_key == null or key == null or !std.mem.eql(u8, self.doc_key.?, key.?) or self.doc_width != width) {
+            self.loadDoc(ctx, item, group_row, width);
+        }
+    }
+
+    fn docCrumb(self: *Model, ctx: vxfw.DrawContext, item: ?Item, group_row: ?Row) []const u8 {
+        _ = self;
+        if (item) |it| {
+            const tail = if (std.mem.startsWith(u8, it.key, "T-"))
+                it.key
+            else if (std.mem.startsWith(u8, it.key, "hoy:mit:"))
+                std.fmt.allocPrint(ctx.arena, "MIT {s}", .{it.key["hoy:mit:".len..]}) catch it.title
+            else if (std.mem.eql(u8, it.key, "hoy:meta"))
+                "meta"
+            else
+                it.title;
+            return std.fmt.allocPrint(ctx.arena, "{s} › {s}", .{ sectionName(it.section), tail }) catch tail;
+        }
+        if (group_row) |gr| return sectionName(gr.section);
+        return "";
     }
 
     fn loadDoc(self: *Model, ctx: vxfw.DrawContext, item: ?Item, group_row: ?Row, width: u16) void {
@@ -788,6 +1117,7 @@ const Model = struct {
         const a = self.doc_arena.allocator();
         self.doc_width = width;
         self.doc_key = null;
+        self.doc_top = 0;
 
         var text: []const u8 = "";
         if (item) |it| {
@@ -797,17 +1127,37 @@ const Model = struct {
             } else {
                 const raw = self.eng.store.dir.readFileAlloc(self.io, it.path, a, .limited(16 * 1024 * 1024)) catch |err| {
                     text = std.fmt.allocPrint(a, "No se pudo leer {s}: {s}", .{ it.path, @errorName(err) }) catch "error de lectura";
-                    self.doc_lines = wrap(ctx, a, text, width) catch &.{};
+                    self.doc_lines = layoutDoc(ctx, a, text, width) catch &.{};
                     return;
                 };
                 text = normalizeCrlf(raw);
             }
         } else if (group_row) |gr| {
-            const count = self.items[@backingInt(gr.section)].items.len;
             self.doc_key = @tagName(gr.section);
-            text = std.fmt.allocPrint(a, "# {s}\n\n{d} elementos.\n\nEnter o espacio pliega el grupo; las flechas recorren el árbol.", .{ sectionName(gr.section), count }) catch "";
+            const count = self.items[@backingInt(gr.section)].items.len;
+            if (gr.section == .hoy) {
+                if (self.hoy_plan) |p| {
+                    const raw = self.eng.store.dir.readFileAlloc(self.io, p, a, .limited(16 * 1024 * 1024)) catch |err| {
+                        text = std.fmt.allocPrint(a, "No se pudo leer {s}: {s}", .{ p, @errorName(err) }) catch "error de lectura";
+                        self.doc_lines = layoutDoc(ctx, a, text, width) catch &.{};
+                        return;
+                    };
+                    text = normalizeCrlf(raw);
+                } else {
+                    var goal: ?[]const u8 = null;
+                    for (self.items[@backingInt(Section.hoy)].items) |it| {
+                        if (std.mem.eql(u8, it.key, "hoy:meta")) goal = it.title;
+                    }
+                    text = std.fmt.allocPrint(a, "# {s}\n\nMeta: {s}\n\nSin plan para hoy; elige lo siguiente y empieza.", .{
+                        self.hoy_label orelse "",
+                        goal orelse "—",
+                    }) catch "";
+                }
+            } else {
+                text = std.fmt.allocPrint(a, "# {s}\n\n{d} elementos.\n\nEnter o espacio pliega el grupo; las flechas recorren el árbol.", .{ sectionName(gr.section), count }) catch "";
+            }
         }
-        self.doc_lines = wrap(ctx, a, text, width) catch &.{};
+        self.doc_lines = layoutDoc(ctx, a, text, width) catch &.{};
     }
 
     fn normalizeCrlf(raw: []u8) []const u8 {
@@ -856,25 +1206,28 @@ const Model = struct {
         const lines = [_][]const u8{
             " ztd · ayuda",
             "",
-            " ↑ ↓ / j k       moverse",
-            " ctrl+d / ctrl+u  media página",
-            " g / G            inicio / final",
-            " enter / espacio  abrir o plegar",
+            " j/k · ↑↓         moverse",
+            " ctrl+d · ctrl+u  media página",
+            " g · G            inicio / final",
+            " enter · espacio  abrir o plegar",
             " tab              cambiar de panel",
             " /                filtrar",
+            " t                cambiar tema",
+            " z                modo zen",
+            " esc              volver · limpiar filtro",
             " r                recargar ahora",
             " ?                cerrar esta ayuda",
             " q                salir",
             "",
             " El árbol se refresca solo al cambiar los archivos.",
         };
-        const w: u16 = @min(64, self.width -| 4);
-        const h: u16 = @min(16, self.height -| 2);
+        const w: u16 = @min(48, self.width -| 4);
+        const h: u16 = @min(17, self.height -| 2);
         const x = (self.width - w) / 2;
         const y = (self.height - h) / 2;
-        const bg: Style = .{ .bg = self.chromeBg(), .fg = self.chromeFg() };
-        for (0..h) |row| self.fill(surface, x, x + w, y + @as(u16, @intCast(row)), bg);
-        const border: Style = .{ .bg = self.chromeBg(), .fg = .{ .index = 238 } };
+        // Clear with the terminal background: no fill color anywhere.
+        for (0..h) |row| self.fill(surface, x, x + w, y + @as(u16, @intCast(row)), .{});
+        const border: Style = .{ .fg = self.rule() };
         for ([_]struct { row: u16, left: []const u8, right: []const u8 }{
             .{ .row = y, .left = "┌", .right = "┐" },
             .{ .row = y + h - 1, .left = "└", .right = "┘" },
@@ -895,25 +1248,83 @@ const Model = struct {
             const row = y + 1 + @as(u16, @intCast(i));
             if (row >= y + h - 1) break;
             self.paint(ctx, surface, x + 2, row, x + w -| 2, line, .{
-                .bg = self.chromeBg(),
-                .fg = if (i == 0) self.accent() else self.chromeFg(),
+                .fg = if (i == 0) self.accent() else .default,
                 .bold = i == 0,
             });
         }
     }
 
     fn accent(self: *Model) Color {
-        return if (self.mono) .default else .{ .index = 39 };
+        if (self.mono) return .default;
+        return .{ .index = if (self.dark) self.theme.accent_dark else self.theme.accent_light };
     }
 
-    fn chromeBg(self: *Model) Color {
-        return if (self.mono) .default else .{ .index = 235 };
+    fn muted(self: *Model) Color {
+        if (self.mono) return .default;
+        return .{ .index = if (self.dark) self.theme.muted_dark else self.theme.muted_light };
     }
 
-    fn chromeFg(self: *Model) Color {
-        return if (self.mono) .default else .{ .index = 252 };
+    fn rule(self: *Model) Color {
+        if (self.mono) return .default;
+        return .{ .index = if (self.dark) self.theme.rule_dark else self.theme.rule_light };
+    }
+
+    fn mutedStyle(self: *Model) Style {
+        if (self.mono) return .{ .dim = true };
+        return .{ .fg = self.muted() };
     }
 };
+
+/// Splits markdown text into display lines: inline markers stripped, headings
+/// classified, list dashes rewritten, and each logical line wrapped to the
+/// reading width. Fenced code passes through untouched, dimmed.
+fn layoutDoc(ctx: vxfw.DrawContext, a: Allocator, text: []const u8, width: u16) ![]const DocLine {
+    var logical: std.ArrayList(DocLine) = .empty;
+    var in_code = false;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        var line = raw;
+        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+        const trimmed = std.mem.trim(u8, line, " \t");
+        if (std.mem.startsWith(u8, trimmed, "```")) {
+            in_code = !in_code;
+            try logical.append(a, .{ .text = line, .kind = .code });
+            continue;
+        }
+        if (in_code) {
+            try logical.append(a, .{ .text = line, .kind = .code });
+            continue;
+        }
+        var hashes: usize = 0;
+        while (hashes < trimmed.len and trimmed[hashes] == '#') hashes += 1;
+        if (hashes > 0 and hashes < trimmed.len and trimmed[hashes] == ' ') {
+            const body = std.mem.trim(u8, trimmed[hashes + 1 ..], " ");
+            try logical.append(a, .{
+                .text = try hoy.stripInline(a, body),
+                .kind = if (hashes == 1) .h1 else if (hashes == 2) .h2 else .h3,
+            });
+            continue;
+        }
+        if (std.mem.startsWith(u8, trimmed, "- ") or std.mem.startsWith(u8, trimmed, "* ")) {
+            const body = try hoy.stripInline(a, std.mem.trim(u8, trimmed[2..], " "));
+            try logical.append(a, .{
+                .text = try std.fmt.allocPrint(a, "– {s}", .{body}),
+                .kind = .list,
+                .dash = true,
+            });
+            continue;
+        }
+        try logical.append(a, .{ .text = try hoy.stripInline(a, line), .kind = .body });
+    }
+    var out: std.ArrayList(DocLine) = .empty;
+    for (logical.items) |dl| {
+        const parts = try wrap(ctx, a, dl.text, width);
+        for (parts, 0..) |p, i| {
+            try out.append(a, .{ .text = p, .kind = dl.kind, .dash = dl.dash and i == 0 });
+        }
+    }
+    return out.items;
+}
 
 fn matchesFilter(item: Item, needle: []const u8) bool {
     return containsIgnoreCase(item.title, needle) or
@@ -1003,4 +1414,22 @@ test "wrap keeps words and hard-breaks long ones" {
     try std.testing.expectEqualStrings("", lines[1]);
     try std.testing.expectEqualStrings("unapalabra", lines[2]);
     try std.testing.expectEqualStrings("larguisima", lines[3]);
+}
+
+test "layoutDoc classifies headings, lists and code" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{}, .cell_size = .{} };
+    const a = arena.allocator();
+    const lines = try layoutDoc(ctx, a, "# Título\n\n- **punto**\n```\n**sin tocar**\n```\n[hola](y)", 40);
+    try std.testing.expectEqual(@as(usize, 7), lines.len);
+    try std.testing.expectEqual(DocKind.h1, lines[0].kind);
+    try std.testing.expectEqualStrings("Título", lines[0].text);
+    try std.testing.expectEqual(DocKind.body, lines[1].kind);
+    try std.testing.expectEqual(DocKind.list, lines[2].kind);
+    try std.testing.expect(lines[2].dash);
+    try std.testing.expectEqualStrings("– punto", lines[2].text);
+    for (lines[3..6]) |l| try std.testing.expectEqual(DocKind.code, l.kind);
+    try std.testing.expectEqualStrings("**sin tocar**", lines[4].text);
+    try std.testing.expectEqualStrings("hola", lines[6].text);
 }

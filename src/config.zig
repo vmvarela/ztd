@@ -10,10 +10,15 @@ pub const Policy = struct {
     clientOnlyIn: []const []const u8 = &.{},
 };
 
+/// TUI preferences carried in config.json; stores that never tuned the
+/// browser keep the defaults.
+pub const Tui = struct { theme: ?[]const u8 = null };
+
 pub const Config = struct {
     /// Declared store format; null when config.json omits the key.
     format: ?u32 = null,
     policy: Policy = .{},
+    tui: Tui = .{},
 };
 
 /// Fails closed: a store must carry a readable config.json declaring
@@ -95,4 +100,17 @@ pub fn projectRegistered(store: *Store, alloc: std.mem.Allocator, project: []con
     const with_ext = std.fmt.allocPrint(alloc, "{s}.md", .{rel}) catch return false;
     defer alloc.free(with_ext);
     return store.exists(with_ext);
+}
+
+test "config parses the tui section and tolerates its absence" {
+    const alloc = std.testing.allocator;
+    const opts: std.json.ParseOptions = .{ .ignore_unknown_fields = true, .allocate = .alloc_always };
+
+    var with_tui = try std.json.parseFromSlice(Config, alloc, "{\"format\":2,\"tui\":{\"theme\":\"tea\"}}", opts);
+    defer with_tui.deinit();
+    try std.testing.expectEqualStrings("tea", with_tui.value.tui.theme.?);
+
+    var plain = try std.json.parseFromSlice(Config, alloc, "{\"format\":2}", opts);
+    defer plain.deinit();
+    try std.testing.expectEqual(@as(?[]const u8, null), plain.value.tui.theme);
 }

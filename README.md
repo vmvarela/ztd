@@ -139,11 +139,15 @@ store is absent.
 
 `ztd tui` opens a read-only terminal browser for the whole store: every list
 group, project, plan, review, knowledge card, journal entry and routine, with
-the selected document on the right. Keys: arrows or `j`/`k`, `enter` to
-expand a group, `tab` to switch panes, `/` to filter, `?` for help, `q` to
-quit. The mouse scrolls, selects, and drags the divider between panes. It
-polls the store once a second, so edits made in another terminal show up
-without restarting, and it never writes or holds the store lock.
+the selected document on the right. It starts on Hoy — the active goal from
+`goals/active.md` plus today's MITs from the daily plan — and a missing goal
+or plan simply omits those rows. Keys: arrows or `j`/`k`, `enter` to expand a
+group, `tab` to switch panes, `/` to filter, `t` to cycle theme, `z` for zen
+reading mode, `?` for help, `q` to quit. Three themes — `paper`, `tea`,
+`amber` — default from `config.json` with `"tui": { "theme": "tea" }`; absent
+or invalid falls back to `paper`. Selection, navigation and the once-a-second
+live refresh are unchanged, the mouse still scrolls and drags the divider,
+and it never writes or holds the store lock.
 
 ### Repository binding
 
