@@ -26,19 +26,12 @@ With the binary on your `PATH`, publish the embedded assets to
 ztd install opencode
 ```
 
-From a repository checkout, the bundled installer does the same with the
-files on disk. It resolves its assets relative to itself, so it can be run
-from any working directory:
-
-```bash
-./integrations/opencode/install.sh
-```
-
-Both preflight the complete bundle before writing, and any differing file,
+It preflights the complete bundle before writing, and any differing file,
 symlink or unexpected file type aborts the whole run without overwriting
-anything. `ztd install opencode` upgrades the files its own manifest recorded;
-`install.sh` has no manifest, so a file from an earlier version is a differing
-file you must remove yourself. Neither initializes the store, modifies OpenCode
+anything. A hidden `.ztd-assets.json` manifest records every path it wrote, so
+later runs upgrade those files and refuse one you edited. There is no
+per-project mode: copy `skills/` and `commands/` into that project's
+`.opencode/` tree by hand. It never initializes the store, modifies OpenCode
 configuration nor configures MCP.
 
 ### 1. Store and templates (prerequisite)
