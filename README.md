@@ -32,6 +32,12 @@ Publish the OpenCode integration (skills and commands) with:
 ztd install opencode
 ```
 
+Upgrade the six method templates in the store root with:
+
+```bash
+ztd install templates
+```
+
 ## Quick start
 
 ```bash
@@ -110,7 +116,6 @@ ztd agent-recall --scope S --query Q [--limit N] [--db PATH]
 ztd agent-backup --out FILE [--db PATH]
 ztd agent-export --out FILE [--db PATH]
 ztd agent-restore --from FILE [--db PATH]
-ztd mcp [--read-only] [--scope C] [--agent-scope S] [--agent-db PATH]
 ztd version
 ```
 
@@ -180,7 +185,7 @@ commit, so a failed restore writes nothing; `agent-backup --out FILE` makes a
 consistent single-file copy (`VACUUM INTO`) that never overwrites an existing
 file and opens through the schema gate. `agent-prepare ID --scope S
 --history N` returns up to `N` checkpoints newest-first alongside the latest
-one. These are operator actions and have no MCP tools.
+one. These are operator actions and are CLI only.
 
 `agent-remember --scope S --kind K --text T` stores one knowledge record
 (`fact`, `decision`, `constraint` or `procedure`) and `agent-recall --scope S
@@ -197,45 +202,6 @@ All commands support `--json`:
 ```
 
 Exit codes: `0` success, `1` domain error, `2` usage.
-
-## MCP
-
-`ztd mcp` is a stdio MCP server (JSON-RPC 2.0, one object per line):
-
-- Tools: `ztd_capture`, `ztd_list`, `ztd_show`, `ztd_move`, `ztd_plan`, `ztd_check`.
-- Resources: `ztd://contexts`, `ztd://config`, `ztd://plan/YYYY-MM-DD`.
-- `--read-only` rejects `ztd_capture` and `ztd_move`.
-- `--scope C` limits context-scoped operations to `C`.
-
-`ztd mcp --agent-scope S [--agent-db PATH]` runs the agent-mode server instead:
-only `ztd_agent_capture`, `ztd_agent_checkpoint` and `ztd_agent_prepare`, and no
-resources, because the legacy handlers resolve a Markdown store that the
-agent scope does not constrain. The scope comes from server configuration and
-is never a tool argument; `--read-only` rejects capture and checkpoint and
-allows prepare.
-
-OpenCode:
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "servers": {
-      "ztd": {
-        "type": "local",
-        "command": ["ztd", "mcp"]
-      }
-    }
-  }
-}
-```
-
-The server resolves the root by precedence (`--root` > `ZTD_ROOT` > `~/.ztd`);
-add `--root PATH` to pin a different store. It starts even when the store root
-is missing; tools return `invalid_workspace`.
-
-With `--agent-scope`, the server exposes only the three `ztd_agent_*` tools and
-no resources; the Markdown tools are not listed in that mode.
 
 ## Guarantees
 

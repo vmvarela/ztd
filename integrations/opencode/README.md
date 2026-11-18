@@ -31,8 +31,8 @@ symlink or unexpected file type aborts the whole run without overwriting
 anything. A hidden `.ztd-assets.json` manifest records every path it wrote, so
 later runs upgrade those files and refuse one you edited. There is no
 per-project mode: copy `skills/` and `commands/` into that project's
-`.opencode/` tree by hand. It never initializes the store, modifies OpenCode
-configuration nor configures MCP.
+`.opencode/` tree by hand. It never initializes the store or modifies OpenCode
+configuration.
 
 ### 1. Store and templates (prerequisite)
 
@@ -47,6 +47,10 @@ STORE="$HOME/.ztd"          # explicit store root (edit it if you use another)
 ztd init "$STORE"           # creates the store structure and templates in $STORE
 ```
 
+After upgrading the binary, `ztd install templates` refreshes the six templates
+in an existing store root; it never creates the store and refuses a template
+you edited.
+
 The commands are OpenCode prompts: `/ztd` is the entry point and the rest are
 nested as `/ztd/<name>` (for example `/ztd/plan`, `/ztd/review`), which OpenCode
 derives from `commands/ztd/<name>.md`. They run in sessions that discover
@@ -58,30 +62,6 @@ commands (`lists/…`, `goals/…`, `templates/…`) are relative to the store r
 pass it with `--root "$STORE"` or `ZTD_ROOT` (precedence `--root` > `ZTD_ROOT`
 > `~/.ztd`).
 
-### MCP
-
-Register the server in `opencode.jsonc` (optional; the skills' queries use it)
-with the store root made explicit:
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "servers": {
-      "ztd": {
-        "type": "local",
-        "command": ["ztd", "--root", "{env:HOME}/.ztd", "mcp"]
-      }
-    }
-  }
-}
-```
-
-V2 connects servers automatically and does not use `enabled` (to keep one
-configured without connecting there is `disabled: true`). Replace the path with
-your store root: `command` does not go through a shell, so use an absolute path
-or OpenCode's `{env:NAME}` substitution.
-
 Requirements: the `ztd` binary on the `PATH`, the store root resolved
 (`--root` > `ZTD_ROOT` > `~/.ztd`) and the store initialized (step 1).
 
@@ -89,7 +69,7 @@ Requirements: the `ztd` binary on the `PATH`, the store root resolved
 
 - The store root is the task-data directory. It resolves as `--root` >
   `ZTD_ROOT` > `~/.ztd`, never from the current directory (configuration can
-  pin it, e.g. the MCP above).
+  pin it).
 - A repository's `.ztd.json` contains exactly `{context, client, project}`.
   The CLI discovers the nearest file up to the current Git repository
   boundary, reports it in `status`, and validates it with `check --bindings`.

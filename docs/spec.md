@@ -276,25 +276,7 @@ with `unknown_id`. With `--dry-run` it reports the change and writes nothing.
 `init` seeds `inbox`, `plan` and `review` dated at creation, so a new store
 starts with nothing due.
 
-## 10. MCP
-
-Transport: JSON-RPC 2.0 over stdio, one object per line, UTF-8. stdout carries
-only protocol objects; diagnostics go to stderr.
-
-Methods: `initialize`, `notifications/initialized`, `ping`, `tools/list`,
-`tools/call`, `resources/list`, `resources/read`.
-
-Tools and resources are described in [README.md](../README.md). Tool results
-use `content:[{type:"text",text:"<json>"}]` and `isError` for domain errors.
-Protocol errors use JSON-RPC error objects.
-
-The server starts even when the store root is missing. Every tool then returns
-`invalid_workspace`.
-
-`--read-only` rejects mutations with `read_only`. `--scope C` rejects access to
-another context with `scope_denied`.
-
-## 11. Agent store
+## 10. Agent store
 
 The agent-continuity store is a SQLite database that records what an agent was
 asked to do and how far it got: assignments and checkpoints. It is independent
@@ -314,8 +296,8 @@ the user data directory. Only the default is guaranteed to stay outside the
 Markdown store; an explicit path or environment variable can point anywhere
 the caller chooses.
 
-Operations, exposed as `ztd agent-capture`, `ztd agent-checkpoint`,
-`ztd agent-prepare` and as the three `ztd_agent_*` MCP tools:
+Operations, exposed as `ztd agent-capture`, `ztd agent-checkpoint` and
+`ztd agent-prepare`:
 
 - `capture` inserts an assignment at rev 1 in its scope.
 - `checkpoint` records a checkpoint and increments the assignment rev;
@@ -337,8 +319,7 @@ non-positive `limit`, a malformed FTS5 query).
   with a different payload it is `idempotency_conflict`. Replay is checked
   before `expect_rev`, so an identical retry succeeds even if the assignment
   has moved on since; a different payload still conflicts.
-- Scope is enforced outside tool arguments: the CLI takes `--scope`, MCP takes
-  it from server configuration (`--agent-scope`), and the store checks it on
+- Scope is explicit on every command (`--scope`) and the store checks it on
   every operation.
 - Writes take a brief `BEGIN IMMEDIATE` transaction after a 5 s busy timeout.
   A competing writer waits and usually proceeds; only a lock still held after
@@ -358,7 +339,7 @@ non-positive `limit`, a malformed FTS5 query).
 ### Knowledge
 
 Scoped knowledge records with full-text recall, exposed as `ztd
-agent-remember` and `ztd agent-recall` (CLI only, no MCP tools):
+agent-remember` and `ztd agent-recall`:
 
 - `knowledge` rows: `id` (`K-YYYYMMDD-NNN`), `scope_id`, `kind` (`fact`,
   `decision`, `constraint` or `procedure`), `text`, optional `source`, `rev`
@@ -386,7 +367,7 @@ agent-remember` and `ztd agent-recall` (CLI only, no MCP tools):
   `io_error`.
 
 Durability, exposed only as `ztd agent-backup`, `ztd agent-export` and
-`ztd agent-restore` — operator actions, deliberately without MCP tools:
+`ztd agent-restore` — operator actions:
 
 - `agent-export --out FILE` writes one JSON object
   `{"format":"ztd-agent-export","version":2,"scopes":[...],"assignments":[...],"checkpoints":[...],"operations":[...],"knowledge":[...]}`.
@@ -421,11 +402,7 @@ Durability, exposed only as `ztd agent-backup`, `ztd agent-export` and
   `history` returns none for a zero limit. Without the flag the response is
   unchanged.
 
-The agent MCP mode (`ztd mcp --agent-scope S [--agent-db PATH]`) exposes only
-these three tools and no resources; `--read-only` rejects `capture` and
-`checkpoint` and allows `prepare`.
-
-## 12. Format-1 conversion
+## 11. Format-1 conversion
 
 `ztd migrate --from SOURCE --to DEST [--dry-run] [--json]` converts a format-1
 Markdown store into format 2. `SOURCE` and `DEST` are exact store directories;

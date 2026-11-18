@@ -1,8 +1,10 @@
-//! `ztd install opencode`: publishes the embedded skills/ and commands/
-//! bundle into `$HOME/.config/opencode` under a no-clobber preflight, with a
-//! hidden manifest that turns later runs into upgrades instead of conflicts.
-//! The whole bundle is classified before the first write: any conflict
-//! aborts with exit 1 and no writes at all.
+//! `ztd install <adapter>`: publishes an embedded bundle under a no-clobber
+//! preflight, with a hidden manifest that turns later runs into upgrades
+//! instead of conflicts. The whole bundle is classified before the first
+//! write: any conflict aborts with exit 1 and no writes at all.
+//! `opencode` lands in `$HOME/.config/opencode`; `templates` lands in the
+//! store root, where the embedded `templates/…` paths resolve to
+//! `<root>/templates/…` and the manifest to `<root>/.ztd-assets.json`.
 const std = @import("std");
 const builtin = @import("builtin");
 const assets = @import("assets");
@@ -50,24 +52,51 @@ const Leaf = union(enum) {
 
 const Pair = struct { path: []const u8, sha: []const u8 };
 
+/// One publishable bundle: where it lands and which embedded entries it owns.
+const Bundle = struct {
+    /// Install base (absolute, or relative to the working directory); the
+    /// manifest lives at `<base>/.ztd-assets.json`.
+    base: []const u8,
+    entries: []const assets.Entry,
+    /// Directory checked before the base when it exists: `$HOME/.config` for
+    /// opencode. The store root needs no parent of its own.
+    parent: ?[]const u8 = null,
+    /// The base must already exist and be a directory: a store is never created.
+    require_base: bool = false,
+};
+
 /// Installs or upgrades the bundle. `home` is `$HOME`; the target directory
 /// is fixed at `$HOME/.config/opencode`.
 // shortcut: fixed $HOME/.config/opencode, no XDG override; add when someone needs it.
 pub fn run(io: std.Io, alloc: std.mem.Allocator, home: []const u8, dry_run: bool) !Report {
     const base = try std.fs.path.join(alloc, &.{ home, ".config", "opencode" });
     defer alloc.free(base);
+    const parent = try std.fs.path.join(alloc, &.{ home, ".config" });
+    defer alloc.free(parent);
+    return runBundle(io, alloc, .{ .base = base, .entries = &assets.opencode, .parent = parent }, dry_run);
+}
 
+/// `ztd install templates`: publishes the method templates into an existing
+/// store root. A missing root or one that is not a directory is
+/// `error.InvalidWorkspace`; only `<root>/templates` may be created here.
+pub fn runTemplates(io: std.Io, alloc: std.mem.Allocator, root: []const u8, dry_run: bool) !Report {
+    return runBundle(io, alloc, .{ .base = root, .entries = &assets.templates, .require_base = true }, dry_run);
+}
+
+fn runBundle(io: std.Io, alloc: std.mem.Allocator, b: Bundle, dry_run: bool) !Report {
     var conflicts: std.ArrayList([]const u8) = .empty;
     defer conflicts.deinit(alloc);
 
-    var actions: [assets.opencode.len]Action = undefined;
+    const actions = try alloc.alloc(Action, b.entries.len);
+    defer alloc.free(actions);
     var manifest_text: ?[]const u8 = null;
     defer if (manifest_text) |t| alloc.free(t);
 
-    var base_dir = try openBase(io, base);
+    var base_dir = try openBase(io, b.base);
     defer if (base_dir) |*d| d.close(io);
+    if (b.require_base and base_dir == null) return error.InvalidWorkspace;
 
-    try preflight(io, alloc, home, base, base_dir, &actions, &manifest_text, &conflicts);
+    try preflight(io, alloc, b, base_dir, actions, &manifest_text, &conflicts);
     if (conflicts.items.len > 0) return .{ .conflicts = try conflicts.toOwnedSlice(alloc) };
 
     var installed: usize = 0;
@@ -83,28 +112,28 @@ pub fn run(io: std.Io, alloc: std.mem.Allocator, home: []const u8, dry_run: bool
     // Directories first, then re-verify: preflight saw the layout before any
     // directory existed, so a symlink planted in between must not be written
     // through either. Only empty directories can exist after such an abort.
-    std.Io.Dir.cwd().createDirPath(io, base) catch |err| switch (err) {
+    std.Io.Dir.cwd().createDirPath(io, b.base) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    for (assets.opencode, 0..) |entry, i| {
+    for (b.entries, 0..) |entry, i| {
         if (actions[i] == .unchanged) continue;
         const slash = std.mem.lastIndexOfScalar(u8, entry.path, '/') orelse continue;
-        const parent = try std.fs.path.join(alloc, &.{ base, entry.path[0..slash] });
+        const parent = try std.fs.path.join(alloc, &.{ b.base, entry.path[0..slash] });
         defer alloc.free(parent);
         std.Io.Dir.cwd().createDirPath(io, parent) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
     }
-    if (base_dir == null) base_dir = (try openBase(io, base)) orelse return error.InvalidWorkspace;
+    if (base_dir == null) base_dir = (try openBase(io, b.base)) orelse return error.InvalidWorkspace;
     var recheck: std.ArrayList([]const u8) = .empty;
     defer recheck.deinit(alloc);
-    try verifyAncestors(io, alloc, home, base, base_dir, &recheck);
+    try verifyAncestors(io, alloc, b, base_dir, &recheck);
     if (recheck.items.len > 0) return .{ .conflicts = try recheck.toOwnedSlice(alloc) };
 
     const dir = base_dir.?;
-    for (assets.opencode, 0..) |entry, i| try writeEntry(io, dir, entry, actions[i]);
+    for (b.entries, 0..) |entry, i| try writeEntry(io, dir, entry, actions[i]);
     if (manifest_text) |text| {
         var af = try dir.createFileAtomic(io, manifest_name, .{ .replace = true });
         defer af.deinit(io);
@@ -120,14 +149,13 @@ pub fn run(io: std.Io, alloc: std.mem.Allocator, home: []const u8, dry_run: bool
 fn preflight(
     io: std.Io,
     alloc: std.mem.Allocator,
-    home: []const u8,
-    base: []const u8,
+    b: Bundle,
     base_dir: ?std.Io.Dir,
     actions: []Action,
     manifest_text: *?[]const u8,
     conflicts: *std.ArrayList([]const u8),
 ) !void {
-    try verifyAncestors(io, alloc, home, base, base_dir, conflicts);
+    try verifyAncestors(io, alloc, b, base_dir, conflicts);
 
     // A malformed or unsupported manifest is treated as absent: differing
     // files then conflict instead of being silently adopted.
@@ -151,12 +179,12 @@ fn preflight(
                     if (parsed) |*p| old = p.value;
                 }
             },
-            else => try conflicts.append(alloc, try std.fmt.allocPrint(alloc, "not a regular file {s}/{s}", .{ base, manifest_name })),
+            else => try conflicts.append(alloc, try std.fmt.allocPrint(alloc, "not a regular file {s}/{s}", .{ b.base, manifest_name })),
         };
     }
 
-    for (assets.opencode, 0..) |entry, i| {
-        const abs = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ base, entry.path });
+    for (b.entries, 0..) |entry, i| {
+        const abs = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ b.base, entry.path });
         defer alloc.free(abs);
         const new_sha = sha256Hex(entry.data);
         const leaf: Leaf = if (base_dir) |dir| try classify(io, alloc, dir, entry.path) else .missing;
@@ -193,9 +221,9 @@ fn preflight(
     while (old_it.next()) |kv| {
         // Entries a future release dropped stay recorded: their files are
         // outside the bundle now, but remain managed instead of foreign.
-        if (findAsset(kv.key_ptr.*) == null) try pairs.append(a, .{ .path = kv.key_ptr.*, .sha = kv.value_ptr.* });
+        if (!managed(b.entries, kv.key_ptr.*)) try pairs.append(a, .{ .path = kv.key_ptr.*, .sha = kv.value_ptr.* });
     }
-    for (assets.opencode) |entry| {
+    for (b.entries) |entry| {
         const sha = sha256Hex(entry.data);
         try pairs.append(a, .{ .path = entry.path, .sha = try a.dupe(u8, &sha) });
     }
@@ -232,17 +260,15 @@ fn writeEntry(io: std.Io, dir: std.Io.Dir, entry: assets.Entry, action: Action) 
     }
 }
 
-/// Every component between $HOME and each target must already be a real
-/// directory: a symlink or a file where a directory belongs is a conflict.
-/// Missing components are fine — the publish phase creates them.
-fn verifyAncestors(io: std.Io, alloc: std.mem.Allocator, home: []const u8, base: []const u8, base_dir: ?std.Io.Dir, conflicts: *std.ArrayList([]const u8)) !void {
-    const config = try std.fs.path.join(alloc, &.{ home, ".config" });
-    defer alloc.free(config);
-    try checkComponent(io, alloc, null, config, config, conflicts);
-    try checkComponent(io, alloc, null, base, base, conflicts);
+/// Every component of the parent directory and of the base must already be a
+/// real directory when present: a symlink or a file where a directory belongs
+/// is a conflict. Missing components are fine — the publish phase creates them.
+fn verifyAncestors(io: std.Io, alloc: std.mem.Allocator, b: Bundle, base_dir: ?std.Io.Dir, conflicts: *std.ArrayList([]const u8)) !void {
+    if (b.parent) |parent| try checkComponent(io, alloc, null, parent, parent, conflicts);
+    try checkComponent(io, alloc, null, b.base, b.base, conflicts);
 
     const dir = base_dir orelse return;
-    for (assets.opencode) |entry| {
+    for (b.entries) |entry| {
         const slash = std.mem.lastIndexOfScalar(u8, entry.path, '/') orelse continue;
         var acc: [std.fs.max_path_bytes]u8 = undefined;
         var len: usize = 0;
@@ -254,7 +280,7 @@ fn verifyAncestors(io: std.Io, alloc: std.mem.Allocator, home: []const u8, base:
             }
             @memcpy(acc[len .. len + comp.len], comp);
             len += comp.len;
-            const display = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ base, acc[0..len] });
+            const display = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ b.base, acc[0..len] });
             defer alloc.free(display);
             try checkComponent(io, alloc, dir, acc[0..len], display, conflicts);
         }
@@ -307,16 +333,21 @@ fn classify(io: std.Io, alloc: std.mem.Allocator, dir: std.Io.Dir, rel: []const 
 }
 
 fn openBase(io: std.Io, base: []const u8) !?std.Io.Dir {
-    return std.Io.Dir.openDirAbsolute(io, base, .{ .iterate = true }) catch |err| switch (err) {
+    // An explicit `--root` may be relative to the working directory.
+    const opened = if (std.fs.path.isAbsolute(base))
+        std.Io.Dir.openDirAbsolute(io, base, .{ .iterate = true })
+    else
+        std.Io.Dir.cwd().openDir(io, base, .{ .iterate = true });
+    return opened catch |err| switch (err) {
         error.FileNotFound => return null,
         error.NotDir => return null, // recorded as a conflict by verifyAncestors
         else => return err,
     };
 }
 
-fn findAsset(path: []const u8) ?assets.Entry {
-    for (assets.opencode) |entry| if (std.mem.eql(u8, entry.path, path)) return entry;
-    return null;
+fn managed(entries: []const assets.Entry, path: []const u8) bool {
+    for (entries) |entry| if (std.mem.eql(u8, entry.path, path)) return true;
+    return false;
 }
 
 fn sameShas(old: std.json.ArrayHashMap([]const u8), pairs: []const Pair) bool {
@@ -696,4 +727,141 @@ test "a symlinked leaf is a conflict" {
     const kept = try readAbs(io, alloc, elsewhere);
     defer alloc.free(kept);
     try std.testing.expectEqualStrings("not ours\n", kept);
+}
+
+test "templates install into an existing store root; a rerun is unchanged" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const root = try alloc.dupe(u8, path_buf[0..n]);
+    defer alloc.free(root);
+
+    const r1 = try runTemplates(io, alloc, root, false);
+    defer r1.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), r1.conflicts.len);
+    try std.testing.expectEqual(@as(usize, 6), r1.installed);
+    try std.testing.expectEqual(@as(usize, 0), r1.updated);
+    try std.testing.expectEqual(@as(usize, 0), r1.unchanged);
+
+    for (assets.templates) |entry| {
+        const p = try std.fs.path.join(alloc, &.{ root, entry.path });
+        defer alloc.free(p);
+        const got = try readAbs(io, alloc, p);
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings(entry.data, got);
+    }
+
+    const mpath = try std.fs.path.join(alloc, &.{ root, manifest_name });
+    defer alloc.free(mpath);
+    const mtext1 = try readAbs(io, alloc, mpath);
+    defer alloc.free(mtext1);
+    var parsed = try std.json.parseFromSlice(Manifest, alloc, mtext1, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(build_options.version, parsed.value.ztd_version);
+    try std.testing.expectEqual(assets.templates.len, parsed.value.assets.map.count());
+
+    const r2 = try runTemplates(io, alloc, root, false);
+    defer r2.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), r2.conflicts.len);
+    try std.testing.expectEqual(@as(usize, 0), r2.installed);
+    try std.testing.expectEqual(@as(usize, 6), r2.unchanged);
+    const mtext2 = try readAbs(io, alloc, mpath);
+    defer alloc.free(mtext2);
+    try std.testing.expectEqualStrings(mtext1, mtext2);
+
+    // Identical files with no manifest are adopted, and the manifest is
+    // written with the bytes the installer just adopted.
+    try deleteAbs(io, mpath);
+    const r3 = try runTemplates(io, alloc, root, false);
+    defer r3.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), r3.conflicts.len);
+    try std.testing.expectEqual(@as(usize, 0), r3.installed);
+    try std.testing.expectEqual(@as(usize, 6), r3.unchanged);
+    const mtext3 = try readAbs(io, alloc, mpath);
+    defer alloc.free(mtext3);
+    try std.testing.expectEqualStrings(mtext1, mtext3);
+}
+
+test "an edited template aborts the run with no writes" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const root = try alloc.dupe(u8, path_buf[0..n]);
+    defer alloc.free(root);
+
+    const first = try runTemplates(io, alloc, root, false);
+    defer first.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), first.conflicts.len);
+
+    // One template edited, another removed: the run must abort and must not
+    // recreate the removed one.
+    const edited_entry = assets.templates[0];
+    const removed_entry = assets.templates[1];
+    const edited_path = try std.fs.path.join(alloc, &.{ root, edited_entry.path });
+    defer alloc.free(edited_path);
+    const removed_path = try std.fs.path.join(alloc, &.{ root, removed_entry.path });
+    defer alloc.free(removed_path);
+    try writeAbs(io, edited_path, "user content\n");
+    try deleteAbs(io, removed_path);
+
+    const mpath = try std.fs.path.join(alloc, &.{ root, manifest_name });
+    defer alloc.free(mpath);
+    const manifest_before = try readAbs(io, alloc, mpath);
+    defer alloc.free(manifest_before);
+
+    const again = try runTemplates(io, alloc, root, false);
+    try expectConflicts(alloc, again, edited_entry.path);
+    try std.testing.expectEqual(@as(usize, 0), again.installed);
+    try std.testing.expectEqual(@as(usize, 0), again.updated);
+    try std.testing.expectEqual(@as(usize, 0), again.unchanged);
+
+    const still_edited = try readAbs(io, alloc, edited_path);
+    defer alloc.free(still_edited);
+    try std.testing.expectEqualStrings("user content\n", still_edited);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, removed_path, .{}));
+    const manifest_after = try readAbs(io, alloc, mpath);
+    defer alloc.free(manifest_after);
+    try std.testing.expectEqualStrings(manifest_before, manifest_after);
+}
+
+test "templates install refuses to create the store root" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try alloc.dupe(u8, path_buf[0..n]);
+    defer alloc.free(base);
+
+    const missing = try std.fs.path.join(alloc, &.{ base, "nostore" });
+    defer alloc.free(missing);
+    try std.testing.expectError(error.InvalidWorkspace, runTemplates(io, alloc, missing, false));
+    try std.testing.expectError(error.InvalidWorkspace, runTemplates(io, alloc, missing, true));
+    // Nothing was created where the store should be.
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, missing, .{}));
+
+    // A file in place of the root is the same error, and stays untouched.
+    const file_root = try std.fs.path.join(alloc, &.{ base, "store-file" });
+    defer alloc.free(file_root);
+    try writeAbs(io, file_root, "not a store\n");
+    try std.testing.expectError(error.InvalidWorkspace, runTemplates(io, alloc, file_root, false));
+    const kept = try readAbs(io, alloc, file_root);
+    defer alloc.free(kept);
+    try std.testing.expectEqualStrings("not a store\n", kept);
 }

@@ -19,7 +19,7 @@
     "node": ">=18"
   },
   "keywords": [
-    "tasks", "todo", "ztd", "markdown", "cli", "agents", "mcp"
+    "tasks", "todo", "ztd", "markdown", "cli", "agents"
   ],
   "author": "vmvarela <vmvarela@gmail.com>"
 }

@@ -120,11 +120,6 @@ is never discovered from the current directory. Tasks are stored in
 	Copy the store into a new single file (*VACUUM INTO*). An existing
 	file is never overwritten; the copy opens and passes the schema gate.
 
-*mcp* [*--read-only*] [*--scope* C] [*--agent-scope* S] [*--agent-db* PATH]
-	Run the stdio MCP server. With *--agent-scope* only the three
-	*ztd_agent_* tools are exposed and there are no resources; the scope is
-	enforced server-side and is never a tool argument.
-
 *version*
 	Print version.
 

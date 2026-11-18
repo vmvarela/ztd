@@ -112,6 +112,10 @@ The root is never discovered from the current directory.
 `ztd init` also seeds the six method templates into `<store>/templates/` when
 they are absent; an edited template is never overwritten.
 
+After upgrading the binary, run `ztd install templates` to refresh those six
+templates in an existing store root. It never creates the store, and it refuses
+a template you edited, recording ownership in `<store>/.ztd-assets.json`.
+
 ## OpenCode integration
 
 ```bash

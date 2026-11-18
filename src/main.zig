@@ -7,7 +7,6 @@ const routine_mod = @import("routine.zig");
 const store_mod = @import("store.zig");
 const binding_mod = @import("binding.zig");
 const migrate_mod = @import("migrate.zig");
-const mcp = @import("mcp.zig");
 const agent = @import("agent.zig");
 const db = @import("db.zig");
 const install_mod = @import("install.zig");
@@ -255,11 +254,17 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
         return cmdStatus(ctx, root, source);
     }
 
-    // `install` only publishes embedded assets: no store, no today.
+    // `install` publishes embedded assets: opencode into its config dir,
+    // templates into the store resolved by the normal root precedence.
+    // No store is created for either adapter, so `today` is not needed here.
     if (std.mem.eql(u8, cmd, "install")) {
-        if (rest.len != 1) return usage(ctx, "install needs an adapter: ztd install opencode");
-        if (!std.mem.eql(u8, rest[0], "opencode")) return usage(ctx, "unknown install adapter");
-        return cmdInstall(ctx, dry_run);
+        if (rest.len != 1) return usage(ctx, "install needs an adapter: ztd install opencode | ztd install templates");
+        if (std.mem.eql(u8, rest[0], "opencode")) return cmdInstall(ctx, "opencode", null, dry_run);
+        if (std.mem.eql(u8, rest[0], "templates")) {
+            const root_path = try store_mod.resolveRoot(ctx.io, ctx.alloc, root);
+            return cmdInstall(ctx, "templates", root_path, dry_run);
+        }
+        return usage(ctx, "unknown install adapter");
     }
 
     const today = if (today_arg) |t| platform.parseDate(t) catch return usage(ctx, "--today must be YYYY-MM-DD") else platform.today(ctx.io);
@@ -268,10 +273,6 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
     if (std.mem.eql(u8, cmd, "migrate")) {
         if (root_flag) return usage(ctx, "migrate takes --from/--to, not --root");
         return cmdMigrate(ctx, rest, dry_run, today);
-    }
-    if (std.mem.eql(u8, cmd, "mcp")) {
-        try mcp.serve(ctx.io, ctx.alloc, rest, root, today);
-        return 0;
     }
     const root_path = try store_mod.resolveRoot(ctx.io, ctx.alloc, root);
     const mutating = !dry_run and (std.mem.eql(u8, cmd, "capture") or std.mem.eql(u8, cmd, "move") or std.mem.eql(u8, cmd, "recover") or std.mem.eql(u8, cmd, "routine"));
@@ -944,13 +945,18 @@ fn failCode(ctx: *Ctx, code: []const u8, err: anyerror) !u8 {
     return 1;
 }
 
-/// `ztd install opencode`: publishes the embedded skills/commands bundle into
-/// `$HOME/.config/opencode`. A conflict anywhere aborts with exit 1 and no
-/// writes; a run that writes reports `N installed, M updated, K unchanged`,
-/// with zero counters omitted.
-fn cmdInstall(ctx: *Ctx, dry_run: bool) !u8 {
-    const home = try store_mod.homeDir(ctx.io, ctx.alloc);
-    const rep = try install_mod.run(ctx.io, ctx.alloc, home, dry_run);
+/// `ztd install <adapter>`: publishes an embedded bundle — the skills and
+/// commands into `$HOME/.config/opencode`, or the method templates into the
+/// store root (`root`, already resolved by the normal precedence). A conflict
+/// anywhere aborts with exit 1 and no writes; a run that writes reports
+/// `N installed, M updated, K unchanged`, with zero counters omitted.
+fn cmdInstall(ctx: *Ctx, adapter: []const u8, root: ?[]const u8, dry_run: bool) !u8 {
+    const rep = if (root) |r|
+        try install_mod.runTemplates(ctx.io, ctx.alloc, r, dry_run)
+    else blk: {
+        const home = try store_mod.homeDir(ctx.io, ctx.alloc);
+        break :blk try install_mod.run(ctx.io, ctx.alloc, home, dry_run);
+    };
     if (rep.conflicts.len > 0) {
         if (ctx.json) {
             var msg: std.ArrayList(u8) = .empty;
@@ -979,7 +985,7 @@ fn cmdInstall(ctx: *Ctx, dry_run: bool) !u8 {
     }
     if (ctx.json) {
         try success(ctx, "install", .{
-            .adapter = "opencode",
+            .adapter = adapter,
             .dry_run = dry_run,
             .installed = rep.installed,
             .updated = rep.updated,
@@ -1245,6 +1251,7 @@ fn printHelp(ctx: *Ctx) !void {
         \\
         \\  init [path] [--local]       create a store (default $HOME/.ztd; --local = ./ztd)
         \\  install opencode            publish skills and commands to ~/.config/opencode
+        \\  install templates           publish the method templates into the store root
         \\  migrate --from SRC --to DST [--dry-run]  convert a format-1 store to format 2
         \\  status                      show root, source, exists, format, binding
         \\  capture <text>... | --stdin capture tasks into the inbox
@@ -1264,8 +1271,6 @@ fn printHelp(ctx: *Ctx) !void {
         \\  agent-backup --out FILE [--db PATH]
         \\  agent-export --out FILE [--db PATH]
         \\  agent-restore --from FILE [--db PATH]
-        \\  mcp [--scope C] [--read-only]       serve MCP over stdio
-        \\  mcp --agent-scope S [--agent-db P]  agent-only tools, no Markdown workspace
         \\  version
         \\
         \\global: --root PATH --json --today YYYY-MM-DD --dry-run
@@ -1281,7 +1286,6 @@ test {
     _ = @import("config.zig");
     _ = @import("engine.zig");
     _ = @import("init.zig");
-    _ = @import("mcp.zig");
     _ = @import("db.zig");
     _ = @import("agent.zig");
     _ = @import("binding.zig");

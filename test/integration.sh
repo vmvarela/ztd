@@ -153,25 +153,6 @@ rc=0; "$BIN" --root "$TMP" check --strict >/dev/null 2>&1 || rc=$?
 cp "$TMP.inbox.backup" "$TMP/inbox.md"
 "$BIN" --root "$TMP" check >/dev/null
 
-# MCP handshake and one tool call
-printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ztd_list","arguments":{}}}' \
-  | "$BIN" --root "$TMP" mcp | grep -q '"tools"'
-
-# A wrong-typed optional argument is an error, not a silent drop: a numeric
-# context must not silently list every context.
-out_bad="$(printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ztd_list","arguments":{"context":123}}}' \
-  | "$BIN" --root "$TMP" mcp)"
-printf '%s' "$out_bad" | grep -q '"isError":true' || { echo "numeric context accepted: $out_bad" >&2; exit 1; }
-
-# A scoped list uses the scope when the request omits context.
-printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ztd_list","arguments":{}}}' \
-  | "$BIN" --root "$TMP" mcp --scope personal --read-only | grep -q 'T-20261111-001'
-
 # Agent store flow: temp DB only, no Markdown workspace involved.
 ADB="$TMP/agent.db"
 out1="$("$BIN" agent-capture --scope demo --request 'hello' --objective 'finish the flow' --idempotency-key k1 --db "$ADB")"
@@ -213,26 +194,6 @@ rc=0
 out7="$("$BIN" agent-prepare "$id1" --scope other --db "$ADB")" || rc=$?
 [ "$rc" -eq 1 ]
 printf '%s' "$out7" | grep -q '"code":"scope_denied"'
-
-# Agent-mode MCP: exactly the three agent tools, no legacy tools, no resources.
-mcp_agent="$(printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  '{"jsonrpc":"2.0","id":3,"method":"resources/list"}' \
-  | "$BIN" mcp --agent-scope demo --agent-db "$ADB")"
-n_agent="$(printf '%s\n' "$mcp_agent" | grep -o '"name":"ztd_agent_[a-z_]*"' | wc -l | tr -d ' ')"
-n_all="$(printf '%s\n' "$mcp_agent" | grep -o '"name":"ztd_[a-z_]*"' | wc -l | tr -d ' ')"
-[ "$n_agent" -eq 3 ]
-[ "$n_all" -eq 3 ]
-printf '%s\n' "$mcp_agent" | grep -qF '"resources":[]'
-
-# A wrong-typed optional argument is an error, not a silently dropped field.
-mcp_typed="$(printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ztd_agent_capture","arguments":{"scope":"demo","request":"x","constraints":1}}}' \
-  | "$BIN" mcp --agent-scope demo --agent-db "$ADB")"
-printf '%s\n' "$mcp_typed" | grep -qF '"isError":true'
-printf '%s\n' "$mcp_typed" | grep -qF 'invalid_field'
 
 # Durability: a second checkpoint, then export, restore and backup.
 out8="$("$BIN" agent-checkpoint "$id1" --scope demo --expect-rev 2 --result 'second progress' --db "$ADB")"
@@ -497,9 +458,28 @@ rc=0; "$BIN" migrate --from "$TMP/v1" --to "$TMP/v2" >/dev/null 2>&1 || rc=$?
 rc=0; "$BIN" --root "$TMP" migrate --from "$TMP/v1" --to "$TMP/v3" >/dev/null 2>&1 || rc=$?
 [ "$rc" -eq 2 ]
 
+# `install templates` adopts the templates init seeded and records a manifest.
+TS="$TMP/tplstore"
+"$BIN" init "$TS" >/dev/null
+out="$("$BIN" --root "$TS" install templates --dry-run)"
+printf '%s' "$out" | grep -q '6 unchanged'
+[ ! -e "$TS/.ztd-assets.json" ]
+out="$("$BIN" --root "$TS" install templates)"
+printf '%s' "$out" | grep -q '6 unchanged'
+[ -f "$TS/.ztd-assets.json" ]
+j="$("$BIN" --root "$TS" install templates --json)"
+printf '%s' "$j" | grep -q '"adapter":"templates"'
+printf '%s' "$j" | grep -q '"unchanged":6'
+# the manifest is not a store file that breaks check
+"$BIN" --root "$TS" check >/dev/null
+# a missing store is an error and nothing is created
+rc=0; "$BIN" --root "$TMP/nostore" install templates >/dev/null 2>&1 || rc=$?
+[ "$rc" -ne 0 ]
+[ ! -e "$TMP/nostore" ]
+
 # Every command the binary dispatches must be visible in --help.
 HELP="$("$BIN" --help 2>&1)"
-for c in init status install migrate capture list show move plan check recover due routine mcp version \
+for c in init status install migrate capture list show move plan check recover due routine version \
          agent-capture agent-checkpoint agent-prepare agent-remember agent-recall \
          agent-backup agent-export agent-restore; do
     printf '%s' "$HELP" | grep -q "  $c" || { echo "help omits $c" >&2; exit 1; }

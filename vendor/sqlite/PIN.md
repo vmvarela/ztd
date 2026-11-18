@@ -17,8 +17,8 @@ Only `sqlite3.c` and `sqlite3.h` are vendored; `shell.c` and `sqlite3ext.h` are 
 ## Compile flags (must match `build.zig`)
 
 `SQLITE_THREADSAFE=0` assumes one connection per process on one thread. The CLI is
-one-shot and the MCP server is a sequential loop, so cross-process concurrency is
-handled by SQLite's file locks and `busy_timeout`, not by SQLITE_THREADSAFE. If any
+one-shot, so cross-process concurrency is handled by SQLite's file locks and
+`busy_timeout`, not by SQLITE_THREADSAFE. If any
 second thread ever touches the DB, switch to `=1` and recompile; no data migration.
 
 `SQLITE_OMIT_LOAD_EXTENSION`, `SQLITE_DQS=0`, `SQLITE_DEFAULT_FOREIGN_KEYS=1`,
