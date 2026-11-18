@@ -4,7 +4,7 @@ const std = @import("std");
 /// value is used on a dark background, `_light` on a light one.
 pub const Theme = struct {
     key: []const u8, // "paper" | "tea" | "amber"
-    name: []const u8, // "papel" | "té" | "ámbar"
+    name: []const u8, // "paper" | "tea" | "amber"
     accent_dark: u8,
     accent_light: u8,
     muted_dark: u8,
@@ -16,7 +16,7 @@ pub const Theme = struct {
 pub const all = [_]Theme{
     .{
         .key = "paper",
-        .name = "papel",
+        .name = "paper",
         .accent_dark = 110,
         .accent_light = 61,
         .muted_dark = 245,
@@ -26,7 +26,7 @@ pub const all = [_]Theme{
     },
     .{
         .key = "tea",
-        .name = "té",
+        .name = "tea",
         .accent_dark = 108,
         .accent_light = 65,
         .muted_dark = 245,
@@ -36,7 +36,7 @@ pub const all = [_]Theme{
     },
     .{
         .key = "amber",
-        .name = "ámbar",
+        .name = "amber",
         .accent_dark = 179,
         .accent_light = 137,
         .muted_dark = 245,

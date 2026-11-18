@@ -1304,4 +1304,6 @@ test {
     _ = @import("tui.zig");
     _ = @import("hoy.zig");
     _ = @import("theme.zig");
+    _ = @import("tabs.zig");
+    _ = @import("fuzzy.zig");
 }

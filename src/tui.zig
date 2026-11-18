@@ -1,5 +1,6 @@
 //! Read-only terminal browser for the store: a collapsible tree of lists and
 //! documents beside a pager, refreshed when the files change on disk.
+//! Explicitly opened items collect in a tab strip above the header.
 //!
 //! The viewer never mutates the store and holds no lock. It re-reads on a
 //! one-second tick: editors and `ztd` write atomically, so a changed file is
@@ -13,6 +14,7 @@ const hoy = @import("hoy.zig");
 const model = @import("model.zig");
 const platform = @import("platform.zig");
 const theme = @import("theme.zig");
+const tabs = @import("tabs.zig");
 
 const Allocator = std.mem.Allocator;
 const Style = vaxis.Style;
@@ -66,19 +68,19 @@ const sections = std.enums.values(Section);
 
 fn sectionName(s: Section) []const u8 {
     return switch (s) {
-        .hoy => "Hoy",
-        .inbox => "Bandeja",
+        .hoy => "Today",
+        .inbox => "Inbox",
         .next => "Next",
         .waiting => "Waiting",
         .someday => "Someday",
-        .projects => "Proyectos",
-        .plans => "Planes",
-        .reviews => "Revisiones",
-        .knowledge => "Conocimiento",
-        .journal => "Diario",
-        .goals => "Metas",
-        .routines => "Rutinas",
-        .archive => "Archivo",
+        .projects => "Projects",
+        .plans => "Plans",
+        .reviews => "Reviews",
+        .knowledge => "Knowledge",
+        .journal => "Journal",
+        .goals => "Goals",
+        .routines => "Routines",
+        .archive => "Archive",
     };
 }
 
@@ -144,9 +146,13 @@ const Model = struct {
     error_text: ?[]const u8 = null,
     theme: theme.Theme,
     dark: bool = true,
-    /// Ticks since the last key or mouse event; the footer fades after 8.
+    /// Opened-document tabs; Today is pinned first.
+    tabs: tabs.List,
+    /// Seconds since the last successful store poll.
+    since_poll: u16 = 0,
+    /// Ticks since the last key or mouse event; hints fade after 8.
     idle: u16 = 0,
-    /// Ticks left to show the theme notice in the footer.
+    /// Ticks left to show the theme notice in the status line.
     toast_left: u16 = 0,
     hoy_label: ?[]u8 = null,
     hoy_plan: ?[]u8 = null,
@@ -165,6 +171,7 @@ const Model = struct {
             .collapsed = undefined,
             .filter = .empty,
             .doc_arena = .init(alloc),
+            .tabs = tabs.List.init(alloc),
             .theme = theme.byKey(eng.config.tui.theme),
         };
         for (&m.items) |*list| list.* = .empty;
@@ -177,6 +184,7 @@ const Model = struct {
     fn deinit(self: *Model) void {
         self.rows.deinit(self.alloc);
         self.filter.deinit(self.alloc);
+        self.tabs.deinit();
         self.doc_arena.deinit();
         self.idx.deinit();
         if (self.hoy_label) |l| self.alloc.free(l);
@@ -213,6 +221,7 @@ const Model = struct {
         for (&self.items) |*list| list.* = .empty;
         try self.buildIndex();
         try self.rebuildRows();
+        try self.syncTabs();
 
         if (saved) |k| {
             for (self.rows.items, 0..) |row, i| {
@@ -275,9 +284,9 @@ const Model = struct {
                 .section = .routines,
                 .key = row.id,
                 .title = row.id,
-                .detail = try std.fmt.allocPrint(a, "cada {s} · última {s}", .{ row.cadence, last }),
+                .detail = try std.fmt.allocPrint(a, "every {s} · last {s}", .{ row.cadence, last }),
                 .path = "routines/state.md",
-                .doc = try std.fmt.allocPrint(a, "# Rutina {s}\n\n- cadencia: {s}\n- última: {s}\n", .{ row.id, row.cadence, last }),
+                .doc = try std.fmt.allocPrint(a, "# Routine {s}\n\n- cadence: {s}\n- last: {s}\n", .{ row.id, row.cadence, last }),
             });
         }
 
@@ -338,6 +347,40 @@ const Model = struct {
         return null;
     }
 
+    fn findItem(self: *Model, key: []const u8) ?Item {
+        for (sections) |s| {
+            for (self.items[@backingInt(s)].items) |it| {
+                if (std.mem.eql(u8, it.key, key)) return it;
+            }
+        }
+        return null;
+    }
+
+    /// Refreshes tab titles from the rebuilt index, drops tabs whose key
+    /// vanished, and guarantees the pinned Today tab exists. Reload never
+    /// opens tabs: only an explicit open does.
+    fn syncTabs(self: *Model) !void {
+        if (self.tabs.indexOf("hoy") == null) {
+            _ = try self.tabs.open("hoy", "Today", true);
+        }
+        for (self.tabs.entries.items) |*e| {
+            if (std.mem.eql(u8, e.key, "hoy")) continue;
+            const item = self.findItem(e.key) orelse continue;
+            const fresh = try self.alloc.dupe(u8, item.title);
+            self.alloc.free(e.title);
+            e.title = fresh;
+        }
+        const a = self.idx.allocator();
+        var keys: std.ArrayList([]const u8) = .empty;
+        try keys.append(a, "hoy");
+        for (sections) |s| {
+            for (self.items[@backingInt(s)].items) |it| {
+                try keys.append(a, it.key);
+            }
+        }
+        self.tabs.retainKeys(keys.items);
+    }
+
     fn itemAsc(_: void, a: Item, b: Item) bool {
         return std.mem.lessThan(u8, a.title, b.title);
     }
@@ -391,7 +434,7 @@ const Model = struct {
             lt.task.title,
             lt.task.id,
             lt.list.name(),
-            if (lt.task.status == .open) "abierta" else "hecha",
+            if (lt.task.status == .open) "open" else "done",
         }));
         if (lt.task.fields.items.len > 0) {
             try out.appendSlice(a, "\n");
@@ -528,8 +571,62 @@ const Model = struct {
             self.collapsed[i] = !self.collapsed[i];
             self.rebuildRows() catch {};
         } else if (row.kind == .item) {
+            if (self.currentItem()) |it| {
+                _ = self.tabs.open(it.key, it.title, false) catch {};
+            }
             self.focus = .doc;
         }
+    }
+
+    /// Focuses the tab at `idx` and moves the tree selection to its item,
+    /// expanding its group and clearing any filter first.
+    fn jumpToTab(self: *Model, idx: usize) void {
+        if (idx >= self.tabs.entries.items.len) return;
+        self.tabs.active = idx;
+        const key = self.tabs.entries.items[idx].key;
+        self.focus = .doc;
+        if (self.filter.items.len > 0) {
+            self.filter.clearRetainingCapacity();
+            self.rebuildRows() catch {};
+        }
+        var section: ?Section = null;
+        if (std.mem.eql(u8, key, "hoy")) {
+            section = .hoy;
+        } else if (self.findItem(key)) |it| {
+            section = it.section;
+        }
+        if (section) |s| {
+            if (self.collapsed[@backingInt(s)]) {
+                self.collapsed[@backingInt(s)] = false;
+                self.rebuildRows() catch {};
+            }
+        }
+        for (self.rows.items, 0..) |row, i| {
+            const row_key: ?[]const u8 = switch (row.kind) {
+                .item => self.items[@backingInt(row.section)].items[row.item].key,
+                .group => @tagName(row.section),
+                .blank => null,
+            };
+            if (row_key) |rk| {
+                if (std.mem.eql(u8, rk, key)) {
+                    self.selected = i;
+                    self.ensureVisible();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Closes the active tab (Today is pinned and never closes). The
+    /// selection stays put unless the closed tab was the item on screen;
+    /// then it falls back to the new active tab.
+    fn closeActiveTab(self: *Model) void {
+        const entry = self.tabs.activeEntry() orelse return;
+        if (entry.pinned) return;
+        // Compare before close: tabs.close frees the entry's strings.
+        const was_current = if (self.currentKey()) |k| std.mem.eql(u8, k, entry.key) else false;
+        self.tabs.close(self.tabs.active);
+        if (was_current) self.jumpToTab(self.tabs.active);
     }
 
     fn matchCount(self: *Model) usize {
@@ -555,6 +652,7 @@ const Model = struct {
             .tick => {
                 self.poll();
                 self.idle = @min(self.idle + 1, 9);
+                self.since_poll = @min(self.since_poll + 1, 999);
                 if (self.toast_left > 0) self.toast_left -= 1;
                 try ctx.tick(1000, self.widget());
             },
@@ -570,11 +668,19 @@ const Model = struct {
     fn poll(self: *Model) void {
         const sig = self.signature() catch return;
         if (sig == self.sig) return;
-        self.sig = sig;
+        self.forcePoll();
+    }
+
+    /// Reloads unconditionally (manual `r` or a detected change) and marks
+    /// the status line fresh.
+    fn forcePoll(self: *Model) void {
+        self.sig = self.signature() catch return;
         const key = self.currentKey();
         self.reload(key) catch |err| {
             self.error_text = @errorName(err);
+            return;
         };
+        self.since_poll = 0;
     }
 
     fn signature(self: *Model) !u64 {
@@ -745,6 +851,18 @@ const Model = struct {
             self.focus = .doc;
             return;
         }
+        if (key.matches('[', .{})) {
+            self.jumpToTab(self.tabs.cycle(-1));
+            return;
+        }
+        if (key.matches(']', .{})) {
+            self.jumpToTab(self.tabs.cycle(1));
+            return;
+        }
+        if (key.matches('x', .{})) {
+            self.closeActiveTab();
+            return;
+        }
         if (key.matches(vaxis.Key.enter, .{}) or key.matches(vaxis.Key.space, .{})) {
             self.activate();
             return;
@@ -759,7 +877,7 @@ const Model = struct {
             }
             return;
         }
-        if (key.matches('r', .{})) self.poll();
+        if (key.matches('r', .{})) self.forcePoll();
     }
 
     fn handleMouse(self: *Model, ctx: *vxfw.EventContext, mouse: vaxis.Mouse) !void {
@@ -777,7 +895,7 @@ const Model = struct {
             return;
         }
         const body_h: i16 = @intCast(self.bodyHeight());
-        const body_top: i16 = 1;
+        const body_top: i16 = @intCast(self.bodyTop());
         const tree_w: i16 = @intCast(self.treeWidth());
         const in_body = mouse.row >= body_top and mouse.row < body_top + body_h;
 
@@ -812,6 +930,10 @@ const Model = struct {
                     }
                 },
                 .left => {
+                    if (self.tabsVisible() and mouse.row == 0 and mouse.col >= 0) {
+                        self.clickTab(mouse.col);
+                        return;
+                    }
                     if (self.width >= 100 and mouse.col >= 0 and @abs(mouse.col - tree_w) <= 1) {
                         self.drag_sep = true;
                         return;
@@ -835,7 +957,42 @@ const Model = struct {
     }
 
     fn bodyHeight(self: *Model) u16 {
-        return if (self.height > 2) self.height - 2 else 0;
+        const chrome = self.bodyTop() + 1; // top chrome plus the status line
+        return self.height -| chrome;
+    }
+
+    /// Row where the body starts: below the tab strip when it is shown.
+    fn bodyTop(self: *Model) u16 {
+        return if (self.tabsVisible()) 2 else 1;
+    }
+
+    fn tabsVisible(self: *Model) bool {
+        return !self.zen and self.width >= 100;
+    }
+
+    /// Uniform tab cell width with a leading space.
+    fn tabCellWidth(self: *Model) u16 {
+        const n: usize = @max(self.tabs.entries.items.len, 1);
+        return @intCast(@min(@as(usize, 18), @as(usize, self.width) / n));
+    }
+
+    /// How many tabs fit, reserving room for the "+N" overflow marker.
+    fn tabsShown(self: *Model) usize {
+        const len = self.tabs.entries.items.len;
+        if (len == 0) return 0;
+        const w: usize = self.tabCellWidth();
+        if (w == 0) return 0;
+        var shown = @min(len, @as(usize, self.width) / w);
+        if (shown < len and @as(usize, self.width) - shown * w < 3) shown -= 1;
+        return shown;
+    }
+
+    fn clickTab(self: *Model, col: i16) void {
+        const w = self.tabCellWidth();
+        if (w == 0 or col < 0) return;
+        const idx: usize = @intCast(@divTrunc(col, @as(i16, @intCast(w))));
+        if (idx >= self.tabsShown()) return;
+        self.jumpToTab(idx);
     }
 
     fn docVisible(self: *Model) u16 {
@@ -881,7 +1038,7 @@ const Model = struct {
         if (self.width == 0 or self.height == 0) return surface;
 
         if (self.width < 40 or self.height < 8) {
-            self.paint(ctx, surface, 0, 0, self.width, "terminal demasiado pequeña", .{ .bold = true });
+            self.paint(ctx, surface, 0, 0, self.width, "terminal too small", .{ .bold = true });
             return surface;
         }
 
@@ -891,33 +1048,35 @@ const Model = struct {
             return surface;
         }
 
+        if (self.tabsVisible()) self.paintTabs(ctx, surface);
         self.paintHeader(ctx, surface);
         self.paintBody(ctx, surface);
-        self.paintFooter(ctx, surface);
+        self.paintStatus(ctx, surface);
         if (self.help) self.paintHelp(ctx, surface);
         return surface;
     }
 
     fn paintHeader(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface) void {
+        const row: u16 = self.bodyTop() -| 1;
         if (self.filtering or self.filter.items.len > 0) {
             const f = std.fmt.allocPrint(ctx.arena, "/{s}", .{self.filter.items}) catch "/";
-            self.paint(ctx, surface, 0, 0, self.width, f, .{ .bold = true });
+            self.paint(ctx, surface, 0, row, self.width, f, .{ .bold = true });
             const caret_x: u16 = @intCast(@min(ctx.stringWidth(f), self.width - 1));
-            surface.writeCell(caret_x, 0, .{
+            surface.writeCell(caret_x, row, .{
                 .char = .{ .grapheme = "▌", .width = 1 },
                 .style = .{ .fg = self.accent(), .bold = true },
             });
-            const t = std.fmt.allocPrint(ctx.arena, "{d} coincidencias", .{self.matchCount()}) catch "";
+            const t = std.fmt.allocPrint(ctx.arena, "{d} matches", .{self.matchCount()}) catch "";
             const tw: u16 = @intCast(@min(ctx.stringWidth(t), @as(usize, self.width)));
-            self.paint(ctx, surface, self.width -| tw, 0, self.width, t, self.mutedStyle());
+            self.paint(ctx, surface, self.width -| tw, row, self.width, t, self.mutedStyle());
             return;
         }
-        self.paint(ctx, surface, 0, 0, self.width, "ztd", .{ .fg = self.accent(), .bold = true });
-        self.paint(ctx, surface, 3, 0, self.width, " · ", self.mutedStyle());
+        self.paint(ctx, surface, 0, row, self.width, "ztd", .{ .fg = self.accent(), .bold = true });
+        self.paint(ctx, surface, 3, row, self.width, " · ", self.mutedStyle());
         const date = self.hoy_label orelse "";
         const dw: u16 = if (date.len == 0) 0 else @intCast(@min(ctx.stringWidth(date), @as(usize, self.width)));
-        self.paint(ctx, surface, 6, 0, self.width -| dw, self.rootShort(ctx), self.mutedStyle());
-        if (dw > 0) self.paint(ctx, surface, self.width -| dw, 0, self.width, date, self.mutedStyle());
+        self.paint(ctx, surface, 6, row, self.width -| dw, self.rootShort(ctx), self.mutedStyle());
+        if (dw > 0) self.paint(ctx, surface, self.width -| dw, row, self.width, date, self.mutedStyle());
     }
 
     fn rootShort(self: *Model, ctx: vxfw.DrawContext) []const u8 {
@@ -927,25 +1086,60 @@ const Model = struct {
         return self.root;
     }
 
-    fn paintFooter(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface) void {
+    fn paintTabs(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface) void {
+        const entries = self.tabs.entries.items;
+        const shown = self.tabsShown();
+        const w = self.tabCellWidth();
+        var i: usize = 0;
+        while (i < shown) : (i += 1) {
+            const x: u16 = @intCast(i * @as(usize, w));
+            const style: Style = if (i == self.tabs.active)
+                .{ .fg = self.accent(), .bold = true }
+            else
+                self.mutedStyle();
+            surface.writeCell(x, 0, .{ .char = .{ .grapheme = " ", .width = 1 }, .style = style });
+            self.paint(ctx, surface, x + 1, 0, x + w, entries[i].title, style);
+        }
+        if (shown < entries.len) {
+            const t = std.fmt.allocPrint(ctx.arena, "+{d}", .{entries.len - shown}) catch "";
+            const tw: u16 = @intCast(@min(ctx.stringWidth(t), @as(usize, self.width)));
+            self.paint(ctx, surface, self.width -| tw, 0, self.width, t, self.mutedStyle());
+        }
+    }
+
+    fn paintStatus(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface) void {
         const row = self.height - 1;
         if (self.error_text) |err| {
             // Errors never fade.
             self.paint(ctx, surface, 0, row, self.width, err, .{ .fg = .{ .index = 203 }, .bold = true });
             return;
         }
-        var text: ?[]const u8 = null;
+        self.paint(ctx, surface, 0, row, self.width, "ztd", .{ .fg = self.accent(), .bold = true });
+        self.paint(ctx, surface, 3, row, self.width, " · ", self.mutedStyle());
+        const root = self.rootShort(ctx);
+        self.paint(ctx, surface, 6, row, self.width, root, self.mutedStyle());
+        const age: []const u8 = if (self.since_poll < 2)
+            "just now"
+        else
+            std.fmt.allocPrint(ctx.arena, "{d}s ago", .{self.since_poll}) catch "";
+        const right = std.fmt.allocPrint(ctx.arena, "updated {s} · ? help", .{age}) catch "";
+        const rw: u16 = @intCast(@min(ctx.stringWidth(right), @as(usize, self.width)));
+        self.paint(ctx, surface, self.width -| rw, row, self.width, right, self.mutedStyle());
+        var hint: ?[]const u8 = null;
         if (self.toast_left > 0) {
-            text = std.fmt.allocPrint(ctx.arena, "tema · {s}", .{self.theme.name}) catch "tema";
+            hint = std.fmt.allocPrint(ctx.arena, "theme · {s}", .{self.theme.name}) catch "theme";
         } else if (self.filtering) {
-            text = "enter aplicar · esc limpiar";
+            hint = "enter apply · esc clear";
         } else if (self.idle < 8) {
-            text = if (self.focus == .tree)
-                "j/k mover · ↵ abrir · / filtrar · t tema · ? ayuda"
+            hint = if (self.focus == .tree)
+                "j/k move · ↵ open · / filter · t theme · ? help"
             else
-                "j/k leer · tab volver · z zen · ? ayuda";
+                "j/k read · tab back · z zen · ? help";
         }
-        if (text) |t| self.paint(ctx, surface, 0, row, self.width, t, self.mutedStyle());
+        if (hint) |t| {
+            const x: u16 = 6 + @as(u16, @intCast(@min(ctx.stringWidth(root), @as(usize, self.width -| 6))));
+            self.paint(ctx, surface, x + 2, row, self.width -| rw -| 2, t, self.mutedStyle());
+        }
     }
 
     fn paintBody(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface) void {
@@ -960,8 +1154,9 @@ const Model = struct {
         }
         const tree_w = self.treeWidth();
         self.paintTree(ctx, surface, 0, tree_w);
-        for (1..self.height - 1) |row| {
-            surface.writeCell(tree_w, @intCast(row), .{
+        var row = self.bodyTop();
+        while (row < self.height - 1) : (row += 1) {
+            surface.writeCell(tree_w, row, .{
                 .char = .{ .grapheme = "│", .width = 1 },
                 .style = .{ .fg = self.rule() },
             });
@@ -975,7 +1170,7 @@ const Model = struct {
         var row: u16 = 0;
         while (row < h) : (row += 1) {
             const idx = self.tree_top + row;
-            const y = 1 + row;
+            const y = self.bodyTop() + row;
             if (idx >= self.rows.items.len) break;
             const entry = self.rows.items[idx];
             if (entry.kind == .blank) continue;
@@ -1033,22 +1228,23 @@ const Model = struct {
         const group_row = self.currentRow();
         self.ensureDoc(ctx, item, group_row, rw);
 
-        self.paint(ctx, surface, dx, 1, dx + rw, self.docCrumb(ctx, item, group_row), self.mutedStyle());
+        const top = self.bodyTop();
+        self.paint(ctx, surface, dx, top, dx + rw, self.docCrumb(ctx, item, group_row), self.mutedStyle());
         const title = if (item) |it| it.title else if (group_row) |gr| sectionName(gr.section) else "";
-        self.paint(ctx, surface, dx, 2, dx + rw, title, .{ .bold = true });
+        self.paint(ctx, surface, dx, top + 1, dx + rw, title, .{ .bold = true });
         const meta: []const u8 = if (item) |it| it.detail else if (group_row) |gr|
-            std.fmt.allocPrint(ctx.arena, "{d} elementos", .{self.items[@backingInt(gr.section)].items.len}) catch ""
+            std.fmt.allocPrint(ctx.arena, "{d} items", .{self.items[@backingInt(gr.section)].items.len}) catch ""
         else
             "";
-        self.paint(ctx, surface, dx, 3, dx + rw, meta, self.mutedStyle());
+        self.paint(ctx, surface, dx, top + 2, dx + rw, meta, self.mutedStyle());
         var col = dx;
         while (col < dx + rw) : (col += 1) {
-            surface.writeCell(col, 4, .{
+            surface.writeCell(col, top + 3, .{
                 .char = .{ .grapheme = "─", .width = 1 },
                 .style = .{ .fg = self.rule() },
             });
         }
-        self.paintDocLines(ctx, surface, dx, dx + rw, 6, h -| 6);
+        self.paintDocLines(ctx, surface, dx, dx + rw, top + 5, h -| 6);
     }
 
     fn paintZen(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface) void {
@@ -1103,7 +1299,7 @@ const Model = struct {
             else if (std.mem.startsWith(u8, it.key, "hoy:mit:"))
                 std.fmt.allocPrint(ctx.arena, "MIT {s}", .{it.key["hoy:mit:".len..]}) catch it.title
             else if (std.mem.eql(u8, it.key, "hoy:meta"))
-                "meta"
+                "goal"
             else
                 it.title;
             return std.fmt.allocPrint(ctx.arena, "{s} › {s}", .{ sectionName(it.section), tail }) catch tail;
@@ -1126,7 +1322,7 @@ const Model = struct {
                 text = rendered;
             } else {
                 const raw = self.eng.store.dir.readFileAlloc(self.io, it.path, a, .limited(16 * 1024 * 1024)) catch |err| {
-                    text = std.fmt.allocPrint(a, "No se pudo leer {s}: {s}", .{ it.path, @errorName(err) }) catch "error de lectura";
+                    text = std.fmt.allocPrint(a, "Could not read {s}: {s}", .{ it.path, @errorName(err) }) catch "read error";
                     self.doc_lines = layoutDoc(ctx, a, text, width) catch &.{};
                     return;
                 };
@@ -1138,7 +1334,7 @@ const Model = struct {
             if (gr.section == .hoy) {
                 if (self.hoy_plan) |p| {
                     const raw = self.eng.store.dir.readFileAlloc(self.io, p, a, .limited(16 * 1024 * 1024)) catch |err| {
-                        text = std.fmt.allocPrint(a, "No se pudo leer {s}: {s}", .{ p, @errorName(err) }) catch "error de lectura";
+                        text = std.fmt.allocPrint(a, "Could not read {s}: {s}", .{ p, @errorName(err) }) catch "read error";
                         self.doc_lines = layoutDoc(ctx, a, text, width) catch &.{};
                         return;
                     };
@@ -1148,13 +1344,13 @@ const Model = struct {
                     for (self.items[@backingInt(Section.hoy)].items) |it| {
                         if (std.mem.eql(u8, it.key, "hoy:meta")) goal = it.title;
                     }
-                    text = std.fmt.allocPrint(a, "# {s}\n\nMeta: {s}\n\nSin plan para hoy; elige lo siguiente y empieza.", .{
+                    text = std.fmt.allocPrint(a, "# {s}\n\nGoal: {s}\n\nNo plan for today; pick the next thing and start.", .{
                         self.hoy_label orelse "",
                         goal orelse "—",
                     }) catch "";
                 }
             } else {
-                text = std.fmt.allocPrint(a, "# {s}\n\n{d} elementos.\n\nEnter o espacio pliega el grupo; las flechas recorren el árbol.", .{ sectionName(gr.section), count }) catch "";
+                text = std.fmt.allocPrint(a, "# {s}\n\n{d} items.\n\nEnter or space folds the group; the arrows move through the tree.", .{ sectionName(gr.section), count }) catch "";
             }
         }
         self.doc_lines = layoutDoc(ctx, a, text, width) catch &.{};
@@ -1204,25 +1400,27 @@ const Model = struct {
 
     fn paintHelp(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface) void {
         const lines = [_][]const u8{
-            " ztd · ayuda",
+            " ztd · help",
             "",
-            " j/k · ↑↓         moverse",
-            " ctrl+d · ctrl+u  media página",
-            " g · G            inicio / final",
-            " enter · espacio  abrir o plegar",
-            " tab              cambiar de panel",
-            " /                filtrar",
-            " t                cambiar tema",
-            " z                modo zen",
-            " esc              volver · limpiar filtro",
-            " r                recargar ahora",
-            " ?                cerrar esta ayuda",
-            " q                salir",
+            " j/k · ↑↓         move",
+            " ctrl+d · ctrl+u  half page",
+            " g · G            top / bottom",
+            " enter · space    open or fold",
+            " tab              switch pane",
+            " /                filter",
+            " [ · ]            switch tabs",
+            " x                close tab",
+            " t                cycle theme",
+            " z                zen mode",
+            " esc              back · clear filter",
+            " r                reload now",
+            " ?                close this help",
+            " q                quit",
             "",
-            " El árbol se refresca solo al cambiar los archivos.",
+            " The tree refreshes when files change.",
         };
         const w: u16 = @min(48, self.width -| 4);
-        const h: u16 = @min(17, self.height -| 2);
+        const h: u16 = @min(20, self.height -| 2);
         const x = (self.width - w) / 2;
         const y = (self.height - h) / 2;
         // Clear with the terminal background: no fill color anywhere.

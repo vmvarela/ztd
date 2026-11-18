@@ -475,11 +475,19 @@ another terminal are never blocked and never see a partial read: each reload
 rebuilds the index from complete files.
 
 Key handling is `q` quit, arrows or `j`/`k` move, `ctrl+d`/`ctrl+u` page,
-`g`/`G` first/last, `enter`/`space` expand, `tab` switch pane, `h`/`l` collapse
-or focus, `/` filter, `?` help, `r` reload. Mouse wheel scrolls the pane under
-the pointer, a click selects and focuses, and dragging the divider moves the
-split between 20 columns and the width minus 30. Below 100 columns the browser
-shows one pane at a time; below 40x8 it prints a size notice.
+`g`/`G` first/last, `enter`/`space` expand a group or open an item, `tab`
+switch pane, `h`/`l` collapse or focus, `[`/`]` cycle tabs, `x` close the
+active tab, `/` filter, `?` help, `r` reload. Mouse wheel scrolls the pane
+under the pointer, a click selects and focuses, a tab click opens it, and
+dragging the divider moves the split between 20 columns and the width minus
+30. Below 100 columns the browser shows one pane at a time and hides the tab
+strip; below 40x8 it prints a size notice.
+
+Opening an item pins it to the tab strip as history; moving the tree keeps
+previewing without adding tabs. Today is pinned first and cannot close; up to
+eight unpinned documents stay open, dropping the oldest beyond that. Tabs keep
+their document key across reloads and disappear when the backing file does.
+The interface is in English; store content is shown verbatim.
 
 The tree polls the store once a second by hashing path, mtime and size. When
 the signature changes it reloads and keeps the selection by task ID or document
@@ -487,9 +495,9 @@ path. Polling runs on the UI thread, so there are no background readers and no
 extra file descriptors. Colors follow the terminal's reported light or dark
 scheme and are disabled by `NO_COLOR`.
 
-### Hoy, themes and zen
+### Today, themes and zen
 
-Hoy is the entry index: the active goal from `goals/active.md` plus today's
+Today is the entry index: the active goal from `goals/active.md` plus today's
 MITs from the daily plan; a missing goal or plan omits those rows.
 
 | Key | Name | Character |

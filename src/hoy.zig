@@ -54,11 +54,11 @@ pub fn load(io: std.Io, a: std.mem.Allocator, store: *Store, today: platform.Dat
     return .{ .label = label, .goal = goal, .goal_path = goal_path, .plan_path = plan_path, .mits = mits };
 }
 
-/// `"miércoles 18 de noviembre"`: Spanish weekday (0 = Monday) and month names.
+/// `"Wednesday 18 November"`: English weekday (0 = Monday) and month names.
 pub fn dateLabel(a: std.mem.Allocator, today: platform.Date) ![]const u8 {
-    const weekdays = [_][]const u8{ "lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo" };
-    const months = [_][]const u8{ "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre" };
-    return std.fmt.allocPrint(a, "{s} {d} de {s}", .{ weekdays[today.weekday()], today.day, months[today.month - 1] });
+    const weekdays = [_][]const u8{ "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday" };
+    const months = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+    return std.fmt.allocPrint(a, "{s} {d} {s}", .{ weekdays[today.weekday()], today.day, months[today.month - 1] });
 }
 
 /// The first `- Resultado deseado:` line's text, stripped, or null when the
@@ -219,7 +219,7 @@ test "load fills the day from the store and never fails on absence" {
 
     const absent = try load(io, a, &store, today);
     defer freeDay(a, absent);
-    try std.testing.expectEqualStrings("miércoles 18 de noviembre", absent.label);
+    try std.testing.expectEqualStrings("Wednesday 18 November", absent.label);
     try std.testing.expectEqual(@as(?[]const u8, null), absent.goal);
     try std.testing.expectEqualStrings("goals/active.md", absent.goal_path);
     try std.testing.expectEqual(@as(?[]const u8, null), absent.plan_path);
@@ -242,7 +242,7 @@ test "load fills the day from the store and never fails on absence" {
 
     const day = try load(io, a, &store, today);
     defer freeDay(a, day);
-    try std.testing.expectEqualStrings("miércoles 18 de noviembre", day.label);
+    try std.testing.expectEqualStrings("Wednesday 18 November", day.label);
     try std.testing.expectEqualStrings("calmar el estrés con una rutina cotidiana sencilla.", day.goal.?);
     try std.testing.expectEqualStrings("goals/active.md", day.goal_path);
     try std.testing.expectEqualStrings("plans/daily/2026-11-18.md", day.plan_path.?);
@@ -313,9 +313,9 @@ test "stripInline removes markers and rewrites links" {
     try std.testing.expectEqualStrings("hola con código y enlace", got);
 }
 
-test "dateLabel renders the Spanish weekday and month" {
+test "dateLabel renders the English weekday and month" {
     const a = std.testing.allocator;
     const label = try dateLabel(a, try platform.parseDate("2026-11-18"));
     defer a.free(label);
-    try std.testing.expectEqualStrings("miércoles 18 de noviembre", label);
+    try std.testing.expectEqualStrings("Wednesday 18 November", label);
 }

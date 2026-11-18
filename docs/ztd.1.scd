@@ -72,18 +72,21 @@ is never discovered from the current directory. Tasks are stored in
 	Record a routine run for today.
 
 *tui*
-	Open a read-only terminal browser for the store. It starts on Hoy: the
+	Open a read-only terminal browser for the store. It starts on Today: the
 	active goal from *goals/active.md* plus today's MITs from the daily plan.
 	The left tree lists
 	every task group, project, plan, review, knowledge card, journal entry
 	and routine; the right pane shows the selected document. Keys: arrows or
-	*j*/*k*, *enter* to expand a group, *tab* to switch panes, */* to filter,
+	*j*/*k*, *enter* to expand a group or open an item in a tab, *[* and *]*
+	to cycle tabs, *x* to close one, *tab* to switch panes, */* to filter,
 	*t* to cycle theme, *z* for zen reading mode, *?* for help, *q* to quit.
-	Themes are *paper*, *tea* and *amber*, set with the *tui.theme* key of
-	*config.json* (absent or invalid falls back to *paper*). The mouse
-	scrolls, selects rows and drags the divider between panes. The tree
-	refreshes once a second when store files change, and the command never
-	writes or holds the store lock.
+	Today is pinned and up to eight more documents stay open; the tab strip
+	hides below 100 columns. Themes are *paper*, *tea* and *amber*, set with
+	the *tui.theme* key of *config.json* (absent or invalid falls back to
+	*paper*). The mouse scrolls, selects rows, clicks tabs and drags the
+	divider between panes. The tree refreshes once a second when store files
+	change, and the command never writes or holds the store lock. The
+	interface is in English; documents keep their original language.
 
 *status* [*--json*]
 	Show the store root resolved by precedence, its source (*flag*,
