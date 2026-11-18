@@ -10,6 +10,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const engine = @import("engine.zig");
+const fuzzy = @import("fuzzy.zig");
 const hoy = @import("hoy.zig");
 const model = @import("model.zig");
 const platform = @import("platform.zig");
@@ -84,6 +85,25 @@ fn sectionName(s: Section) []const u8 {
     };
 }
 
+/// Single-width monochrome marker shown on group headers only.
+fn sectionGlyph(s: Section) []const u8 {
+    return switch (s) {
+        .hoy => "◉",
+        .inbox => "▣",
+        .next => "○",
+        .waiting => "●",
+        .someday => "◌",
+        .projects => "◇",
+        .plans => "▤",
+        .reviews => "✓",
+        .knowledge => "✦",
+        .journal => "✎",
+        .goals => "◎",
+        .routines => "↻",
+        .archive => "▥",
+    };
+}
+
 const Item = struct {
     section: Section,
     /// Task ID or store-relative path; stable across reloads.
@@ -93,6 +113,10 @@ const Item = struct {
     /// File backing the item; the doc for tasks is pre-rendered instead.
     path: []const u8,
     doc: ?[]const u8 = null,
+    /// Accent chip for the document header: the ID for tasks and routines.
+    chip: []const u8 = "",
+    /// Muted chip after the accent one; empty means "show the path".
+    sub: []const u8 = "",
 };
 
 const Row = struct {
@@ -102,6 +126,25 @@ const Row = struct {
 };
 
 const Focus = enum { tree, doc };
+
+/// One command-palette entry: an index item or a built-in action.
+const PalResult = struct {
+    kind: enum { item, action } = .item,
+    action: u8 = 0,
+    section: Section = .hoy,
+    item: usize = 0,
+    score: i32 = 0,
+};
+
+const pal_actions = [_][]const u8{ "Cycle theme", "Zen mode", "Reload", "Help" };
+
+const ScrollGeom = struct {
+    col: u16,
+    top: u16,
+    len: u16,
+    thumb_top: u16,
+    thumb_len: u16,
+};
 
 const DocKind = enum { body, h1, h2, h3, list, code };
 
@@ -156,6 +199,14 @@ const Model = struct {
     toast_left: u16 = 0,
     hoy_label: ?[]u8 = null,
     hoy_plan: ?[]u8 = null,
+    /// Command palette state; results are rebuilt after every reload.
+    palette_open: bool = false,
+    pal_query: std.ArrayList(u8),
+    pal_sel: usize = 0,
+    pal_top: usize = 0,
+    pal_results: std.ArrayList(PalResult),
+    /// Which scrollbar thumb is being dragged, if any.
+    drag_sb: enum { none, tree, doc } = .none,
 
     fn init(io: std.Io, alloc: Allocator, eng: *engine.Engine, root: []const u8, home: []const u8, mono: bool) !Model {
         var m: Model = .{
@@ -172,6 +223,8 @@ const Model = struct {
             .filter = .empty,
             .doc_arena = .init(alloc),
             .tabs = tabs.List.init(alloc),
+            .pal_query = .empty,
+            .pal_results = .empty,
             .theme = theme.byKey(eng.config.tui.theme),
         };
         for (&m.items) |*list| list.* = .empty;
@@ -184,6 +237,8 @@ const Model = struct {
     fn deinit(self: *Model) void {
         self.rows.deinit(self.alloc);
         self.filter.deinit(self.alloc);
+        self.pal_query.deinit(self.alloc);
+        self.pal_results.deinit(self.alloc);
         self.tabs.deinit();
         self.doc_arena.deinit();
         self.idx.deinit();
@@ -234,6 +289,7 @@ const Model = struct {
         }
         self.clampSelection();
         self.ensureVisible();
+        if (self.palette_open) self.paletteRebuild() catch {};
     }
 
     fn buildIndex(self: *Model) !void {
@@ -247,13 +303,19 @@ const Model = struct {
                 .someday => .someday,
                 .archive => .archive,
             };
+            const det = try taskDetail(a, &lt.task);
             try self.items[@backingInt(sec)].append(a, .{
                 .section = sec,
                 .key = lt.task.id,
                 .title = lt.task.title,
-                .detail = try taskDetail(a, &lt.task),
+                .detail = det,
                 .path = lt.file,
                 .doc = try renderTask(a, lt),
+                .chip = lt.task.id,
+                .sub = if (det.len > 0)
+                    try std.fmt.allocPrint(a, "{s} · {s}", .{ if (lt.task.status == .open) "open" else "done", det })
+                else
+                    (if (lt.task.status == .open) "open" else "done"),
             });
         }
 
@@ -287,6 +349,7 @@ const Model = struct {
                 .detail = try std.fmt.allocPrint(a, "every {s} · last {s}", .{ row.cadence, last }),
                 .path = "routines/state.md",
                 .doc = try std.fmt.allocPrint(a, "# Routine {s}\n\n- cadence: {s}\n- last: {s}\n", .{ row.id, row.cadence, last }),
+                .chip = row.id,
             });
         }
 
@@ -310,6 +373,8 @@ const Model = struct {
                 .detail = mit.task_id orelse "plan",
                 .path = if (task) |t| t.path else (day.plan_path orelse day.goal_path),
                 .doc = if (task) |t| t.doc else null,
+                .chip = if (task) |t| t.chip else "",
+                .sub = if (task) |t| t.sub else "",
             });
         }
 
@@ -639,6 +704,350 @@ const Model = struct {
         return n;
     }
 
+    // ---- command palette --------------------------------------------------
+
+    fn openPalette(self: *Model) void {
+        const g = self.paletteGeo();
+        if (g.w < 12 or g.h < 5) return; // no room for a usable overlay
+        self.palette_open = true;
+        self.pal_query.clearRetainingCapacity();
+        self.pal_sel = 0;
+        self.pal_top = 0;
+        self.paletteRebuild() catch {};
+    }
+
+    fn palTitle(self: *Model, r: PalResult) []const u8 {
+        return switch (r.kind) {
+            .item => self.items[@backingInt(r.section)].items[r.item].title,
+            .action => pal_actions[r.action],
+        };
+    }
+
+    /// Right-aligned palette label: the section, then the item detail when
+    /// there is room, so a result is never just a bare title.
+    fn palLabel(self: *Model, ctx: vxfw.DrawContext, r: PalResult) []const u8 {
+        if (r.kind == .action) return "";
+        const detail = self.items[@backingInt(r.section)].items[r.item].detail;
+        const name = sectionName(r.section);
+        return if (detail.len > 0)
+            std.fmt.allocPrint(ctx.arena, "{s} · {s}", .{ name, detail }) catch name
+        else
+            name;
+    }
+
+    fn palLess(self: *Model, a: PalResult, b: PalResult) bool {
+        if (a.score != b.score) return a.score > b.score;
+        return std.mem.lessThan(u8, self.palTitle(a), self.palTitle(b));
+    }
+
+    /// Rebuilds the candidate list for the current query: empty query keeps
+    /// the natural order (all items, then actions); otherwise the best
+    /// fuzzy score over title, detail and key ranks candidates, with a
+    /// small bonus when the title itself matches and title tie-breaks.
+    fn paletteRebuild(self: *Model) !void {
+        self.pal_results.clearRetainingCapacity();
+        const q = self.pal_query.items;
+        if (q.len == 0) {
+            for (sections) |s| {
+                for (self.items[@backingInt(s)].items, 0..) |_, i| {
+                    try self.pal_results.append(self.alloc, .{ .section = s, .item = i });
+                }
+            }
+            for (pal_actions, 0..) |_, i| {
+                try self.pal_results.append(self.alloc, .{ .kind = .action, .action = @intCast(i) });
+            }
+        } else {
+            for (sections) |s| {
+                for (self.items[@backingInt(s)].items, 0..) |it, i| {
+                    var best: ?fuzzy.Match = null;
+                    for ([_][]const u8{ it.title, it.detail, it.key, sectionName(s) }) |field| {
+                        if (fuzzy.match(field, q)) |m| {
+                            if (best == null or m.score > best.?.score) best = m;
+                        }
+                    }
+                    var score = (best orelse continue).score;
+                    if (fuzzy.match(it.title, q) != null) score += 15;
+                    if (fuzzy.match(sectionName(s), q) != null) score += 20;
+                    try self.pal_results.append(self.alloc, .{ .section = s, .item = i, .score = score });
+                }
+            }
+            for (pal_actions, 0..) |t, i| {
+                const m = fuzzy.match(t, q) orelse continue;
+                try self.pal_results.append(self.alloc, .{ .kind = .action, .action = @intCast(i), .score = m.score });
+            }
+            std.mem.sort(PalResult, self.pal_results.items, self, palLess);
+        }
+        if (self.pal_results.items.len == 0) {
+            self.pal_sel = 0;
+            self.pal_top = 0;
+            return;
+        }
+        if (self.pal_sel >= self.pal_results.items.len) self.pal_sel = self.pal_results.items.len - 1;
+        self.palShowSelection();
+    }
+
+    /// Result rows visible inside the palette overlay.
+    fn palVisible(self: *Model) usize {
+        return @max(self.paletteGeo().h -| 4, 1);
+    }
+
+    fn palShowSelection(self: *Model) void {
+        const vis = self.palVisible();
+        if (self.pal_sel < self.pal_top) self.pal_top = self.pal_sel;
+        if (self.pal_sel >= self.pal_top + vis) self.pal_top = self.pal_sel + 1 - vis;
+    }
+
+    fn palMove(self: *Model, delta: isize) void {
+        const len = self.pal_results.items.len;
+        if (len == 0) return;
+        const sel: isize = std.math.clamp(
+            @as(isize, @intCast(self.pal_sel)) + delta,
+            0,
+            @as(isize, @intCast(len - 1)),
+        );
+        self.pal_sel = @intCast(sel);
+        self.palShowSelection();
+    }
+
+    fn palScroll(self: *Model, delta: isize) void {
+        const len = self.pal_results.items.len;
+        const maxtop = len -| self.palVisible();
+        const top: isize = std.math.clamp(
+            @as(isize, @intCast(self.pal_top)) + delta,
+            0,
+            @as(isize, @intCast(maxtop)),
+        );
+        self.pal_top = @intCast(top);
+    }
+
+    /// Overlay geometry: centered, capped to leave breathing room.
+    const PalGeo = struct { x: u16, y: u16, w: u16, h: u16 };
+
+    fn paletteGeo(self: *Model) PalGeo {
+        const w = @min(@as(u16, 72), self.width -| 8);
+        const h = @min(@as(u16, 14), self.height -| 6);
+        return .{ .x = (self.width - w) / 2, .y = (self.height - h) / 2, .w = w, .h = h };
+    }
+
+    fn paletteRun(self: *Model) void {
+        if (self.pal_sel >= self.pal_results.items.len) return;
+        const r = self.pal_results.items[self.pal_sel];
+        self.palette_open = false;
+        self.pal_query.clearRetainingCapacity();
+        switch (r.kind) {
+            .item => {
+                const it = self.items[@backingInt(r.section)].items[r.item];
+                const idx = self.tabs.open(it.key, it.title, false) catch return;
+                self.jumpToTab(idx);
+            },
+            .action => switch (r.action) {
+                0 => {
+                    self.theme = theme.next(self.theme);
+                    self.toast_left = 2;
+                },
+                1 => self.zen = true,
+                2 => self.forcePoll(),
+                3 => self.help = true,
+                else => {},
+            },
+        }
+    }
+
+    fn paletteClick(self: *Model, col: i16, row: i16) void {
+        const g = self.paletteGeo();
+        const gx: i16 = @intCast(g.x);
+        const gy: i16 = @intCast(g.y);
+        const gw: i16 = @intCast(g.w);
+        const gh: i16 = @intCast(g.h);
+        if (col < gx or col >= gx + gw or row < gy or row >= gy + gh) {
+            self.palette_open = false;
+            self.pal_query.clearRetainingCapacity();
+            return;
+        }
+        const first: i16 = gy + 2;
+        const vis: i16 = @intCast(self.palVisible());
+        if (row >= first and row < first + vis) {
+            const idx = self.pal_top + @as(usize, @intCast(row - first));
+            if (idx < self.pal_results.items.len) {
+                self.pal_sel = idx;
+                self.paletteRun();
+            }
+        }
+    }
+
+    fn handlePaletteKey(self: *Model, key: vaxis.Key) !void {
+        if (key.matches(vaxis.Key.escape, .{})) {
+            self.palette_open = false;
+            self.pal_query.clearRetainingCapacity();
+            return;
+        }
+        if (key.matches(vaxis.Key.enter, .{})) return self.paletteRun();
+        if (key.matches(vaxis.Key.up, .{}) or key.matches('k', .{ .ctrl = true })) return self.palMove(-1);
+        if (key.matches(vaxis.Key.down, .{}) or key.matches('j', .{ .ctrl = true })) return self.palMove(1);
+        if (key.matches(vaxis.Key.page_up, .{})) return self.palMove(-@as(isize, @intCast(self.palVisible())));
+        if (key.matches(vaxis.Key.page_down, .{})) return self.palMove(@intCast(self.palVisible()));
+        if (key.matches(vaxis.Key.backspace, .{})) {
+            if (self.pal_query.pop() != null) try self.paletteRebuild();
+            return;
+        }
+        if (key.mods.ctrl or key.mods.alt or key.mods.super) return; // combos are consumed
+        if (key.text) |text| {
+            var added = false;
+            for (text) |ch| {
+                if (ch >= 0x20 and ch != 0x7f) {
+                    try self.pal_query.append(self.alloc, ch);
+                    added = true;
+                }
+            }
+            if (added) try self.paletteRebuild();
+            return;
+        }
+        if (key.codepoint >= 0x20 and key.codepoint < 0x7f) {
+            try self.pal_query.append(self.alloc, @intCast(key.codepoint));
+            try self.paletteRebuild();
+        }
+    }
+
+    fn paintPalette(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface) void {
+        const g = self.paletteGeo();
+        if (g.w < 12 or g.h < 5) return;
+        // Clear with the terminal background: no fill color anywhere.
+        for (0..g.h) |i| self.fill(surface, g.x, g.x + g.w, g.y + @as(u16, @intCast(i)), .{});
+        const border: Style = .{ .fg = self.rule() };
+        for ([_]struct { row: u16, left: []const u8, right: []const u8 }{
+            .{ .row = g.y, .left = "┌", .right = "┐" },
+            .{ .row = g.y + g.h - 1, .left = "└", .right = "┘" },
+        }) |edge| {
+            surface.writeCell(g.x, edge.row, .{ .char = .{ .grapheme = edge.left, .width = 1 }, .style = border });
+            surface.writeCell(g.x + g.w - 1, edge.row, .{ .char = .{ .grapheme = edge.right, .width = 1 }, .style = border });
+            var col = g.x + 1;
+            while (col + 1 < g.x + g.w) : (col += 1) {
+                surface.writeCell(col, edge.row, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = border });
+            }
+        }
+        for (1..g.h - 1) |i| {
+            const row = g.y + @as(u16, @intCast(i));
+            surface.writeCell(g.x, row, .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border });
+            surface.writeCell(g.x + g.w - 1, row, .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border });
+        }
+        const inner: u16 = g.w -| 4;
+        // Title centered over the top border.
+        const title = " Go to ";
+        const tw: u16 = @intCast(@min(ctx.stringWidth(title), @as(usize, g.w)));
+        self.paint(ctx, surface, g.x + (g.w - tw) / 2, g.y, g.x + (g.w + tw) / 2, title, .{ .fg = self.accent(), .bold = true });
+        // Input line.
+        const prompt = "> ";
+        self.paint(ctx, surface, g.x + 2, g.y + 1, g.x + g.w -| 2, prompt, self.mutedStyle());
+        self.paint(ctx, surface, g.x + 4, g.y + 1, g.x + g.w -| 2, self.pal_query.items, .{});
+        const qw: u16 = @intCast(@min(ctx.stringWidth(self.pal_query.items), @as(usize, inner)));
+        surface.writeCell(@min(g.x + 4 + qw, g.x + g.w -| 2), g.y + 1, .{
+            .char = .{ .grapheme = "▌", .width = 1 },
+            .style = .{ .fg = self.accent(), .bold = true },
+        });
+        // Result rows.
+        const results = self.pal_results.items;
+        const vis = self.palVisible();
+        if (results.len == 0) {
+            const t: []const u8 = if (self.pal_query.items.len > 0) "no matches" else "type to search";
+            self.paint(ctx, surface, g.x + 2, g.y + 2, g.x + g.w -| 2, t, self.mutedStyle());
+        }
+        var row: usize = 0;
+        while (row < vis) : (row += 1) {
+            const idx = self.pal_top + row;
+            if (idx >= results.len) break;
+            const y = g.y + 2 + @as(u16, @intCast(row));
+            const r = results[idx];
+            const selected = idx == self.pal_sel;
+            const hovered = self.hover != null and self.hover.? == y;
+            var style: Style = .{};
+            if (hovered) style.ul_style = .single;
+            if (selected) {
+                style.bold = true;
+                style.fg = self.accent();
+            }
+            const t = self.palTitle(r);
+            const label = self.palLabel(ctx, r);
+            const lw: u16 = if (label.len > 0)
+                @intCast(@min(ctx.stringWidth(label), @max(inner / 3, 10)))
+            else
+                0;
+            const tlimit = if (lw > 0) g.x + g.w -| (lw + 4) else g.x + g.w -| 2;
+            self.paint(ctx, surface, g.x + 2, y, tlimit, t, style);
+            if (lw > 0) {
+                self.paint(ctx, surface, g.x + g.w -| (lw + 2), y, g.x + g.w -| 2, label, self.mutedStyle());
+            }
+        }
+        // Footer.
+        self.paint(ctx, surface, g.x + 2, g.y + g.h -| 2, g.x + g.w -| 2, "↑↓ move · ↵ open · esc close", self.mutedStyle());
+    }
+
+    // ---- scrollbars -------------------------------------------------------
+
+    /// Tree scrollbar at the right edge of the tree pane, only on overflow.
+    fn treeScrollbar(self: *Model) ?ScrollGeom {
+        if (self.zen) return null;
+        if (self.width < 100 and self.focus != .tree) return null;
+        const pane_right: u16 = if (self.width < 100) self.width else self.treeWidth();
+        const visible = self.bodyHeight();
+        const total = self.rows.items.len;
+        if (total <= visible or visible == 0) return null;
+        const g = thumbGeom(total, visible, self.tree_top);
+        return .{
+            .col = pane_right -| 1,
+            .top = self.bodyTop(),
+            .len = visible,
+            .thumb_top = self.bodyTop() + @as(u16, @intCast(g.pos)),
+            .thumb_len = @intCast(g.len),
+        };
+    }
+
+    /// Doc scrollbar at the right edge of the doc pane, only on overflow.
+    fn docScrollbar(self: *Model) ?ScrollGeom {
+        if (self.zen) return null;
+        if (self.width < 100 and self.focus != .doc) return null;
+        const visible = self.docVisible();
+        const total = self.doc_lines.len;
+        if (total <= visible or visible == 0) return null;
+        const g = thumbGeom(total, visible, self.doc_top);
+        return .{
+            .col = self.width -| 1,
+            .top = self.bodyTop() + 5,
+            .len = visible,
+            .thumb_top = self.bodyTop() + 5 + @as(u16, @intCast(g.pos)),
+            .thumb_len = @intCast(g.len),
+        };
+    }
+
+    fn paintScrollbar(self: *Model, surface: vxfw.Surface, sb: ScrollGeom) void {
+        var y = sb.top;
+        while (y < sb.top + sb.len) : (y += 1) {
+            surface.writeCell(sb.col, y, .{ .char = .{ .grapheme = "│", .width = 1 }, .style = self.mutedStyle() });
+        }
+        y = sb.thumb_top;
+        while (y < sb.thumb_top + sb.thumb_len) : (y += 1) {
+            surface.writeCell(sb.col, y, .{ .char = .{ .grapheme = "▌", .width = 1 }, .style = .{ .fg = self.accent() } });
+        }
+    }
+
+    /// Proportional jump for a click (or thumb drag) at screen `row`.
+    fn treeScrollTo(self: *Model, sb: ScrollGeom, row: i16) void {
+        if (row < sb.top) return;
+        const rel: usize = @intCast(@min(row - @as(i16, @intCast(sb.top)), @as(i16, @intCast(sb.len - 1))));
+        const span = sb.len - sb.thumb_len;
+        if (span == 0) return;
+        const maxtop = self.maxTreeTop();
+        self.tree_top = @min(maxtop, rel * maxtop / span);
+    }
+
+    fn docScrollTo(self: *Model, sb: ScrollGeom, row: i16) void {
+        if (row < sb.top) return;
+        const rel: usize = @intCast(@min(row - @as(i16, @intCast(sb.top)), @as(i16, @intCast(sb.len - 1))));
+        const span = sb.len - sb.thumb_len;
+        if (span == 0) return;
+        const maxtop = self.maxDocTop();
+        self.doc_top = @min(maxtop, rel * maxtop / span);
+    }
+
     // ---- events ----------------------------------------------------------
 
     fn handleEvent(self: *Model, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
@@ -701,11 +1110,16 @@ const Model = struct {
 
     fn handleKey(self: *Model, ctx: *vxfw.EventContext, key: vaxis.Key) !void {
         self.idle = 0;
+        if (self.palette_open) return self.handlePaletteKey(key);
         if (self.help) {
             self.help = false;
             return;
         }
         if (self.zen) {
+            if (key.matches('p', .{ .ctrl = true })) {
+                self.openPalette();
+                return;
+            }
             if (key.matches('z', .{}) or key.matches(vaxis.Key.escape, .{})) {
                 self.zen = false;
                 return;
@@ -781,6 +1195,10 @@ const Model = struct {
         if (key.matches('t', .{})) {
             self.theme = theme.next(self.theme);
             self.toast_left = 2;
+            return;
+        }
+        if (key.matches('p', .{ .ctrl = true })) {
+            self.openPalette();
             return;
         }
         if (key.matches('z', .{})) {
@@ -883,7 +1301,7 @@ const Model = struct {
     fn handleMouse(self: *Model, ctx: *vxfw.EventContext, mouse: vaxis.Mouse) !void {
         _ = ctx;
         self.idle = 0;
-        if (self.zen) {
+        if (self.zen and !self.palette_open) {
             switch (mouse.type) {
                 .press => switch (mouse.button) {
                     .wheel_up => self.doc_top -|= 3,
@@ -908,14 +1326,36 @@ const Model = struct {
                     }
                     return;
                 }
+                if (self.drag_sb == .tree) {
+                    if (self.treeScrollbar()) |sb| self.treeScrollTo(sb, mouse.row);
+                    return;
+                }
+                if (self.drag_sb == .doc) {
+                    if (self.docScrollbar()) |sb| self.docScrollTo(sb, mouse.row);
+                    return;
+                }
+                if (self.palette_open) {
+                    const g = self.paletteGeo();
+                    const inside = mouse.col >= @as(i16, @intCast(g.x)) and
+                        mouse.col < @as(i16, @intCast(g.x + g.w)) and
+                        mouse.row >= @as(i16, @intCast(g.y)) and
+                        mouse.row < @as(i16, @intCast(g.y + g.h));
+                    self.hover = if (inside) @intCast(mouse.row) else null;
+                    return;
+                }
                 self.hover = if (in_body) @intCast(mouse.row) else null;
             },
             .release => {
                 self.drag_sep = false;
+                self.drag_sb = .none;
                 self.hover = null;
             },
             .press => switch (mouse.button) {
                 .wheel_up => {
+                    if (self.palette_open) {
+                        self.palScroll(-1);
+                        return;
+                    }
                     if (mouse.col >= 0 and mouse.col < tree_w) {
                         self.tree_top = self.tree_top -| 3;
                     } else {
@@ -923,6 +1363,10 @@ const Model = struct {
                     }
                 },
                 .wheel_down => {
+                    if (self.palette_open) {
+                        self.palScroll(1);
+                        return;
+                    }
                     if (mouse.col >= 0 and mouse.col < tree_w) {
                         self.tree_top = @min(self.tree_top + 3, self.maxTreeTop());
                     } else {
@@ -930,13 +1374,37 @@ const Model = struct {
                     }
                 },
                 .left => {
+                    if (self.palette_open) {
+                        self.paletteClick(mouse.col, mouse.row);
+                        return;
+                    }
                     if (self.tabsVisible() and mouse.row == 0 and mouse.col >= 0) {
                         self.clickTab(mouse.col);
                         return;
                     }
+                    if (self.treeScrollbar()) |sb| {
+                        if (mouse.col == sb.col and mouse.row >= sb.top and mouse.row < sb.top + sb.len) {
+                            if (mouse.row >= sb.thumb_top and mouse.row < sb.thumb_top + sb.thumb_len) {
+                                self.drag_sb = .tree;
+                            } else {
+                                self.treeScrollTo(sb, mouse.row);
+                            }
+                            return;
+                        }
+                    }
                     if (self.width >= 100 and mouse.col >= 0 and @abs(mouse.col - tree_w) <= 1) {
                         self.drag_sep = true;
                         return;
+                    }
+                    if (self.docScrollbar()) |sb| {
+                        if (mouse.col == sb.col and mouse.row >= sb.top and mouse.row < sb.top + sb.len) {
+                            if (mouse.row >= sb.thumb_top and mouse.row < sb.thumb_top + sb.thumb_len) {
+                                self.drag_sb = .doc;
+                            } else {
+                                self.docScrollTo(sb, mouse.row);
+                            }
+                            return;
+                        }
                     }
                     if (!in_body) return;
                     const y: usize = @intCast(mouse.row - body_top);
@@ -1045,6 +1513,7 @@ const Model = struct {
         if (self.zen) {
             self.paintZen(ctx, surface);
             if (self.help) self.paintHelp(ctx, surface);
+            if (self.palette_open) self.paintPalette(ctx, surface);
             return surface;
         }
 
@@ -1053,6 +1522,7 @@ const Model = struct {
         self.paintBody(ctx, surface);
         self.paintStatus(ctx, surface);
         if (self.help) self.paintHelp(ctx, surface);
+        if (self.palette_open) self.paintPalette(ctx, surface);
         return surface;
     }
 
@@ -1167,6 +1637,9 @@ const Model = struct {
     fn paintTree(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface, x0: u16, x1: u16) void {
         const h = self.bodyHeight();
         const tree_focus = self.focus == .tree;
+        const sb = self.treeScrollbar();
+        // Reserve the scrollbar column so text is never overdrawn.
+        const lim = if (sb != null) x1 -| 1 else x1;
         var row: u16 = 0;
         while (row < h) : (row += 1) {
             const idx = self.tree_top + row;
@@ -1175,12 +1648,9 @@ const Model = struct {
             const entry = self.rows.items[idx];
             if (entry.kind == .blank) continue;
             const is_selected = idx == self.selected;
-            const is_hover = !is_selected and self.hover != null and self.hover.? == y;
-            var style: Style = .{};
-            if (!tree_focus) style.dim = true;
-            if (is_hover) style.ul_style = .single;
+            const is_hover = !is_selected and !self.palette_open and
+                self.hover != null and self.hover.? == y;
             if (is_selected) {
-                style.bold = true;
                 surface.writeCell(x0, y, .{
                     .char = .{ .grapheme = "▌", .width = 1 },
                     .style = .{ .fg = if (tree_focus) self.accent() else self.muted() },
@@ -1188,34 +1658,70 @@ const Model = struct {
             }
 
             switch (entry.kind) {
-                .group => {
-                    const list = self.items[@backingInt(entry.section)].items;
-                    style.bold = true;
-                    var cw: u16 = 0;
-                    var count: []const u8 = "";
-                    if (self.width >= 60 and list.len > 0) {
-                        count = std.fmt.allocPrint(ctx.arena, "{d}", .{list.len}) catch "";
-                        cw = @intCast(@min(ctx.stringWidth(count), @as(usize, x1 -| x0)));
-                    }
-                    const label = std.fmt.allocPrint(ctx.arena, "{s} {s}", .{
-                        if (self.collapsed[@backingInt(entry.section)]) "▸" else "▾",
-                        sectionName(entry.section),
-                    }) catch sectionName(entry.section);
-                    self.paint(ctx, surface, x0 + 1, y, x1 -| (cw + 1), label, style);
-                    if (cw > 0) self.paint(ctx, surface, x1 -| cw, y, x1, count, self.mutedStyle());
-                },
+                .group => self.paintGroupRow(ctx, surface, entry, x0, lim, y, tree_focus, is_hover),
                 .item => {
                     const item = self.items[@backingInt(entry.section)].items[entry.item];
-                    const tw: u16 = @intCast(@min(ctx.stringWidth(item.title), @as(usize, x1 -| (x0 + 3))));
+                    var style: Style = .{};
+                    if (!tree_focus) style.dim = true;
+                    if (is_hover) style.ul_style = .single;
+                    if (is_selected) style.bold = true;
+                    const tw: u16 = @intCast(@min(ctx.stringWidth(item.title), @as(usize, lim -| (x0 + 3))));
                     self.paint(ctx, surface, x0 + 3, y, x0 + 3 + tw, item.title, style);
                     if (item.detail.len > 0) {
                         const sep = std.fmt.allocPrint(ctx.arena, "  · {s}", .{item.detail}) catch "";
-                        self.paint(ctx, surface, x0 + 3 + tw, y, x1 -| 1, sep, self.mutedStyle());
+                        self.paint(ctx, surface, x0 + 3 + tw, y, lim -| 1, sep, self.mutedStyle());
                     }
                 },
                 .blank => {},
             }
         }
+        // Sticky group header while the top of the view sits inside a group
+        // whose header scrolled off; the selected row is never covered.
+        if (self.stickyGroup()) |g| {
+            const y = self.bodyTop();
+            self.fill(surface, x0, lim, y, .{});
+            self.paintGroupRow(ctx, surface, g, x0, lim, y, tree_focus, false);
+        }
+        if (sb) |geo| self.paintScrollbar(surface, geo);
+    }
+
+    /// The group header to pin over the first body row, if any: the first
+    /// visible non-blank row is an item whose group header scrolled off.
+    fn stickyGroup(self: *Model) ?Row {
+        const rows = self.rows.items;
+        if (rows.len == 0 or self.tree_top >= rows.len) return null;
+        if (self.tree_top == self.selected) return null;
+        var k = self.tree_top;
+        while (k < rows.len and rows[k].kind == .blank) k += 1;
+        if (k >= rows.len or rows[k].kind != .item) return null;
+        if (k == self.selected) return null;
+        var j = k;
+        while (j > 0 and rows[j].kind != .group) j -= 1;
+        if (rows[j].kind != .group or j >= self.tree_top) return null;
+        return rows[j];
+    }
+
+    fn paintGroupRow(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface, entry: Row, x0: u16, lim: u16, y: u16, tree_focus: bool, hovered: bool) void {
+        const list = self.items[@backingInt(entry.section)].items;
+        surface.writeCell(x0 + 1, y, .{
+            .char = .{ .grapheme = sectionGlyph(entry.section), .width = 1 },
+            .style = self.mutedStyle(),
+        });
+        var style: Style = .{ .bold = true };
+        if (!tree_focus) style.dim = true;
+        if (hovered) style.ul_style = .single;
+        var cw: u16 = 0;
+        var count: []const u8 = "";
+        if (self.width >= 60 and list.len > 0) {
+            count = std.fmt.allocPrint(ctx.arena, "{d}", .{list.len}) catch "";
+            cw = @intCast(@min(ctx.stringWidth(count), @as(usize, lim -| x0)));
+        }
+        const label = std.fmt.allocPrint(ctx.arena, "{s} {s}", .{
+            if (self.collapsed[@backingInt(entry.section)]) "▸" else "▾",
+            sectionName(entry.section),
+        }) catch sectionName(entry.section);
+        self.paint(ctx, surface, x0 + 3, y, lim -| (cw + 1), label, style);
+        if (cw > 0) self.paint(ctx, surface, lim -| cw, y, lim, count, self.mutedStyle());
     }
 
     fn paintDoc(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface, x0: u16, x1: u16) void {
@@ -1232,11 +1738,7 @@ const Model = struct {
         self.paint(ctx, surface, dx, top, dx + rw, self.docCrumb(ctx, item, group_row), self.mutedStyle());
         const title = if (item) |it| it.title else if (group_row) |gr| sectionName(gr.section) else "";
         self.paint(ctx, surface, dx, top + 1, dx + rw, title, .{ .bold = true });
-        const meta: []const u8 = if (item) |it| it.detail else if (group_row) |gr|
-            std.fmt.allocPrint(ctx.arena, "{d} items", .{self.items[@backingInt(gr.section)].items.len}) catch ""
-        else
-            "";
-        self.paint(ctx, surface, dx, top + 2, dx + rw, meta, self.mutedStyle());
+        self.paintChips(ctx, surface, dx, top + 2, dx + rw, item, group_row);
         var col = dx;
         while (col < dx + rw) : (col += 1) {
             surface.writeCell(col, top + 3, .{
@@ -1245,6 +1747,30 @@ const Model = struct {
             });
         }
         self.paintDocLines(ctx, surface, dx, dx + rw, top + 5, h -| 6);
+        if (self.docScrollbar()) |sb| self.paintScrollbar(surface, sb);
+    }
+
+    /// Document header chips: the accent ID (and status, in the muted tail)
+    /// for tasks, the muted path for documents, the count for group pages.
+    /// paint() truncates either chip with `…` at the reading width.
+    fn paintChips(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface, dx: u16, y: u16, limit: u16, item: ?Item, group_row: ?Row) void {
+        var accent_chip: []const u8 = "";
+        var muted_chip: []const u8 = "";
+        if (item) |it| {
+            accent_chip = it.chip;
+            muted_chip = if (it.sub.len > 0) it.sub else if (it.chip.len > 0) it.detail else it.path;
+        } else if (group_row) |gr| {
+            muted_chip = std.fmt.allocPrint(ctx.arena, "{d} items", .{self.items[@backingInt(gr.section)].items.len}) catch "";
+        }
+        if (accent_chip.len > 0) {
+            const aw: u16 = @intCast(@min(ctx.stringWidth(accent_chip), @as(usize, limit - dx)));
+            self.paint(ctx, surface, dx, y, limit, accent_chip, .{ .fg = self.accent() });
+            if (muted_chip.len > 0 and dx + aw + 2 < limit) {
+                self.paint(ctx, surface, dx + aw + 2, y, limit, muted_chip, self.mutedStyle());
+            }
+        } else if (muted_chip.len > 0) {
+            self.paint(ctx, surface, dx, y, limit, muted_chip, self.mutedStyle());
+        }
     }
 
     fn paintZen(self: *Model, ctx: vxfw.DrawContext, surface: vxfw.Surface) void {
@@ -1408,6 +1934,7 @@ const Model = struct {
             " enter · space    open or fold",
             " tab              switch pane",
             " /                filter",
+            " ctrl+p           go to",
             " [ · ]            switch tabs",
             " x                close tab",
             " t                cycle theme",
@@ -1420,7 +1947,7 @@ const Model = struct {
             " The tree refreshes when files change.",
         };
         const w: u16 = @min(48, self.width -| 4);
-        const h: u16 = @min(20, self.height -| 2);
+        const h: u16 = @min(21, self.height -| 2);
         const x = (self.width - w) / 2;
         const y = (self.height - h) / 2;
         // Clear with the terminal background: no fill color anywhere.
@@ -1524,6 +2051,15 @@ fn layoutDoc(ctx: vxfw.DrawContext, a: Allocator, text: []const u8, width: u16) 
     return out.items;
 }
 
+/// Thumb length and proportional position for a track `visible` cells long
+/// over `total` rows with `top` scrolled off.
+fn thumbGeom(total: usize, visible: usize, top: usize) struct { len: usize, pos: usize } {
+    if (visible == 0 or total <= visible) return .{ .len = 0, .pos = 0 };
+    const len = @max(@as(usize, 1), visible * visible / total);
+    const span = visible - len;
+    return .{ .len = len, .pos = top * span / (total - visible) };
+}
+
 fn matchesFilter(item: Item, needle: []const u8) bool {
     return containsIgnoreCase(item.title, needle) or
         containsIgnoreCase(item.key, needle) or
@@ -1600,6 +2136,19 @@ test "containing filter ignores case" {
     try std.testing.expect(containsIgnoreCase("ZTD TUI", "tui"));
     try std.testing.expect(!containsIgnoreCase("ztd", "tui"));
     try std.testing.expect(containsIgnoreCase("abc", ""));
+}
+
+test "thumb geometry stays inside the track" {
+    // Long content: one-cell thumb that reaches the end of the track.
+    const g = thumbGeom(100, 10, 90);
+    try std.testing.expectEqual(@as(usize, 1), g.len);
+    try std.testing.expectEqual(@as(usize, 9), g.pos);
+    // Half-visible content: a proportional thumb at the middle.
+    const mid = thumbGeom(20, 10, 5);
+    try std.testing.expectEqual(@as(usize, 5), mid.len);
+    try std.testing.expectEqual(@as(usize, 2), mid.pos);
+    // No overflow: nothing to draw.
+    try std.testing.expectEqual(@as(usize, 0), thumbGeom(5, 10, 0).len);
 }
 
 test "wrap keeps words and hard-breaks long ones" {
