@@ -19,10 +19,12 @@ authorization, and it never changes the store root.
 
 1. Resolve `ztd show ID` or query `list --list next` with the known context,
    client and project filters — or the defaults from a valid `data.binding`
-   when no scope exists anywhere. Without a selection, pick an executable MIT whose
-   priority you know; if you do not know it, propose a clear next action. In a
-   global selection do not dump client details; ask only when there is no clear
-   candidate. Do not execute closed or blocked tasks.
+   when no scope exists anywhere. Without a selection, if today's plan exists,
+   read its MITs section and propose one of those IDs; otherwise pick an
+   executable MIT whose priority you know, or propose a clear next action. Do
+   not infer MITs from the `ztd plan` ID dump. In a global selection do not dump
+   client details; ask only when there is no clear candidate. Do not execute
+   closed or blocked tasks.
    "What should I do now?" proposes an action and offers to start; it does not
    start work without execution intent nor trigger a global external review.
 2. Define an observable outcome and a small first step; keep a single task.
@@ -48,12 +50,14 @@ authorization, and it never changes the store root.
    safe on its own and does not rely on the `ztd` agent being selected. Capture
    interruptions in the inbox without changing focus. For physical actions,
    guide the user and wait for evidence of completion before marking them done.
-6. Record the real outcome with `ztd move ID archive --field 'resolution: completed'`
+6. Record the real outcome with
+   `ztd move ID archive --field 'resolution: completed — <evidence>'`
    (and the needed context fields), or `ztd move ID waiting --field 'waiting_on: ...'`.
-   For partials, keep the ID and update the next step with
-   `ztd move ID next --text '...'`; never duplicate the task or edit the list by
-   hand. `ztd` verifies the move; run `check` when you changed references or
-   structure, not to repeat a validation already in force.
+   Do not archive when the result has no observable evidence; keep the task in
+   `next` and say what is missing. For partials, keep the ID and update the
+   next step with `ztd move ID next --text '...'`; never duplicate the task or
+   edit the list by hand. `ztd` verifies the move; run `check` when you changed
+   references or structure, not to repeat a validation already in force.
 7. Add a short wrap-up to the existing plan with outcome, checks and limits;
    link the detailed scope record if any, without repeating its chronology.
    Keep task state only in its canonical list and avoid copying the same detail

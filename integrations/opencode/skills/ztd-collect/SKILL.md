@@ -10,6 +10,8 @@ knowledge or adoption for a normal capture: `ztd` reserves the ID and verifies
 the write.
 
 1. If there is no text or attached content to capture, ask what to note down.
+   A note kept on paper or on a phone is a valid capture; transcribe it in the
+   next session and process it then, without keeping a parallel list.
 2. Run `ztd capture` with the declared root (`--root`/`ZTD_ROOT`) and the text
    as a quoted argument (never write the list by hand). The binary takes the
    local date, reserves IDs under lock and verifies the file before replying.

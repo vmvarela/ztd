@@ -98,6 +98,9 @@ field names on a task line: `context`, `client`, `project`, `captured_at`,
 | `archive` | `resolution`; `closed_at` is added if missing |
 | active list | no `resolution` and no `closed_at` |
 
+`waiting_on` is free text. A trailing `@YYYY-MM-DD` is a convention the agent
+skills use for follow-up; the CLI does not parse it.
+
 `project` must be a registered path under `lists/projects/`, or a suffix that
 resolves to exactly one registered path. A suffix with zero or multiple matches
 is `unknown_project`.

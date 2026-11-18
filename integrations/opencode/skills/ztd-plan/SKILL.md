@@ -23,16 +23,22 @@ source.
    pending accesses without blocking the plan. Do not process or automatically
    import every capture or finding. For future/past dates do not simulate that
    day's coverage.
-2. Read the day plan if it exists and the week plan; consult the journal only
-   when it affects capacity or priorities. Preserve results and decisions
-   already recorded.
+2. Read the day plan if it exists, yesterday's plan and the week plan; consult
+   the journal only when it affects capacity or priorities. Preserve results
+   and decisions already recorded. If yesterday's plan exists, list its MITs
+   still in `next` as capacity input and those in `waiting` as blocked; do not
+   move them.
 3. Consider commitments and known availability; ask only what is missing to choose.
 4. Pick 1–3 MITs in total, not per context. Connect one to the goal when one
    exists. For each MIT, note in one line which outcome would make it enough today.
 5. Use `templates/day.md` for `plans/daily/YYYY-MM-DD.md`.
-   Reference canonical IDs and propose blocks with slack and batched small tasks.
+   Reference canonical IDs and propose blocks with slack and batched small
+   tasks. Omit sections that have nothing to record.
 6. Reuse the file when it exists, preserving results; do not drag open items
    along automatically nor create new tasks to fill gaps.
+7. After saving the plan, mark the `plan` routine done with
+   `ztd routine done plan` when `routines/state.md` has that row; if the row is
+   absent, say so and continue.
 
 ## Week
 
@@ -41,6 +47,7 @@ source.
    a guide.
 3. Save `plans/weekly/YYYY-MM-DD.md` from `templates/week.md`, with IDs and
    proposed blocks according to capacity. Honor real dates from every client.
+   Omit sections that have nothing to record.
 
 ## Goal
 

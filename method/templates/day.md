@@ -1,12 +1,14 @@
 # Day <YYYY-MM-DD>
 
+Omit any section with nothing to record.
+
 ## Goal and sub-goal
 
 ## Calendar and capacity
 
 Known commitments, available time and slack.
 
-## Source coverage
+## Source coverage (optional)
 
 Date and coverage; links to scope records, no client details.
 

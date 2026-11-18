@@ -12,7 +12,8 @@ only in the "Information" branch.
 ## Scope and inbox queries
 
 1. With no selection, `/ztd/inbox` processes **only the local capture** with
-   `ztd list --list inbox`; if it is empty, say so and stop.
+   `ztd list --list inbox`; if it is empty, say so, mark the `inbox` routine
+   done when its row exists (`ztd routine done inbox`) and stop.
    An ID limits processing to that entry with `show ID`. A scope filters the
    local inbox; an explicit source queries that source. "All" includes the
    local inbox and the registered sources of every scope, even when the local
@@ -100,7 +101,10 @@ stays as defined above, and captures stay scope-free.
    moves and verifies that only one canonical location remains.
     Do not edit the lists directly. Run `check` when closing a batch of moves
     or reference changes, not after a query with no changes.
-   If a decision is still missing, leave it in the inbox with the question pending.
+   If a decision is still missing, ask for it in this pass. If the answer does
+   not arrive, move the entry to `someday` as deferred, or to `waiting` when it
+   depends on a third party, adding `waiting_on` with an `@YYYY-MM-DD` follow-up
+   date when known. Do not leave it in the inbox.
 
 ## Give a place
 
@@ -119,3 +123,8 @@ left pending, with the interval/repositories consulted where applicable.
 Reviewing a source does not mean emptying its backlog. Do not declare every
 inbox processed if some were not consulted or keep pending decisions; an empty
 local list is not enough.
+
+When the pass covered the whole local inbox and it is empty afterwards, mark
+the `inbox` routine done with `ztd routine done inbox` when `routines/state.md`
+has that row; if the row is absent, say so and continue. A pass limited to an
+ID, a scope or only external sources does not mark it.

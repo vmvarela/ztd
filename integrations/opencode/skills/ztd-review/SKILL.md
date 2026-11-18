@@ -18,6 +18,8 @@ requested period. Limit journal, calendar and reviews to the requested period.
    inaccessible external source, ask for its relevant commitments and record
    that limitation.
 4. Review next actions, waitings, someday and projects with filtered queries.
+   Flag waitings whose `waiting_on` ends with an `@YYYY-MM-DD` date earlier
+   than today; list them with the date and the dependency.
    With no requested or selected scope, a valid `data.binding`
    (`ztd status --json`) may default those filters; a malformed binding means
    stop and ask first — a routing hint only, never a root source.
@@ -27,6 +29,9 @@ requested period. Limit journal, calendar and reviews to the requested period.
 5. Review the habit in practice in `adoption.md`; adjust from real experience.
 6. Save `reviews/YYYY-MM-DD-weekly.md` with the review template and load
    `ztd-plan` for the next sub-goal/week. About 30 minutes as a guide.
+7. After saving the review, mark the `review` routine done with
+   `ztd routine done review` when `routines/state.md` has that row; if the row
+   is absent, say so and continue. The monthly review does not mark it.
 
 ## Monthly review
 

@@ -93,9 +93,11 @@ The store root is the task-data directory. The root resolves as `--root` >
 `ztd status [--json]` reports that root, its source (`flag`/`env`/`home`),
 whether the store exists and its format; it never creates files.
 `ztd init` creates the canonical structure (`contexts.md`, `config.json`,
-`inbox.md`, `lists/`, `plans/`, `routines/`, `README.md`). The method adds the
-files below, which you create as you adopt each habit (paths relative to the
-store root):
+`inbox.md`, `lists/`, `plans/`, `routines/`, `README.md`) and seeds the
+`inbox`, `plan` and `review` routine rows. They are scheduling defaults, not
+obligations: delete the `review` row until you adopt the weekly habit, and
+restore it when you do. The method adds the files below, which you create as
+you adopt each habit (paths relative to the store root):
 
 | File | Contents |
 | --- | --- |
@@ -113,6 +115,8 @@ Format notes (format 2): `contexts.md` is a Markdown table with `Context` and
 `Use` columns (plus optional `Clients` and `Knowledge` columns);
 `routines/state.md` is a table `routine | cadence | last`, where cadence is
 `daily` or `weekly:` plus a day token (`mon`…`sun`, Monday-first).
+`waiting_on` is free text; a trailing `@YYYY-MM-DD` records the follow-up date
+the weekly review checks, and the CLI does not parse it.
 
 Tasks are mutated only through the `ztd` CLI; IDs are the canonical reference
 and plans, reviews and cards reference them without duplicating state. Every

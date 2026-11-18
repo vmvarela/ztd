@@ -1,5 +1,7 @@
 # Week of <YYYY-MM-DD, Monday>
 
+Omit any section with nothing to record.
+
 ## Goal and sub-goal
 
 ## Commitments and capacity
