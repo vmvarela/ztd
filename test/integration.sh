@@ -499,7 +499,7 @@ rc=0; "$BIN" --root "$TMP" migrate --from "$TMP/v1" --to "$TMP/v3" >/dev/null 2>
 
 # Every command the binary dispatches must be visible in --help.
 HELP="$("$BIN" --help 2>&1)"
-for c in init status migrate capture list show move plan check recover due routine mcp version \
+for c in init status install migrate capture list show move plan check recover due routine mcp version \
          agent-capture agent-checkpoint agent-prepare agent-remember agent-recall \
          agent-backup agent-export agent-restore; do
     printf '%s' "$HELP" | grep -q "  $c" || { echo "help omits $c" >&2; exit 1; }

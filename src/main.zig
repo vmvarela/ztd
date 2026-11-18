@@ -10,6 +10,7 @@ const migrate_mod = @import("migrate.zig");
 const mcp = @import("mcp.zig");
 const agent = @import("agent.zig");
 const db = @import("db.zig");
+const install_mod = @import("install.zig");
 
 const builtin = @import("builtin");
 const build_options = @import("build_options");
@@ -252,6 +253,13 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
     if (std.mem.eql(u8, cmd, "status")) {
         const source: []const u8 = if (root_flag) "flag" else if (root != null) "env" else "home";
         return cmdStatus(ctx, root, source);
+    }
+
+    // `install` only publishes embedded assets: no store, no today.
+    if (std.mem.eql(u8, cmd, "install")) {
+        if (rest.len != 1) return usage(ctx, "install needs an adapter: ztd install opencode");
+        if (!std.mem.eql(u8, rest[0], "opencode")) return usage(ctx, "unknown install adapter");
+        return cmdInstall(ctx, dry_run);
     }
 
     const today = if (today_arg) |t| platform.parseDate(t) catch return usage(ctx, "--today must be YYYY-MM-DD") else platform.today(ctx.io);
@@ -936,6 +944,78 @@ fn failCode(ctx: *Ctx, code: []const u8, err: anyerror) !u8 {
     return 1;
 }
 
+/// `ztd install opencode`: publishes the embedded skills/commands bundle into
+/// `$HOME/.config/opencode`. A conflict anywhere aborts with exit 1 and no
+/// writes; a run that writes reports `N installed, M updated, K unchanged`,
+/// with zero counters omitted.
+fn cmdInstall(ctx: *Ctx, dry_run: bool) !u8 {
+    const home = try store_mod.homeDir(ctx.io, ctx.alloc);
+    const rep = try install_mod.run(ctx.io, ctx.alloc, home, dry_run);
+    if (rep.conflicts.len > 0) {
+        if (ctx.json) {
+            var msg: std.ArrayList(u8) = .empty;
+            defer msg.deinit(ctx.alloc);
+            for (rep.conflicts, 0..) |c, i| {
+                if (i > 0) try msg.appendSlice(ctx.alloc, "; ");
+                try msg.appendSlice(ctx.alloc, c);
+            }
+            try writeJson(ctx, ErrOut{
+                .command = "install",
+                .@"error" = .{ .code = "conflict", .message = try msg.toOwnedSlice(ctx.alloc) },
+            });
+        } else {
+            for (rep.conflicts) |c| {
+                try stderr(ctx, "ztd: conflict: ");
+                try stderr(ctx, c);
+                try stderr(ctx, "\n");
+            }
+            var nbuf: [32]u8 = undefined;
+            const n = std.fmt.bufPrint(&nbuf, "{d}", .{rep.conflicts.len}) catch unreachable;
+            try stderr(ctx, "ztd: aborting before any writes (");
+            try stderr(ctx, n);
+            try stderr(ctx, " conflict(s))\n");
+        }
+        return 1;
+    }
+    if (ctx.json) {
+        try success(ctx, "install", .{
+            .adapter = "opencode",
+            .dry_run = dry_run,
+            .installed = rep.installed,
+            .updated = rep.updated,
+            .unchanged = rep.unchanged,
+            .version = version,
+        });
+    } else {
+        var buf: [160]u8 = undefined;
+        try stdout(ctx, summaryLine(&buf, dry_run, &rep));
+    }
+    return 0;
+}
+
+/// The single summary line; zero counters are omitted, and `--dry-run`
+/// reports `to install`/`to update` instead of past-tense results.
+fn summaryLine(buf: *[160]u8, dry_run: bool, rep: *const install_mod.Report) []const u8 {
+    const parts = [_]struct { n: usize, label: []const u8 }{
+        .{ .n = rep.installed, .label = if (dry_run) "to install" else "installed" },
+        .{ .n = rep.updated, .label = if (dry_run) "to update" else "updated" },
+        .{ .n = rep.unchanged, .label = "unchanged" },
+    };
+    var len: usize = 0;
+    for (parts) |p| {
+        if (p.n == 0) continue;
+        if (len > 0) {
+            @memcpy(buf[len..][0..2], ", ");
+            len += 2;
+        }
+        const piece = std.fmt.bufPrint(buf[len..], "{d} {s}", .{ p.n, p.label }) catch break;
+        len += piece.len;
+    }
+    if (len == 0) return "nothing to do\n"; // unreachable: the bundle is non-empty
+    buf[len] = '\n';
+    return buf[0 .. len + 1];
+}
+
 fn cmdStatus(ctx: *Ctx, root: ?[]const u8, source: []const u8) !u8 {
     const root_path = try store_mod.rootPath(ctx.io, ctx.alloc, root);
     const exists = store_mod.pathExists(ctx.io, root_path);
@@ -1164,6 +1244,7 @@ fn printHelp(ctx: *Ctx) !void {
         \\usage: ztd <command> [options]
         \\
         \\  init [path] [--local]       create a store (default $HOME/.ztd; --local = ./ztd)
+        \\  install opencode            publish skills and commands to ~/.config/opencode
         \\  migrate --from SRC --to DST [--dry-run]  convert a format-1 store to format 2
         \\  status                      show root, source, exists, format, binding
         \\  capture <text>... | --stdin capture tasks into the inbox
@@ -1205,4 +1286,5 @@ test {
     _ = @import("agent.zig");
     _ = @import("binding.zig");
     _ = @import("migrate.zig");
+    _ = @import("install.zig");
 }

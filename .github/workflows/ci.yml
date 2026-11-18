@@ -29,6 +29,9 @@ jobs:
       - name: Integration
         shell: bash
         run: bash test/integration.sh
+      - name: OpenCode install
+        shell: bash
+        run: bash test/install-opencode.sh
       - name: Smoke
         shell: bash
         run: |

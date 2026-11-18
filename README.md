@@ -26,6 +26,12 @@ zig build -Doptimize=ReleaseSafe
 Packages are published through Homebrew, WinGet, Scoop, npm, APT, RPM, APK,
 AUR and Nix. See [docs/install.md](docs/install.md).
 
+Publish the OpenCode integration (skills and commands) with:
+
+```bash
+ztd install opencode
+```
+
 ## Quick start
 
 ```bash

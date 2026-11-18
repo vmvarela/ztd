@@ -108,3 +108,16 @@ Requirements: Zig 0.17.0. No runtime dependencies.
 
 Root precedence for every command: `--root` > `ZTD_ROOT` > `~/.ztd`.
 The root is never discovered from the current directory.
+
+`ztd init` also seeds the six method templates into `<store>/templates/` when
+they are absent; an edited template is never overwritten.
+
+## OpenCode integration
+
+```bash
+ztd install opencode
+```
+
+Publishes the embedded skills and commands to `~/.config/opencode`. Assets an
+earlier `ztd` installed are upgraded in place; a file you edited aborts the
+run instead of being overwritten. `--dry-run` reports without writing.

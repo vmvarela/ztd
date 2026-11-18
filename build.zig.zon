@@ -16,5 +16,7 @@
         "install.ps1",
         "README.md",
         "LICENSE",
+        "integrations",
+        "method",
     },
 }

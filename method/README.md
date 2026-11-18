@@ -85,8 +85,8 @@ the next day. The book example's times are not mandatory.
 ## Store conventions
 
 The book's forms inspire the goal, week, day and review templates that live in
-[`templates/`](templates/); after `ztd init`, copy them to `templates/` at the
-store root (init only leaves that folder empty).
+[`templates/`](templates/); `ztd init` seeds them into `templates/` at the
+store root when they are absent (an edited template is never overwritten).
 
 The store root is the task-data directory. The root resolves as `--root` >
 `ZTD_ROOT` > `~/.ztd`; never derive it from the current directory.

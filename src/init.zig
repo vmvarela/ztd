@@ -2,6 +2,7 @@ const std = @import("std");
 const platform = @import("platform.zig");
 const routine = @import("routine.zig");
 const config_mod = @import("config.zig");
+const assets = @import("assets");
 const Store = @import("store.zig").Store;
 
 pub const Result = struct {
@@ -143,6 +144,7 @@ pub fn initWorkspace(io: std.Io, alloc: std.mem.Allocator, target: []const u8, d
         var created: std.ArrayList([]const u8) = .empty;
         for (dirs) |dir| try created.append(alloc, try alloc.dupe(u8, dir));
         for (files) |f| try created.append(alloc, try alloc.dupe(u8, f.path));
+        for (assets.templates) |t| try created.append(alloc, try alloc.dupe(u8, t.path));
         try created.append(alloc, try alloc.dupe(u8, routine.path));
         return .{ .root = try alloc.dupe(u8, ztd_path), .created = try created.toOwnedSlice(alloc) };
     }
@@ -172,6 +174,14 @@ pub fn initWorkspace(io: std.Io, alloc: std.mem.Allocator, target: []const u8, d
         if (store.exists(f.path)) continue;
         if (!dry_run) _ = try store.createIfMissing(f.path, f.content);
         try created.append(alloc, try alloc.dupe(u8, f.path));
+    }
+
+    // Method templates are seeded only when absent: an edited template is
+    // user data and is never overwritten, only reported when already missing.
+    for (assets.templates) |t| {
+        if (store.exists(t.path)) continue;
+        if (!dry_run and !try store.createIfMissing(t.path, t.data)) continue;
+        try created.append(alloc, try alloc.dupe(u8, t.path));
     }
 
     if (!store.exists(routine.path)) {
@@ -449,4 +459,88 @@ test "init refuses invalid plan storage before creating config or state" {
     const daily = try std.fs.path.join(alloc, &.{ store_path, "plans/daily" });
     defer alloc.free(daily);
     try std.testing.expect(pathExists(io, daily));
+}
+
+test "init seeds the method templates and never overwrites an edited one" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try alloc.dupe(u8, path_buf[0..n]);
+    defer alloc.free(base);
+
+    const store_path = try std.fs.path.join(alloc, &.{ base, "tpl" });
+    defer alloc.free(store_path);
+
+    const first = try initWorkspace(io, alloc, store_path, false);
+    defer alloc.free(first.root);
+    defer {
+        for (first.created) |p| alloc.free(p);
+        alloc.free(first.created);
+    }
+    for (assets.templates) |t| {
+        const p = try std.fs.path.join(alloc, &.{ store_path, t.path });
+        defer alloc.free(p);
+        const got = try std.Io.Dir.cwd().readFileAlloc(io, p, alloc, .limited(1 << 20));
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings(t.data, got);
+    }
+
+    // An edited template is user data: a later init keeps it and does not
+    // report it as created.
+    const day = try std.fs.path.join(alloc, &.{ store_path, "templates/day.md" });
+    defer alloc.free(day);
+    {
+        var f = try std.Io.Dir.cwd().createFile(io, day, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "my own plan\n");
+    }
+    const second = try initWorkspace(io, alloc, store_path, false);
+    defer alloc.free(second.root);
+    defer {
+        for (second.created) |p| alloc.free(p);
+        alloc.free(second.created);
+    }
+    for (second.created) |p| try std.testing.expect(!std.mem.eql(u8, p, "templates/day.md"));
+    const kept = try std.Io.Dir.cwd().readFileAlloc(io, day, alloc, .limited(1 << 20));
+    defer alloc.free(kept);
+    try std.testing.expectEqualStrings("my own plan\n", kept);
+
+    // A missing template is reported by --dry-run without being written, and
+    // written by the real run.
+    const week = try std.fs.path.join(alloc, &.{ store_path, "templates/week.md" });
+    defer alloc.free(week);
+    std.Io.Dir.cwd().deleteFile(io, week) catch {};
+    const dry = try initWorkspace(io, alloc, store_path, true);
+    defer alloc.free(dry.root);
+    defer {
+        for (dry.created) |p| alloc.free(p);
+        alloc.free(dry.created);
+    }
+    var reported = false;
+    for (dry.created) |p| {
+        if (std.mem.eql(u8, p, "templates/week.md")) reported = true;
+    }
+    try std.testing.expect(reported);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, week, .{}));
+
+    const third = try initWorkspace(io, alloc, store_path, false);
+    defer alloc.free(third.root);
+    defer {
+        for (third.created) |p| alloc.free(p);
+        alloc.free(third.created);
+    }
+    const restored = try std.Io.Dir.cwd().readFileAlloc(io, week, alloc, .limited(1 << 20));
+    defer alloc.free(restored);
+    var week_data: []const u8 = "";
+    for (assets.templates) |t| {
+        if (std.mem.eql(u8, t.path, "templates/week.md")) week_data = t.data;
+    }
+    try std.testing.expect(week_data.len > 0);
+    try std.testing.expectEqualStrings(week_data, restored);
 }

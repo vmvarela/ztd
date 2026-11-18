@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ztd OpenCode adapter installer.
 #
-# Installs the static skills/, commands/ and agents/ bundle that ships next to
-# this script into $HOME/.config/opencode/{skills,commands,agents}.
+# Installs the static skills/ and commands/ bundle that ships next to
+# this script into $HOME/.config/opencode/{skills,commands}.
 #
 # - Assets are resolved relative to this script, never the caller's cwd.
 # - It never initializes or modifies a ZTD store, never edits OpenCode
@@ -45,20 +45,20 @@ script_dir() {
 SCRIPT_DIR=$(script_dir "$0")
 cd "$SCRIPT_DIR"
 
-for bundle in skills commands agents; do
+for bundle in skills commands; do
     [ -d "$SCRIPT_DIR/$bundle" ] || usage "missing source bundle: $SCRIPT_DIR/$bundle"
 done
 
 # Source integrity: only regular files, no symlinks or special types. A
 # traversal error fails closed (exit 2) instead of being masked.
-bad=$(find skills commands agents ! -type d ! -type f -print) || {
+bad=$(find skills commands ! -type d ! -type f -print) || {
     echo "$me: source bundle traversal failed" >&2
     exit 2
 }
 [ -z "$bad" ] || usage "source bundle contains non-regular entries:
 $bad"
 
-list=$(find skills commands agents -type f -print) || {
+list=$(find skills commands -type f -print) || {
     echo "$me: source bundle traversal failed" >&2
     exit 2
 }

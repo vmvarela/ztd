@@ -2,7 +2,7 @@
 
 This folder is only an adapter: the neutral method lives in
 [`../../method/README.md`](../../method/README.md). Here are the generic
-OpenCode assets —skills, commands and a single orchestrating agent— that apply
+OpenCode assets —skills and commands— that apply
 the method on the task store (store root `~/.ztd`).
 
 ## What is included
@@ -11,43 +11,55 @@ the method on the task store (store root `~/.ztd`).
 | --- | --- |
 | `skills/` | The 10 ZTD skills: `ztd` and its nine helpers (`ztd-collect`, `ztd-process`, `ztd-plan`, `ztd-do`, `ztd-review`, `ztd-trusted-system`, `ztd-simplify`, `ztd-knowledge`, `ztd-repo`) |
 | `commands/` | `/ztd` plus the nested `/ztd/collect`, `/ztd/inbox`, `/ztd/plan`, `/ztd/focus`, `/ztd/week`, `/ztd/goal`, `/ztd/journal`, `/ztd/routine`, `/ztd/simplify`, `/ztd/learn`, `/ztd/repo`, `/ztd/review` |
-| `agents/ztd.md` | The `ztd` agent: a thin role that orchestrates capture, process, plan, do and review |
+
+The `ztd` agent is no longer part of the bundle: the skills carry the whole
+circuit and the host's native roles cover its permissions. An
+`agents/ztd.md` installed by an earlier checkout is left untouched and can be
+removed by hand.
 
 ## Install globally
 
-The bundled installer publishes the global assets to
-`$HOME/.config/opencode/{skills,commands,agents}`. It resolves its assets
-relative to itself, so it can be run from any working directory:
+With the binary on your `PATH`, publish the embedded assets to
+`$HOME/.config/opencode/{skills,commands}`:
+
+```bash
+ztd install opencode
+```
+
+From a repository checkout, the bundled installer does the same with the
+files on disk. It resolves its assets relative to itself, so it can be run
+from any working directory:
 
 ```bash
 ./integrations/opencode/install.sh
 ```
 
-The installer preflights the complete bundle before writing. Identical files
-are left unchanged; differing files, symlinks and unexpected file types abort
-without overwriting. If an I/O error occurs after publication starts, rerun it:
-already installed files are safe no-ops. It does not initialize the store,
-modify OpenCode configuration or configure MCP.
+Both preflight the complete bundle before writing, and any differing file,
+symlink or unexpected file type aborts the whole run without overwriting
+anything. `ztd install opencode` upgrades the files its own manifest recorded;
+`install.sh` has no manifest, so a file from an earlier version is a differing
+file you must remove yourself. Neither initializes the store, modifies OpenCode
+configuration nor configures MCP.
 
 ### 1. Store and templates (prerequisite)
 
 Prerequisite: an initialized store. `ztd init` creates the global store at
 `~/.ztd` by default; `ztd init PATH` creates it at exactly that root and
-`ztd init --local` at `./ztd`. This block uses an explicit root:
+`ztd init --local` at `./ztd`. It also seeds the six method templates into
+`<store>/templates/` when they are absent. This block uses an explicit root:
 
 ```bash
 # from the root of this repository
 STORE="$HOME/.ztd"          # explicit store root (edit it if you use another)
-ztd init "$STORE"           # creates the store structure in $STORE
-cp method/templates/*.md "$STORE/templates/"
+ztd init "$STORE"           # creates the store structure and templates in $STORE
 ```
 
 The commands are OpenCode prompts: `/ztd` is the entry point and the rest are
 nested as `/ztd/<name>` (for example `/ztd/plan`, `/ztd/review`), which OpenCode
 derives from `commands/ztd/<name>.md`. They run in sessions that discover
-`commands/`; the agent has ID `ztd`. The script installs globally; for
-project-only discovery, copy the same `skills/`, `commands/` and `agents/`
-directories into that project's `.opencode/` tree. Never copy assets into a
+`commands/`. `ztd install opencode` installs globally; for project-only
+discovery, copy the same `skills/` and `commands/` directories into that
+project's `.opencode/` tree. Never copy assets into a
 task-data directory: only the store lives there. Paths cited by skills and
 commands (`lists/…`, `goals/…`, `templates/…`) are relative to the store root;
 pass it with `--root "$STORE"` or `ZTD_ROOT` (precedence `--root` > `ZTD_ROOT`
@@ -110,8 +122,9 @@ remains authoritative. Task state still comes from `list`, `show` and `plan`.
 
 - One list writer: task mutations go through the `ztd` CLI (`capture`,
   `move`); list entries are never edited by hand.
-- The `ztd` agent does not replace the host's native roles (`build`, `plan`
-  and the rest keep their configuration and permissions) and does not authorize
-  external writes (push, publications, sends to services) nor destructive ones.
+- The skills do not authorize external writes (push, publications, sends to
+  services) nor destructive ones, and they do not replace the host's native
+  roles (`build`, `plan` and the rest keep their configuration and
+  permissions).
 - These assets carry no local policy and no user or client data: contexts are
   defined in `contexts.md`, at the store root.

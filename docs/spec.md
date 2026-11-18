@@ -144,7 +144,7 @@ Stable codes: `usage`, `invalid_workspace`, `unsupported_format`, `unknown_id`,
 `duplicate_id`, `unknown_list`, `invalid_transition`, `stale_task`,
 `pending_transaction`, `recover_conflict`, `unknown_context`, `invalid_client`,
 `unknown_project`, `invalid_field`, `id_exhausted`, `scope_denied`, `read_only`,
-`io_error`, plus the agent-store codes of section 11: `unknown_assignment`,
+`io_error`, `conflict`, plus the agent-store codes of section 11: `unknown_assignment`,
 `revision_conflict`, `idempotency_conflict`, `db_busy`, `db_incompatible`,
 `invalid_argument`, and the conversion codes of section 12:
 `ambiguous_source`, `mixed_signals`, `key_collision`, `destination_exists`,
