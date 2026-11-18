@@ -1089,6 +1089,7 @@ const Model = struct {
             self.error_text = @errorName(err);
             return;
         };
+        self.error_text = null;
         self.since_poll = 0;
     }
 
@@ -1172,7 +1173,7 @@ const Model = struct {
                 }
             } else if (key.text) |text| {
                 for (text) |ch| {
-                    if (ch >= 0x20 and ch < 0x7f) try self.filter.append(self.alloc, ch);
+                    if (ch >= 0x20 and ch != 0x7f) try self.filter.append(self.alloc, ch);
                 }
                 try self.rebuildRows();
             }
@@ -2179,4 +2180,75 @@ test "layoutDoc classifies headings, lists and code" {
     for (lines[3..6]) |l| try std.testing.expectEqual(DocKind.code, l.kind);
     try std.testing.expectEqualStrings("**sin tocar**", lines[4].text);
     try std.testing.expectEqualStrings("hola", lines[6].text);
+}
+
+test "tree filter keeps printable UTF-8 input" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+
+    const init_mod = @import("init.zig");
+    _ = try init_mod.initWorkspace(io, a, base, false);
+    const today = try platform.parseDate("2026-11-11");
+
+    var eng = try engine.Engine.init(io, a, base, today, true);
+    defer eng.deinit();
+    var m = try Model.init(io, alloc, &eng, base, "", false);
+    defer m.deinit();
+
+    var ctx: vxfw.EventContext = .{ .io = io, .alloc = alloc, .cmds = .empty };
+    defer ctx.cmds.deinit(alloc);
+
+    m.filtering = true;
+    try m.handleKey(&ctx, .{ .codepoint = 'á', .text = "á" });
+    try m.handleKey(&ctx, .{ .codepoint = 'z', .text = "z" });
+    try std.testing.expectEqualStrings("áz", m.filter.items);
+}
+
+test "forcePoll clears error_text only after a successful reload" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const base = try a.dupe(u8, path_buf[0..n]);
+
+    const init_mod = @import("init.zig");
+    _ = try init_mod.initWorkspace(io, a, base, false);
+    const today = try platform.parseDate("2026-11-11");
+
+    var eng = try engine.Engine.init(io, a, base, today, true);
+    defer eng.deinit();
+    var m = try Model.init(io, alloc, &eng, base, "", false);
+    defer m.deinit();
+
+    // A missing canonical list makes the reload fail: the error sticks.
+    try eng.store.dir.deleteFile(io, "lists/next.md");
+    m.forcePoll();
+    try std.testing.expect(m.error_text != null);
+    try std.testing.expectEqualStrings("InvalidWorkspace", m.error_text.?);
+
+    // The store heals and the next reload clears the stale error.
+    try eng.store.writeAtomic("lists/next.md", "# Next actions\n\n");
+    m.forcePoll();
+    try std.testing.expect(m.error_text == null);
 }
