@@ -441,7 +441,16 @@ printf '# Demo\n' >"$V1/lists/projects/personal/v1demo.md"
 printf '# Contextos activos\n\n| Contexto | Uso |\n| --- | --- |\n| personal | Personal |\n' >"$V1/contexts.md"
 printf '{"format":1,"policy":{"requireClientFor":[],"clientOnlyIn":[]}}\n' >"$V1/config.json"
 printf '# Routines\n\n| rutina | cadencia | última |\n| --- | --- | --- |\n| review | semanal:sab | 2026-11-14 |\n' >"$V1/routines/state.md"
-v1sum() { (cd "$TMP/v1" && find . -type f | sort | xargs shasum | shasum); }
+v1sum() {
+  (
+    cd "$TMP/v1"
+    if command -v sha256sum >/dev/null 2>&1; then
+      find . -type f | sort | xargs sha256sum | sha256sum
+    else
+      find . -type f | sort | xargs shasum -a 256 | shasum -a 256
+    fi
+  )
+}
 V1BEFORE="$(v1sum)"
 "$BIN" migrate --from "$TMP/v1" --to "$TMP/v2" --dry-run --today 2026-11-17 >/dev/null
 [ ! -e "$TMP/v2" ]
