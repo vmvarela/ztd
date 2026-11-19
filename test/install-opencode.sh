@@ -162,7 +162,8 @@ expect_status 2 "$rc" "unknown adapter"
 h3="$WORK/h3"
 mkdir -p "$h3/.config/opencode/commands"
 printf 'x\n' > "$WORK/link-target"
-if ln -s "$WORK/link-target" "$h3/.config/opencode/commands/ztd.md" 2>/dev/null; then
+if MSYS=winsymlinks:nativestrict ln -s "$WORK/link-target" "$h3/.config/opencode/commands/ztd.md" 2>/dev/null &&
+    [ -L "$h3/.config/opencode/commands/ztd.md" ]; then
     rc=0; out="$(HOME="$HOME_BASE/h3" "$BIN" install opencode 2>&1)" || rc=$?
     expect_status 1 "$rc" "symlink leaf aborts"
     case $out in

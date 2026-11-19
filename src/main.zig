@@ -10,6 +10,7 @@ const migrate_mod = @import("migrate.zig");
 const agent = @import("agent.zig");
 const db = @import("db.zig");
 const install_mod = @import("install.zig");
+const tui_mod = @import("tui.zig");
 
 const builtin = @import("builtin");
 const build_options = @import("build_options");
@@ -21,6 +22,8 @@ pub const format = config_mod.supported_format;
 const Ctx = struct {
     io: std.Io,
     alloc: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    env_map: *std.process.Environ.Map,
     json: bool = false,
     command: []const u8 = "",
     root_env: ?[]const u8 = null,
@@ -112,7 +115,7 @@ const BindingValue = struct {
 pub fn main(init: std.process.Init) !void {
     const alloc = init.arena.allocator();
     const argv = try init.minimal.args.toSlice(alloc);
-    var ctx = Ctx{ .io = init.io, .alloc = alloc, .root_env = init.environ_map.get("ZTD_ROOT") };
+    var ctx = Ctx{ .io = init.io, .alloc = alloc, .gpa = init.gpa, .env_map = init.environ_map, .root_env = init.environ_map.get("ZTD_ROOT") };
     for (argv[1..]) |a| {
         if (std.mem.eql(u8, a, "--json")) ctx.json = true;
     }
@@ -275,6 +278,12 @@ fn run(ctx: *Ctx, args: []const [:0]const u8) !u8 {
         return cmdMigrate(ctx, rest, dry_run, today);
     }
     const root_path = try store_mod.resolveRoot(ctx.io, ctx.alloc, root);
+    if (std.mem.eql(u8, cmd, "tui")) {
+        if (ctx.json) return usage(ctx, "tui has no JSON output");
+        if (dry_run) return usage(ctx, "tui does not accept --dry-run");
+        if (rest.len > 0) return usage(ctx, "tui takes no arguments");
+        return tui_mod.run(ctx.io, ctx.gpa, ctx.env_map, root_path, today);
+    }
     const mutating = !dry_run and (std.mem.eql(u8, cmd, "capture") or std.mem.eql(u8, cmd, "move") or std.mem.eql(u8, cmd, "recover") or std.mem.eql(u8, cmd, "routine"));
     var eng = try engine.Engine.init(ctx.io, ctx.alloc, root_path, today, mutating);
     defer eng.deinit();
@@ -1263,6 +1272,7 @@ fn printHelp(ctx: *Ctx) !void {
         \\  recover                     finish an interrupted transaction
         \\  due                         list routines past their cadence
         \\  routine done <id>           mark a routine as run today
+        \\  tui                         browse lists and store documents (read-only)
         \\  agent-capture --scope S --request T [--project P] [--idempotency-key K] [--db PATH]
         \\  agent-checkpoint ID --scope S --expect-rev N --result T [--db PATH]
         \\  agent-prepare ID --scope S [--history N] [--db PATH]
@@ -1291,4 +1301,9 @@ test {
     _ = @import("binding.zig");
     _ = @import("migrate.zig");
     _ = @import("install.zig");
+    _ = @import("tui.zig");
+    _ = @import("hoy.zig");
+    _ = @import("theme.zig");
+    _ = @import("tabs.zig");
+    _ = @import("fuzzy.zig");
 }

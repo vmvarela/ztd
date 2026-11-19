@@ -460,3 +460,59 @@ source without creating locks or state; a concurrent writer is detected by
 comparing a content inventory before and after, so writers must be paused for
 the duration, and a writer that ignores that rule can still race the final
 promotion window.
+
+## 12. TUI
+
+`ztd tui` opens an interactive, read-only browser over the same store. It
+builds the index from `Engine.loadAll()` plus one walk of the store
+(`lists/projects/`, `plans/`, `reviews/`, `knowledge/`, `journal/`, `goals/`)
+and reads `routines/` through the routine parser. Documents are loaded from
+Markdown on selection; nothing is cached to disk.
+
+The command takes no arguments and rejects `--json` and `--dry-run`. It opens
+the store in shared mode and releases the lock immediately, so `ztd` writers in
+another terminal are never blocked and never see a partial read: each reload
+rebuilds the index from complete files.
+
+Key handling is `q` quit, arrows or `j`/`k` move, `ctrl+d`/`ctrl+u` page,
+`g`/`G` first/last, `enter`/`space` expand a group or open an item, `tab`
+switch pane, `h`/`l` collapse or focus, `[`/`]` cycle tabs, `x` close the
+active tab, `ctrl+p` open the command palette, `/` filter, `?` help, `r`
+reload. The palette searches every document and four actions (theme, zen,
+reload, help) by title, key and section; `enter` opens the selection. Mouse
+wheel scrolls the pane under the pointer, a click selects and focuses, a tab
+click opens it, scrollbar tracks jump and thumbs drag, and dragging the divider
+moves the split between 20 columns and the width minus 30. Group headers stay
+pinned while their rows scroll, documents show their ID, status and context as
+header chips, and each group header carries a type glyph. Below 100 columns the
+browser shows one pane at a time and hides the tab strip; below 40x8 it prints
+a size notice.
+
+Opening an item pins it to the tab strip as history; moving the tree keeps
+previewing without adding tabs. Today is pinned first and cannot close; up to
+eight unpinned documents stay open, dropping the oldest beyond that. Tabs keep
+their document key across reloads and disappear when the backing file does.
+The interface is in English; store content is shown verbatim.
+
+The tree polls the store once a second by hashing path, mtime and size. When
+the signature changes it reloads and keeps the selection by task ID or document
+path. Polling runs on the UI thread, so there are no background readers and no
+extra file descriptors. Colors follow the terminal's reported light or dark
+scheme and are disabled by `NO_COLOR`.
+
+### Today, themes and zen
+
+Today is the entry index: the active goal from `goals/active.md` plus today's
+MITs from the daily plan; a missing goal or plan omits those rows.
+
+| Key | Name | Character |
+| --- | --- | --- |
+| `paper` | Paper | neutral accent |
+| `tea` | Tea | green accent |
+| `amber` | Amber | amber accent |
+
+`t` cycles the themes; the default comes from `config.json` →
+`"tui": { "theme": "tea" }`, and an absent or invalid value falls back to
+`paper`. Selection and theme are session-only and never written back: the TUI
+never writes to the store, not even preferences. `z` toggles zen reading mode;
+keys, selection, navigation and the once-a-second refresh are unchanged.

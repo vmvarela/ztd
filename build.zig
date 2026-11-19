@@ -20,6 +20,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     root_module.addOptions("build_options", options);
+    const vaxis = b.dependency("vaxis", .{ .target = target, .optimize = optimize });
+    root_module.addImport("vaxis", vaxis.module("vaxis"));
     embedAssets(b, root_module);
     root_module.addIncludePath(b.path("vendor/sqlite"));
     root_module.addCSourceFile(.{

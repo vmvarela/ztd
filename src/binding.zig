@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const config = @import("config.zig");
 const store_mod = @import("store.zig");
 const Store = store_mod.Store;
@@ -369,7 +370,12 @@ fn writeTmp(io: std.Io, tmp: *std.testing.TmpDir, rel: []const u8, data: []const
 }
 
 fn startPath(alloc: std.mem.Allocator, base: []const u8, rel: []const u8) ![]u8 {
-    return std.fs.path.join(alloc, &.{ base, rel });
+    const joined = try std.fs.path.join(alloc, &.{ base, rel });
+    errdefer alloc.free(joined);
+    // join does not normalize `/` inside a component on Windows; sep is `/`
+    // on POSIX, so this is a no-op there.
+    std.mem.replaceScalar(u8, joined, '/', std.fs.path.sep);
+    return joined;
 }
 
 fn seedStore(io: std.Io, tmp: *std.testing.TmpDir, alloc: std.mem.Allocator, base: []const u8) !void {
@@ -729,6 +735,7 @@ test "a symlinked binding is refused and never followed" {
 }
 
 test "an inaccessible binding is a diagnostic and never falls back to the parent" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // setFilePermissions panics on Windows
     const alloc = std.testing.allocator;
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
