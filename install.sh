@@ -87,6 +87,10 @@ curl -fsSL "$URL/sha256sums.txt" -o "$TMP/sha256sums.txt"
 
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$TMP/$ASSET" "$INSTALL_DIR/ztd"
+# macOS arm64 kills a copied ad-hoc binary until it is signed again (rc=137).
+if [ "$OS" = "Darwin" ] && { [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; }; then
+	codesign --force --sign - "$INSTALL_DIR/ztd" >/dev/null
+fi
 echo "ztd: installed $INSTALL_DIR/ztd"
 case ":$PATH:" in
 *":$INSTALL_DIR:"*) ;;

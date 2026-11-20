@@ -14,6 +14,10 @@ Both download the release asset for the current platform, verify it against
 `sha256sums.txt`, and install to `~/.local/bin` (POSIX) or
 `%LOCALAPPDATA%\ztd\bin` (Windows). Set `ZTD_INSTALL_DIR` to override.
 
+On macOS arm64, the POSIX installer re-signs the copied binary ad hoc
+(`codesign --force --sign -`). Without that step macOS kills the copied
+binary with exit code 137.
+
 ## Assets
 
 | Platform | Asset |
