@@ -1,0 +1,42 @@
+{
+  "format": "ztd-agent-export",
+  "version": 2,
+  "scopes": [{"id": "work"}],
+  "assignments": [{
+    "id": "A-20261119-001",
+    "scope_id": "work",
+    "request": "import the synthetic store",
+    "objective": "prove the importer",
+    "constraints": "synthetic data only",
+    "project": "work/acme/demo",
+    "status": "open",
+    "rev": 2,
+    "created_at": "2026-11-19T09:00:00Z",
+    "updated_at": "2026-11-19T10:00:00Z"
+  }],
+  "checkpoints": [{
+    "id": "C-20261119-001",
+    "assignment_id": "A-20261119-001",
+    "kind": "progress",
+    "result": "parser drafted",
+    "evidence": "fixture",
+    "next_action": "compare reports",
+    "rev": 2,
+    "created_at": "2026-11-19T10:00:00Z"
+  }],
+  "operations": [{
+    "key": "fixture-op-1",
+    "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "result_json": "{\"ok\":true}",
+    "created_at": "2026-11-19T09:00:00Z"
+  }],
+  "knowledge": [{
+    "id": "K-20261119-001",
+    "scope": "work",
+    "kind": "decision",
+    "text": "the importer is read-only",
+    "source": "spec",
+    "rev": 1,
+    "created_at": "2026-11-19T09:00:00Z"
+  }]
+}

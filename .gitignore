@@ -1,6 +1,5 @@
-.zig-cache/
-zig-out/
-.tmp-*/
-*.exe
-*.pdb
-zig-pkg/
+/ztd
+*.db
+*.db-wal
+*.db-shm
+.slim/

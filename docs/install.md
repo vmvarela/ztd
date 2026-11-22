@@ -14,7 +14,17 @@ Both download the release asset for the current platform, verify it against
 `sha256sums.txt`, and install to `~/.local/bin` (POSIX) or
 `%LOCALAPPDATA%\ztd\bin` (Windows). Set `ZTD_INSTALL_DIR` to override.
 
+> **Caveat:** the one-line installers resolve the latest GitHub release.
+> Until the first Go release is tagged they will install the previous Zig
+> binary. Build from source (below) or set `ZTD_VERSION` to the Go release.
+
+On macOS arm64, the POSIX installer re-signs the copied binary ad hoc
+(`codesign --force --sign -`). Without that step macOS kills the copied
+binary with exit code 137.
+
 ## Assets
+
+Every release ships `sha256sums.txt` covering all binaries below.
 
 | Platform | Asset |
 | --- | --- |
@@ -30,98 +40,42 @@ Both download the release asset for the current platform, verify it against
 | Windows x86 | `ztd-x86-windows.exe` |
 | FreeBSD x86_64 | `ztd-x86_64-freebsd` |
 | FreeBSD aarch64 | `ztd-aarch64-freebsd` |
-| Manual page | `ztd.1` |
 
-## Homebrew
-
-```bash
-brew install vmvarela/tap/ztd
-```
-
-## WinGet
-
-```powershell
-winget install vmvarela.ztd
-```
-
-## Scoop
-
-```powershell
-scoop bucket add vmvarela https://github.com/vmvarela/scoop-bucket
-scoop install ztd
-```
-
-## npm
-
-```bash
-npm install -g @vmvarela/ztd
-```
-
-The npm package selects the right binary for Linux, macOS or Windows.
-
-## Debian / Ubuntu
-
-Download the `.deb` for your architecture from the release and install it:
-
-```bash
-sudo apt install ./ztd_<version>_amd64.deb
-```
-
-## Fedora / RHEL
-
-```bash
-sudo dnf install ./ztd-<version>-1.x86_64.rpm
-```
-
-## Alpine
-
-```bash
-sudo apk add --allow-untrusted ./ztd_<version>_x86_64.apk
-```
-
-## Arch
-
-```bash
-yay -S ztd
-```
-
-## Nix
-
-```bash
-nix profile install github:vmvarela/nix-packages#ztd
-```
+`ztd-riscv64-linux` is built best-effort: if that cross-build fails, the
+asset is omitted from the release and `sha256sums.txt` covers only what was
+published.
 
 ## From source
 
+Requires Go 1.27.4. No runtime dependencies; release binaries are built with
+`CGO_ENABLED=0`.
+
 ```bash
-zig build -Doptimize=ReleaseSafe -Dversion=0.1.0
-install -m 0755 zig-out/bin/ztd ~/.local/bin/ztd
+go build -o ztd ./cmd/ztd
+install -m 0755 ztd ~/.local/bin/ztd
 ```
 
-Requirements: Zig 0.17.0. No runtime dependencies.
+## Package managers
+
+Homebrew, WinGet, Scoop, npm, Debian, RPM, APK, AUR and Nix packaging still
+describe the legacy Zig release and are a follow-up; see
+[packaging/README.md](../packaging/README.md). The current Go release
+workflow publishes only the binaries above and `sha256sums.txt`.
 
 ## First run
 
-`ztd init` creates the global store at `~/.ztd` by default. Use
-`ztd init PATH` to create the store at exactly that root, or
-`ztd init --local` for `./ztd`.
+```bash
+ztd --db ~/.ztd/ztd.db init
+```
 
-Root precedence for every command: `--root` > `ZTD_ROOT` > `~/.ztd`.
-The root is never discovered from the current directory.
-
-`ztd init` also seeds the six method templates into `<store>/templates/` when
-they are absent; an edited template is never overwritten.
-
-After upgrading the binary, run `ztd install templates` to refresh those six
-templates in an existing store root. It never creates the store, and it refuses
-a template you edited, recording ownership in `<store>/.ztd-assets.json`.
+`init` creates the database (default `ZTD_DB` or `~/.ztd/ztd.db`; pass
+`--db` to choose another file) and, on a terminal, asks for the actor and
+scopes and shows a summary before it writes. In scripts pass `--actor` and
+`--scope id=…,kind=…` explicitly.
 
 ## OpenCode integration
 
-```bash
-ztd install opencode
-```
-
-Publishes the embedded skills and commands to `~/.config/opencode`. Assets an
-earlier `ztd` installed are upgraded in place; a file you edited aborts the
-run instead of being overwritten. `--dry-run` reports without writing.
+The Go binary does not implement `ztd install opencode` yet. Copy
+`integrations/opencode/` (skills and commands) into your OpenCode
+configuration manually until that command is ported. `ztd install templates`
+is not implemented either; method templates live in `method/`.
