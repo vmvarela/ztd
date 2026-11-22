@@ -414,6 +414,14 @@ func (c *CLI) run(ctx context.Context, command string, args []string) error {
 	case "version", "--version", "-v":
 		c.succeed("version", map[string]string{"version": Version})
 		return nil
+	case "--help", "-h", "help":
+		// The same text a bare invocation prints, on explicit request.
+		if c.JSON {
+			c.succeed("help", usage)
+		} else {
+			fmt.Fprintln(c.Out, usage)
+		}
+		return nil
 	case "init":
 		return c.init(ctx, args)
 	case "install":

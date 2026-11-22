@@ -18,7 +18,7 @@ the write.
 3. Keep the details given; do not require context, client, priority or project
    at this stage. For several independent ideas, pass each one as an argument to
    `ztd`; `--stdin` reads one per line.
-4. Confirm each ID and the returned path briefly. Classify and simplify later.
+4. Confirm each ID and its returned state briefly. Classify and simplify later.
 
 Do not execute the task or turn it into a commitment just because it was
 captured. If `ztd` rejects the text or cannot verify it, report the error

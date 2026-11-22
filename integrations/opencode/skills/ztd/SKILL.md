@@ -13,9 +13,9 @@ backup, not the task store. `ztd status --json` reports `database`, `profile`,
 `actor`, `scopes`, `effective_scopes`, `binding` and `warning` — without
 creating files (step 2). Do not use this skill's directory as the store.
 
-1. For initial orientation, read `adoption.md`; for formats or structural
-   changes, `README.md` (both at the store root). Neither is a prerequisite
-   for each operation.
+1. For initial orientation, run `ztd status` and `ztd --help`; for the
+   adoption habit read `ztd doc get --kind adoption --slug adoption`. Neither
+   is a prerequisite for each operation.
 2. Resolve the environment with `ztd status --json`: it never creates files
    (it works when the database is absent). It reports `database` (the
    resolved SQLite path), `profile`, `actor`, `scopes` (declared),
@@ -34,8 +34,9 @@ creating files (step 2). Do not use this skill's directory as the store.
    scope-based work. `ztd check --bindings` validates the selected repo
    binding against the resolved store and fails when it is missing or invalid.
    Then use `ztd list`, `ztd show` and `ztd plan` for task state, filtered to
-   the resolved scope, the goal and today's plan if any. A global state
-   summarizes coverage without client details. Do not open every card or
+   the resolved scope, the goal and today's plan if any.
+   `ztd source list --all` summarizes coverage globally, without client
+   details. Do not open every card or
    create empty plans.
 3. When the intent is already clear, load the specific skill directly with no
    preliminary tour:

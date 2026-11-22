@@ -59,9 +59,9 @@ derives from `commands/ztd/<name>.md`. They run in sessions that discover
 `commands/`. `ztd install opencode` installs globally; for project-only
 discovery, copy the same `skills/` and `commands/` directories into that
 project's `.opencode/` tree. Never copy assets into a
-task-data directory: only the store lives there. Paths cited by skills and
-commands (`lists/…`, `goals/…`, `templates/…`) are relative to the store root
-and point at the read-only Markdown backup; the task store is the SQLite
+task-data directory: only the store lives there. Any legacy path that
+remains in the prose (`lists/…`, `goals/…`) refers to the read-only Markdown
+backup; the task store is the SQLite
 database, resolved as `--db` > `ZTD_DB` > `~/.ztd/ztd.db`.
 
 Requirements: the `ztd` binary on the `PATH`, the database resolved
@@ -106,4 +106,4 @@ comes from `list`, `show` and `plan`.
   roles (`build`, `plan` and the rest keep their configuration and
   permissions).
 - These assets carry no local policy and no user or client data: contexts are
-  defined in `contexts.md`, at the store root.
+  declared with `ztd context add` in the store database.

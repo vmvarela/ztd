@@ -112,7 +112,7 @@ task store itself. The method still adds those files as you adopt each habit
 | `knowledge/` | Knowledge indexes and cards per scope |
 | `passion.md` | Interests and experiments (optional) |
 | `reviews/` | Reviews and coverage records |
-| `routines/daily.md`, `routines/weekly.md` | Routine patterns (due state lives in `routines/state.md`, created by `ztd init`) |
+| `routines/daily.md`, `routines/weekly.md` | Routine patterns (legacy; in the Go store, due state lives in the database — `ztd routines due` — and only a migrated store carries rows) |
 
 Format notes (format 2): `contexts.md` is a Markdown table with `Context` and
 `Use` columns (plus optional `Clients` and `Knowledge` columns);
