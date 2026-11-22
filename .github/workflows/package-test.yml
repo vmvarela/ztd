@@ -1,0 +1,166 @@
+name: Package tests
+
+# Builds the Linux amd64 packages the release workflow publishes and installs
+# each one in a clean container, plus the npm wrapper. Runs on every push and
+# PR instead of only on tags, so packaging breakage shows up before a release.
+# Independent of release.yml, which stays tag-only.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-packages:
+    name: Build amd64 packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+
+      - name: Install scdoc
+        run: sudo apt-get install -y scdoc
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+        run: go build -trimpath -ldflags "-s -w" -o ztd ./cmd/ztd
+
+      - name: Build man page
+        shell: bash
+        run: scdoc < docs/ztd.1.scd | gzip -9 > ztd.1.gz
+
+      - name: Install nfpm
+        run: |
+          NFPM_VERSION=2.45.1
+          curl -sfL -o /tmp/nfpm.tar.gz \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          tar -xzf /tmp/nfpm.tar.gz -C /usr/local/bin nfpm
+
+      - name: Stage files for packaging
+        run: |
+          mkdir -p pkg-work
+          cp ztd LICENSE ztd.1.gz pkg-work/
+          chmod +x pkg-work/ztd
+
+      # nfpm rewrites "-" inside the version per packager (deb/rpm get "~",
+      # apk gets "_"), so the install jobs glob the names instead of pinning
+      # the exact file names the catalog templates suggest.
+      - name: Build packages
+        working-directory: pkg-work
+        env:
+          VERSION: 0.0.0-test
+          GOARCH: amd64
+        run: |
+          mkdir -p dist
+          for fmt in deb rpm apk; do
+            nfpm package -p "$fmt" \
+              -f "$GITHUB_WORKSPACE/packaging/nfpm.yaml" \
+              -t dist/
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packages
+          path: pkg-work/dist/
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ztd-linux-x64
+          path: ztd
+          if-no-files-found: error
+
+  install-deb:
+    name: Install .deb
+    needs: build-packages
+    runs-on: ubuntu-latest
+    container: debian:bookworm-slim
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: packages
+          path: pkg
+
+      - name: Install and smoke test
+        run: |
+          dpkg -i pkg/ztd_*_amd64.deb
+          ztd version
+          ztd --db /tmp/ztd.db init --non-interactive --scope id=personal,kind=personal
+          ztd --db /tmp/ztd.db capture "package smoke"
+          ztd --db /tmp/ztd.db check
+
+  install-rpm:
+    name: Install .rpm
+    needs: build-packages
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: packages
+          path: pkg
+
+      # --nosignature: rpm verifies signatures by default and this package is
+      # built unsigned in CI; the released ones are signed by the channel repo.
+      - name: Install and smoke test
+        run: |
+          rpm -i --nosignature pkg/ztd-*x86_64.rpm
+          ztd version
+          ztd --db /tmp/ztd.db init --non-interactive --scope id=personal,kind=personal
+          ztd --db /tmp/ztd.db capture "package smoke"
+          ztd --db /tmp/ztd.db check
+
+  install-apk:
+    name: Install .apk
+    needs: build-packages
+    runs-on: ubuntu-latest
+    container: alpine:latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: packages
+          path: pkg
+
+      - name: Install and smoke test
+        run: |
+          apk add --allow-untrusted pkg/ztd_*_x86_64.apk
+          ztd version
+          ztd --db /tmp/ztd.db init --non-interactive --scope id=personal,kind=personal
+          ztd --db /tmp/ztd.db capture "package smoke"
+          ztd --db /tmp/ztd.db check
+
+  npm-wrapper:
+    name: npm wrapper smoke
+    needs: build-packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ztd-linux-x64
+          path: artifacts
+
+      - name: Stage npm wrapper
+        run: |
+          mkdir -p npm-pkg/bin
+          cp -r packaging/npm/. npm-pkg/
+          cp artifacts/ztd npm-pkg/bin/ztd-linux-x64
+          chmod +x npm-pkg/bin/ztd-linux-x64
+
+      - name: Smoke test
+        run: |
+          node npm-pkg/bin/ztd.js version
+          node npm-pkg/bin/ztd.js --help | grep -q "capture"
