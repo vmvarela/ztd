@@ -5,7 +5,7 @@ description: Run the weekly or monthly review, adjust routines, explore interest
 
 # Review
 
-Paths relative to the store root; the root resolves as `--root` > `ZTD_ROOT` > `~/.ztd` — never derive it from the current directory. Get the local date and the
+Paths relative to the store root; the task store is the SQLite database, resolved as `--db` > `ZTD_DB` > `~/.ztd/ztd.db` — never derive it from the current directory. The Markdown files under `~/.ztd` are a read-only legacy backup, not the task store. Get the local date and the
 requested period. Limit journal, calendar and reviews to the requested period.
 
 ## Weekly review (default)

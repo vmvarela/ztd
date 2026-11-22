@@ -5,7 +5,7 @@ description: Execute a task in focus, personal or code, applying the knowledge o
 
 # Do
 
-Paths relative to the store root; the root resolves as `--root` > `ZTD_ROOT` > `~/.ztd` — never derive it from the current directory. A day plan is not a requirement.
+Paths relative to the store root; the task store is the SQLite database, resolved as `--db` > `ZTD_DB` > `~/.ztd/ztd.db` — never derive it from the current directory. The Markdown files under `~/.ztd` are a read-only legacy backup, not the task store. A day plan is not a requirement.
 With a known scope, query `ztd plan --context CONTEXT` (and `--client CLIENT`
 whenever a client is known — the store configuration only decides whether a
 missing client blocks), not the full plan. The view is partial and does not identify priorities; do not infer that a

@@ -5,7 +5,7 @@ description: Store sourced topic knowledge and consult the cards that apply to a
 
 # Knowledge
 
-Paths relative to the store root; the root resolves as `--root` > `ZTD_ROOT` > `~/.ztd` — never derive it from the current directory. Use the store indexes; re-read them
+Paths relative to the store root; the task store is the SQLite database, resolved as `--db` > `ZTD_DB` > `~/.ztd/ztd.db` — never derive it from the current directory. The Markdown files under `~/.ztd` are a read-only legacy backup, not the task store. Use the store indexes; re-read them
 only when context is missing or they changed.
 
 ## Consult before executing

@@ -5,7 +5,7 @@ description: Process the local inbox or the selected sources, making decisions w
 
 # Process
 
-Paths relative to the store root; the root resolves as `--root` > `ZTD_ROOT` > `~/.ztd` — never derive it from the current directory. Do not read plans, journal or
+Paths relative to the store root; the task store is the SQLite database, resolved as `--db` > `ZTD_DB` > `~/.ztd/ztd.db` — never derive it from the current directory. The Markdown files under `~/.ztd` are a read-only legacy backup, not the task store. Do not read plans, journal or
 knowledge cards except to classify the entry in progress; load `ztd-knowledge`
 only in the "Information" branch.
 

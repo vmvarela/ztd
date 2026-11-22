@@ -101,10 +101,7 @@ func Run(fsys fs.FS, cfg Config) (Report, error) {
 	// when it exists: a symlink or a file where a directory belongs is a
 	// conflict. Missing components are fine — the publish phase creates them.
 	dirs := []string{cfg.Root}
-	if _, err := os.Stat(cfg.Root); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return Report{}, err
-		}
+	if _, err := os.Stat(cfg.Root); errors.Is(err, os.ErrNotExist) {
 		if parent := filepath.Dir(cfg.Root); parent != cfg.Root {
 			dirs = append(dirs, parent)
 		}
@@ -142,7 +139,10 @@ func Run(fsys fs.FS, cfg Config) (Report, error) {
 			actions[i] = actInstall
 			continue
 		case err != nil:
-			return Report{}, err
+			// A broken ancestor (a file where a directory belongs) or an
+			// unreadable leaf cannot be classified: report it, never write.
+			conflicts = append(conflicts, fmt.Sprintf("cannot inspect %s: %v", target, err))
+			continue
 		case st.Mode()&os.ModeSymlink != 0:
 			conflicts = append(conflicts, fmt.Sprintf("symlink %s", target))
 			continue
@@ -308,10 +308,11 @@ func ancestorDirs(base, rel string) []string {
 // directory; absent is fine because the publish phase creates it.
 func checkDir(path string) string {
 	st, err := os.Lstat(path)
-	if err != nil {
-		return "" // absent: the publish phase creates it
-	}
 	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return "" // absent: the publish phase creates it
+	case err != nil:
+		return fmt.Sprintf("cannot inspect %s: %v", path, err)
 	case st.Mode()&os.ModeSymlink != 0:
 		return fmt.Sprintf("symlink ancestor %s", path)
 	case !st.IsDir():
@@ -330,7 +331,7 @@ func readManifest(path string) (manifest, string, error) {
 	case errors.Is(err, os.ErrNotExist):
 		return empty, "", nil
 	case err != nil:
-		return empty, "", err
+		return empty, fmt.Sprintf("cannot inspect %s: %v", path, err), nil
 	case !st.Mode().IsRegular():
 		return empty, fmt.Sprintf("not a regular file %s", path), nil
 	case st.Size() > maxAssetBytes:
@@ -401,6 +402,12 @@ func replaceFile(path string, data []byte) error {
 		return err
 	}
 	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	// Durable before the rename: the manifest and assets must survive a
+	// crash even if the directory entry lands first.
+	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return err
 	}

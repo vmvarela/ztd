@@ -5,9 +5,7 @@ description: Pick daily MITs, weekly Big Rocks or an active goal from real capac
 
 # Plan
 
-Paths relative to the store root; the root resolves as `--root` > `ZTD_ROOT` > `~/.ztd` — never derive it from the current directory. Read `goals/active.md`,
-`calendar.md`, actions/waitings through `list` with filters, and only the
-relevant project cards. Do not walk knowledge indexes or cards without candidate
+Paths relative to the store root; the task store is the SQLite database, resolved as `--db` > `ZTD_DB` > `~/.ztd/ztd.db` — never derive it from the current directory. The Markdown files under `~/.ztd` are a read-only legacy backup, not the task store. Read the active goal with `ztd goal show` and today's brief with `ztd prepare`, actions/waitings through `list` with filters, and only the relevant project cards. Do not walk knowledge indexes or cards without candidate
 actions. Get the current local date; interpret an explicit date when provided.
 With no scope in the request or from a selected task, default those `list`
 filters from a valid `data.binding` (`ztd status --json`); a malformed binding
@@ -52,9 +50,10 @@ source.
 ## Goal
 
 Review or define with the user the outcome, reason, achievement criterion,
-horizon, mantra and near sub-goal in `goals/active.md`. When an existing goal
-changes, clarify whether it was completed, paused or abandoned and keep the
-record in `goals/archive.md`. One active goal does not mean a single goal for
+horizon, mantra and near sub-goal of the active goal (`ztd goal show`; define
+or revise with `ztd goal set --statement S`). When an existing goal changes,
+clarify whether it was completed, paused or abandoned and record the change
+with `ztd goal set`. One active goal does not mean a single goal for
 the whole year. Agreed actions are stored canonically in the lists and
 referenced by ID. If a new action appears, capture it with `ztd capture` and
 process its context before moving it; do not write it only in the plan. Run

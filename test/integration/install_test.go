@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -112,5 +113,96 @@ func TestInstallTemplatesMissingRoot(t *testing.T) {
 
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("missing root was created (err %v)", err)
+	}
+}
+
+// TestInstallOpenCodeForReal publishes the bundle into a temp HOME (never
+// the real one), verifies a file against the repository bytes, the manifest
+// and an unchanged rerun.
+func TestInstallOpenCodeForReal(t *testing.T) {
+	home := t.TempDir()
+	db := filepath.Join(t.TempDir(), "ztd.db")
+	want := countBundle(t,
+		filepath.Join("integrations", "opencode", "skills"),
+		filepath.Join("integrations", "opencode", "commands"))
+
+	r := runHome(t, home, db, "install", "opencode")
+	rep := decode[installReport](t, r.wantOK(t, "install"))
+	if rep.Installed != want || rep.Updated != 0 || rep.Unchanged != 0 || len(rep.Conflicts) != 0 {
+		t.Fatalf("report = %+v, want %d installed", rep, want)
+	}
+
+	base := filepath.Join(home, ".config", "opencode")
+	rel := filepath.Join("skills", "ztd", "SKILL.md")
+	installed, err := os.ReadFile(filepath.Join(base, rel))
+	if err != nil {
+		t.Fatalf("read installed skill: %v", err)
+	}
+	repo, err := os.ReadFile(filepath.Join(repoRoot(), "integrations", "opencode", rel))
+	if err != nil {
+		t.Fatalf("read repo skill: %v", err)
+	}
+	if string(installed) != string(repo) {
+		t.Fatal("installed skill differs from the repository file")
+	}
+
+	raw, err := os.ReadFile(filepath.Join(base, ".ztd-assets.json"))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var m struct {
+		Format int               `json:"format"`
+		Assets map[string]string `json:"assets"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("parse manifest: %v", err)
+	}
+	if m.Format != 1 || len(m.Assets) != want {
+		t.Fatalf("manifest = format %d with %d assets, want format 1 with %d", m.Format, len(m.Assets), want)
+	}
+
+	r2 := runHome(t, home, db, "install", "opencode")
+	rep2 := decode[installReport](t, r2.wantOK(t, "install"))
+	if rep2.Installed != 0 || rep2.Updated != 0 || rep2.Unchanged != want {
+		t.Fatalf("rerun report = %+v, want %d unchanged", rep2, want)
+	}
+}
+
+// TestInstallConflictEnvelope pins the failure path: an edited installed
+// file exits 1 with family conflict and the report (conflicts included) in
+// the JSON envelope, and the edit stands.
+func TestInstallConflictEnvelope(t *testing.T) {
+	home := t.TempDir()
+	db := filepath.Join(t.TempDir(), "ztd.db")
+	runHome(t, home, db, "install", "opencode").wantOK(t, "install")
+
+	target := filepath.Join(home, ".config", "opencode", "skills", "ztd", "SKILL.md")
+	body, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read installed skill: %v", err)
+	}
+	edited := append(append([]byte{}, body...), []byte("user edit\n")...)
+	if err := os.WriteFile(target, edited, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := runHome(t, home, db, "install", "opencode")
+	r.wantErr(t, 1, "install", "conflict")
+	rep := decode[installReport](t, r.env.Data)
+	if len(rep.Conflicts) == 0 {
+		t.Fatalf("envelope data has no conflicts: %s", r.stdout)
+	}
+	found := false
+	for _, c := range rep.Conflicts {
+		if strings.Contains(c, target) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("conflicts %v do not name %s", rep.Conflicts, target)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != string(edited) {
+		t.Fatalf("edited file changed despite the conflict (%v)", err)
 	}
 }

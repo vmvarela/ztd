@@ -5,7 +5,7 @@ description: Repair duplicates, broken references and missing next actions in th
 
 # Trusted system
 
-Paths relative to the store root; the root resolves as `--root` > `ZTD_ROOT` > `~/.ztd` — never derive it from the current directory. Query the lists and projects of
+Paths relative to the store root; the task store is the SQLite database, resolved as `--db` > `ZTD_DB` > `~/.ztd/ztd.db` — never derive it from the current directory. The Markdown files under `~/.ztd` are a read-only legacy backup, not the task store. Query the lists and projects of
 the affected scope; read `README.md` for recovery or structural changes.
 Run `ztd check` before repairing: it detects duplicates, invalid states and
 orphan references without modifying data. Use `show ID` to locate them.

@@ -2371,7 +2371,7 @@ func (c *CLI) routines(ctx context.Context, args []string) error {
 
 // install publishes an embedded bundle with a no-clobber preflight: the
 // whole bundle is classified before the first write, and any conflict
-// aborts with nothing written. `opencode` lands in $HOME/.config/opencode,
+// aborts with no files written. `opencode` lands in $HOME/.config/opencode,
 // `templates` in the store root (the directory of --db), which must exist.
 func (c *CLI) install(args []string) error {
 	if len(args) == 0 {
@@ -2412,7 +2412,7 @@ func (c *CLI) install(args []string) error {
 	}
 	if len(report.Conflicts) > 0 {
 		c.data = report
-		return domain.NewError(domain.Conflict, "install aborted, nothing written:\n%s",
+		return domain.NewError(domain.Conflict, "install aborted, no files written:\n%s",
 			strings.Join(report.Conflicts, "\n"))
 	}
 	if c.JSON {

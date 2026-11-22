@@ -211,7 +211,7 @@ func TestSymlinkTargetConflicts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(elsewhere, target); err != nil {
-		t.Fatalf("symlink: %v", err)
+		t.Skipf("symlink not supported here: %v", err)
 	}
 
 	rep, err := Run(fsys, Config{Root: root, Version: "v1"})
@@ -270,5 +270,208 @@ func TestRequireRootMissingRootErrors(t *testing.T) {
 	kept, err := os.ReadFile(fileRoot)
 	if err != nil || string(kept) != "not a store\n" {
 		t.Fatalf("file root = %q (%v)", kept, err)
+	}
+}
+
+// TestAncestorConflicts covers the checkDir path: a regular file or a
+// symlink where a bundle directory belongs aborts the run with no writes,
+// not just a symlink at a leaf.
+func TestAncestorConflicts(t *testing.T) {
+	wantConflict := func(t *testing.T, rep Report, needle string) {
+		t.Helper()
+		for _, c := range rep.Conflicts {
+			if strings.Contains(c, needle) {
+				return
+			}
+		}
+		t.Fatalf("conflicts %v do not contain %q", rep.Conflicts, needle)
+	}
+	assertNoWrites := func(t *testing.T, root string) {
+		t.Helper()
+		if _, err := os.Stat(filepath.Join(root, "templates")); !os.IsNotExist(err) {
+			t.Fatalf("run wrote into a conflicted root (err %v)", err)
+		}
+		if _, err := os.Stat(filepath.Join(root, ManifestName)); !os.IsNotExist(err) {
+			t.Fatalf("run wrote the manifest into a conflicted root (err %v)", err)
+		}
+	}
+
+	t.Run("file where a directory belongs", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "opencode")
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		skills := filepath.Join(root, "skills")
+		if err := os.WriteFile(skills, []byte("not a directory\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rep, err := Run(testFS(testFiles), Config{Root: root, Version: "v1"})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		wantConflict(t, rep, skills)
+		got, err := os.ReadFile(skills)
+		if err != nil || string(got) != "not a directory\n" {
+			t.Fatalf("ancestor file = %q (%v)", got, err)
+		}
+		assertNoWrites(t, root)
+	})
+
+	t.Run("symlink where a directory belongs", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "opencode")
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		skills := filepath.Join(root, "skills")
+		if err := os.Symlink(t.TempDir(), skills); err != nil {
+			t.Skipf("symlink not supported here: %v", err)
+		}
+		rep, err := Run(testFS(testFiles), Config{Root: root, Version: "v1"})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		wantConflict(t, rep, "symlink ancestor "+skills)
+		assertNoWrites(t, root)
+	})
+}
+
+// TestReadManifestEdges pins how a broken manifest is read: malformed,
+// unsupported or oversized content is treated as absent, while a manifest
+// that is not a regular file is a conflict.
+func TestReadManifestEdges(t *testing.T) {
+	absent := func(t *testing.T, m manifest, msg string, err error) {
+		t.Helper()
+		if err != nil || msg != "" {
+			t.Fatalf("readManifest = (%+v, %q, %v), want absent", m, msg, err)
+		}
+		if m.ZTDVersion != "" || len(m.Assets) != 0 {
+			t.Fatalf("manifest = %+v, want empty", m)
+		}
+	}
+	path := func(t *testing.T) string {
+		return filepath.Join(t.TempDir(), ManifestName)
+	}
+
+	t.Run("malformed json", func(t *testing.T) {
+		p := path(t)
+		if err := os.WriteFile(p, []byte("{not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		m, msg, err := readManifest(p)
+		absent(t, m, msg, err)
+	})
+
+	t.Run("wrong format", func(t *testing.T) {
+		p := path(t)
+		body := `{"format":2,"ztd_version":"x","assets":{}}`
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		m, msg, err := readManifest(p)
+		absent(t, m, msg, err)
+	})
+
+	t.Run("oversized", func(t *testing.T) {
+		p := path(t)
+		f, err := os.Create(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Truncate(maxAssetBytes + 1); err != nil {
+			f.Close()
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		m, msg, err := readManifest(p)
+		absent(t, m, msg, err)
+	})
+
+	t.Run("directory", func(t *testing.T) {
+		p := path(t)
+		if err := os.Mkdir(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_, msg, err := readManifest(p)
+		if err != nil || !strings.Contains(msg, "not a regular file") {
+			t.Fatalf("readManifest msg = %q, err = %v, want not-a-regular-file conflict", msg, err)
+		}
+	})
+
+	t.Run("symlink", func(t *testing.T) {
+		p := path(t)
+		target := filepath.Join(t.TempDir(), "elsewhere")
+		if err := os.WriteFile(target, []byte(`{"format":1}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, p); err != nil {
+			t.Skipf("symlink not supported here: %v", err)
+		}
+		_, msg, err := readManifest(p)
+		if err != nil || !strings.Contains(msg, "not a regular file") {
+			t.Fatalf("readManifest msg = %q, err = %v, want not-a-regular-file conflict", msg, err)
+		}
+	})
+}
+
+// TestVersionOnlyManifestRewrite: same SHAs but a new binary version must
+// rewrite the manifest (and only the version/timestamp change).
+func TestVersionOnlyManifestRewrite(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "opencode")
+	fsys := testFS(testFiles)
+	mustRun(t, fsys, Config{Root: root, Version: "v1"})
+	before, err := os.ReadFile(filepath.Join(root, ManifestName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rep := mustRun(t, fsys, Config{Root: root, Version: "v2"})
+	if rep.Installed != 0 || rep.Updated != 0 || rep.Unchanged != len(testFiles) {
+		t.Fatalf("report = %+v, want all %d unchanged", rep, len(testFiles))
+	}
+	after, err := os.ReadFile(filepath.Join(root, ManifestName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) == string(after) {
+		t.Fatal("manifest was not rewritten for a version change")
+	}
+	var m1, m2 manifest
+	if err := json.Unmarshal(before, &m1); err != nil {
+		t.Fatalf("parse before: %v", err)
+	}
+	if err := json.Unmarshal(after, &m2); err != nil {
+		t.Fatalf("parse after: %v", err)
+	}
+	if m1.ZTDVersion != "v1" || m2.ZTDVersion != "v2" {
+		t.Fatalf("versions = %q -> %q, want v1 -> v2", m1.ZTDVersion, m2.ZTDVersion)
+	}
+	if !sameShas(m1.Assets, m2.Assets) {
+		t.Fatalf("assets changed on a version-only rewrite: %v -> %v", m1.Assets, m2.Assets)
+	}
+}
+
+// TestDeletedManagedFileIsRestored: a file the manifest records but that is
+// gone from disk is an install, not a conflict.
+func TestDeletedManagedFileIsRestored(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "opencode")
+	fsys := testFS(testFiles)
+	mustRun(t, fsys, Config{Root: root, Version: "v1"})
+
+	rel := "commands/ztd/plan.md"
+	if err := os.Remove(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
+		t.Fatal(err)
+	}
+	rep := mustRun(t, fsys, Config{Root: root, Version: "v1"})
+	if rep.Installed != 1 || rep.Updated != 0 || rep.Unchanged != len(testFiles)-1 {
+		t.Fatalf("report = %+v, want 1 installed", rep)
+	}
+	got, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatalf("restored file: %v", err)
+	}
+	if string(got) != testFiles[rel] {
+		t.Fatalf("%s = %q, want %q", rel, got, testFiles[rel])
 	}
 }

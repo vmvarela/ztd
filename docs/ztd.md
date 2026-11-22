@@ -102,7 +102,7 @@ Both commands preflight the whole bundle before the first write: a missing
 file is installed, an identical one is left unchanged, and a file whose hash
 matches the previous `.ztd-assets.json` manifest is upgraded. Anything else —
 a file you edited, a symlink, a foreign file — is a conflict: every conflict
-is reported and nothing is written. `--dry-run` reports the counts and
+is reported and no files are written. `--dry-run` reports the counts and
 conflicts without writing. `install templates` never creates the store root:
 it is `invalid_input` until `ztd init` has created it.
 
