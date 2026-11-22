@@ -1,249 +1,173 @@
-# ztd
+# ZTD
 
-A small task manager for humans and agents. Tasks are plain Markdown in a Git
-repository; `ztd` reads and edits them with atomic writes, file locking and a
-recoverable journal.
+ZTD is a local task system for one person working with an AI agent. It keeps
+commitments, plans and continuity in one SQLite database so an agent can resume
+work without replaying a conversation, and it keeps the Zen To Done method
+visible instead of turning into a generic issue tracker.
 
-One static binary, no runtime.
+This repository is the Go implementation: a clean rewrite of the earlier Zig
+tool. The Markdown store remains supported only as a read-only import source.
+
+## Attribution
+
+ZTD is an independent implementation inspired by [Zen To Done](https://zenhabits.net/zen-to-done/)
+by Leo Babauta. It is not affiliated with, endorsed by, or an official product
+of Zen Habits or Leo Babauta.
+
+## Status
+
+Working today: capture, process, list and move work items, prepare, daily
+plans, focus sessions, reviews, routines, source registration with reported
+batch ingestion, legacy import, export/restore, snapshots, integrity checks,
+knowledge search, lint and archive over the document layer, a local stdio MCP
+server and a `status` report of the environment.
+
+Not built yet: provider connectors, calendars, external focus blocks and the
+LLM Wiki. Nothing contacts a network service; those are separate stages, not
+implicit features of the CLI.
+
+## Backup
+
+The approved backup path is `ztd snapshot` to an iCloud-synced directory
+(approved 2026-11-22). Restic is optional, and remote backup automation is
+not built.
 
 ## Install
 
-```bash
+Release binaries ship on the
+[releases page](https://github.com/vmvarela/ztd/releases) with a
+`sha256sums.txt` manifest:
+
+> **Caveat:** the one-line installers resolve the latest GitHub release.
+> Until the first Go release is tagged they will install the previous Zig
+> binary. Build from source (below) or set `ZTD_VERSION` to the Go release.
+
+```sh
 # macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/vmvarela/ztd/master/install.sh | sh
+```
 
+```powershell
 # Windows PowerShell
 irm https://raw.githubusercontent.com/vmvarela/ztd/master/install.ps1 | iex
 ```
 
-Or build from source with Zig 0.17:
+Or build from source (requires Go 1.27.4):
 
-```bash
-zig build -Doptimize=ReleaseSafe
-./zig-out/bin/ztd version
+```sh
+go build -o ztd ./cmd/ztd
+./ztd version
 ```
 
-Packages are published through Homebrew, WinGet, Scoop, npm, APT, RPM, APK,
-AUR and Nix. See [docs/install.md](docs/install.md).
-
-Publish the OpenCode integration (skills and commands) with:
-
-```bash
-ztd install opencode
-```
-
-Upgrade the six method templates in the store root with:
-
-```bash
-ztd install templates
-```
+The OpenCode integration in `integrations/opencode/` is copied manually until
+`ztd install opencode` is ported; the Go binary does not implement
+`ztd install templates`.
 
 ## Quick start
 
-```bash
-ztd init                 # global store at ~/.ztd (--local for ./ztd)
-
-ztd capture "Review the week's plan" "Prepare demo"
-ztd list
-ztd move T-20261111-001 next --field context:personal
-ztd show T-20261111-001
-ztd check
+```sh
+./ztd --db ~/.ztd/ztd.db init --actor victor \
+  --scope id=personal,kind=personal \
+  --scope id=opensource,kind=opensource
+./ztd --db ~/.ztd/ztd.db capture "call the plumber on Monday"
+./ztd --db ~/.ztd/ztd.db inbox next
+./ztd --db ~/.ztd/ztd.db process \
+  --outcome work_items --title "call the plumber" C-20261119-001
+./ztd --db ~/.ztd/ztd.db prepare
 ```
 
-`ztd init` creates the store layout. The global store at `~/.ztd` is the
-default; `ztd init PATH` uses *PATH* as the exact root and `ztd init --local`
-creates `./ztd`:
+On a terminal, drop the `--scope` flags: `init` asks for the actor and the
+scopes and shows a summary before it writes. Without a terminal and without
+flags it fails instead of inventing defaults.
 
-```text
-<store>/
-  contexts.md
-  config.json
-  inbox.md
-  lists/{next,waiting,someday,archive}.md
-  lists/projects/index.md
-  plans/daily/
-  plans/weekly/
-  routines/state.md   # recurring routines; created by init
-  templates/
-  .state/            # lock, journal; ignored by Git
-  .gitignore
-  .gitattributes
-  README.md
-```
-
-The binary only edits files. Commit them with your own Git workflow.
-
-## Task format
-
-```text
-- [ ] T-20261111-001 | Title | context: work | client: acme | project: work/acme/demo | captured_at: 2026-11-11
-```
-
-- ID: `T-YYYYMMDD-NNN`, at least three digits.
-- `context` is required outside `inbox` and must exist in `contexts.md`.
-- `client` and `project` are optional, subject to `config.json` policy.
-- Projects are registered by path: `lists/projects/<context>[/<client>]/<project>.md`.
-- `archive` entries use `[x]`, require `resolution`, and get `closed_at`.
-- `waiting` entries require `waiting_on`.
-- `captured_at` and `closed_at` hold dates.
-
-`config.json` controls client rules:
+Every command accepts `--json` and returns an envelope:
 
 ```json
-{"format":2,"policy":{"requireClientFor":["work"],"clientOnlyIn":["work"]}}
+{"ok": true, "command": "capture", "data": {"id": "C-20261119-001", "processing_state": "pending"}}
 ```
+
+Errors use stable families such as `invalid_input`, `stale_revision` and
+`scope_denied`.
+
+An agent can use the same core over stdio:
+
+```sh
+./ztd mcp
+```
+
+See [MCP](docs/mcp.md) for registration, tools and approval rules.
+
+## Data
+
+The database is the only authority. Default path: `ZTD_DB` or
+`~/.ztd/ztd.db`. Pass `--db` to choose another file. Nothing reads
+`~/.ztd` unless you explicitly import a copy.
+
+Scopes separate personal, open-source and client work inside one file. They
+are user configuration: `init` and `scope add` declare them, nothing is seeded
+behind your back, and a `ScopeBinding` is fixed before a command runs — queries
+and mutations cannot widen it from model-controlled arguments. There is one
+planning view over every declared scope; its default binding excludes
+`client:*` and `work` scopes, and a client scope is selected explicitly with
+`--scope`, `ZTD_SCOPES` or a `.ztd.json` hint. `--scope` narrows a command to
+one of them and is rejected when it is outside that view.
 
 ## Commands
 
-```text
-ztd init [path] [--local]
-ztd status [--json]
-ztd capture <text>... | --stdin
-ztd list [--context C] [--client X] [--project P] [--list L]
-ztd show <id>
-ztd move <id> <list> [--text T] [--field k:v] [--unset k] [--expect-line N]
-ztd plan --context C [--client X] [--date YYYY-MM-DD]
-ztd check [--strict] [--bindings]
-ztd migrate --from SOURCE --to DEST [--dry-run]
-ztd recover
-ztd due
-ztd routine done <id>
-ztd tui
-ztd agent-capture --scope S --request TEXT [--project P] [--objective T] [--constraints T] [--idempotency-key K] [--db PATH]
-ztd agent-checkpoint ID --scope S --expect-rev N --result TEXT [--kind progress|done] [--evidence T] [--next T] [--idempotency-key K] [--db PATH]
-ztd agent-prepare ID --scope S [--history N] [--db PATH]
-ztd agent-remember --scope S --kind K --text T [--source SRC] [--idempotency-key K] [--db PATH]
-ztd agent-recall --scope S --query Q [--limit N] [--db PATH]
-ztd agent-backup --out FILE [--db PATH]
-ztd agent-export --out FILE [--db PATH]
-ztd agent-restore --from FILE [--db PATH]
-ztd version
+| Command | Purpose |
+| --- | --- |
+| `init` | Declare the database's scopes (interactive on a terminal, flags in scripts) |
+| `scope add\|list` | Declare and list scopes |
+| `capture` | Store text in the inbox |
+| `inbox next` | Return the oldest pending capture |
+| `process` | Turn a capture into work items, a reference, an immediate result, a defer or a discard |
+| `goal set\|show` | Record or read the active primary goal |
+| `prepare` | Read-only daily brief: active goal, committed MITs, candidates, checkpoints |
+| `plan commit` | Commit a daily or weekly plan |
+| `focus start\|checkpoint\|finish` | Run one open focus session |
+| `review` | Record a daily or weekly review |
+| `source add\|apply\|list\|review` | Register sources in an explicit scope, sync user configuration over the file's scopes, list coverage with `--all`/`--scope`, feed a reported batch |
+| `routines due\|done` | Track recurring routines |
+| `context add\|list` | Declare and read GTD context names inside a scope |
+| `doc put\|get\|list\|log\|lint\|archive\|search\|related` | Create, read and list documents (knowledge cards, plans, reviews, …) by kind and slug, with a history log, a link lint, full-text search, link relations and an `answers/` Q&A archive |
+| `project add\|list\|show` | Declare and read projects, including repository URL and clone path |
+| `find`, `show` | Query work items |
+| `list` | Show one list: `--list inbox\|next\|waiting\|someday\|archive`, `--context`, `--project` |
+| `move` | Move a work item between `next`, `waiting`, `someday` and `archive`, with `--field` custom fields |
+| `status` | Report database, profile, actor, scopes and the `.ztd.json` binding hint |
+| `due`, `routine done` | Aliases of `routines due` and `routines done` |
+| `migrate import\|verify` | Import a verified copy of the legacy store |
+| `migrate documents` | Populate the document layer and project repositories from a verified legacy copy |
+| `mcp` | Run the local stdio MCP server for an agent |
+| `export`, `restore`, `snapshot` | Move and preserve the database |
+| `check` | Verify database invariants, or validate the `.ztd.json` routing hint with `--bindings` |
+
+Run `./ztd <command> -h` for flags.
+
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [Using ZTD](docs/ztd.md)
+- [MCP](docs/mcp.md)
+- [Sources](docs/sources.md)
+- [Migrating the Markdown store](docs/migration.md)
+- [Dependency spikes](docs/specs/spikes.md)
+- [Legacy format inventory](docs/specs/legacy-inventory.md)
+
+## Checks
+
+```sh
+gofmt -l .
+go vet ./...
+go test ./...
+go test -race ./...
+go test ./test/integration -count=1
+go mod verify
+go build -o ./ztd ./cmd/ztd
 ```
 
-Global flags: `--root PATH`, `--json`, `--today YYYY-MM-DD`, `--dry-run`.
-Root precedence: `--root` > `ZTD_ROOT` > `~/.ztd`; the root is never
-discovered from the current directory.
-
-`ztd status [--json]` reports the resolved store root, its source (`flag`,
-`env` or `home`), whether the store exists, its `config.json` format, and the
-current repository binding. The JSON envelope carries `root`, `source`,
-`exists`, `format` (`null` when unreadable), then `binding`. `binding` is `null`
-when none is found; otherwise it contains `path`, `value` and `error`. A valid
-`value` has exactly `context`, `client` and `project`; malformed bindings appear
-with a null value and an error. Status still reports the root and exits 0 if a
-binding is missing or malformed. It never creates files, so it works when the
-store is absent.
-
-`list` without `--list` returns `inbox`, `next`, `waiting` and `someday`.
-`--client` and `--project` require `--context`.
-
-`ztd tui` opens a read-only terminal browser for the whole store: every list
-group, project, plan, review, knowledge card, journal entry and routine, with
-the selected document on the right. It starts on Today — the active goal from
-`goals/active.md` plus today's MITs from the daily plan — and a missing goal
-or plan simply omits those rows. Keys: arrows or `j`/`k`, `enter` to expand a
-group or open an item in a tab, `[`/`]` to cycle tabs, `x` to close one, `tab`
-to switch panes, `ctrl+p` for the command palette, `/` to filter, `t` to cycle
-theme, `z` for zen reading mode, `?` for help, `q` to quit. Today is pinned; up
-to eight more documents stay open, and the strip hides below 100 columns. Three
-themes — `paper`, `tea`, `amber` — default from `config.json` with
-`"tui": { "theme": "tea" }`; absent or invalid falls back to `paper`.
-Selection, navigation and the once-a-second live refresh are unchanged, the
-mouse scrolls, drags the divider, drags scrollbars and clicks tabs, and it
-never writes or holds the store lock. The interface is in English; documents
-keep their original language.
-
-### Repository binding
-
-Each repository can contain a `.ztd.json` with exactly three keys: `context`
-and `project` are nonblank strings; `client` is a nonblank string or `null`.
-The CLI discovers the nearest binding from the current directory up to the
-current Git repository boundary. A nested repository does not inherit its
-parent's binding. The binding is a routing hint, not authorization, and never
-changes store-root resolution.
-
-`ztd check --bindings` validates the current repository's binding against the
-store's contexts, client policy and registered project. It fails when the
-binding is missing or invalid. It does not inspect remotes or clone paths.
-
-### Format-1 conversion
-
-`ztd migrate --from SOURCE --to DEST` makes a copy-only conversion into a new
-format-2 store. Both paths are explicit exact directories; `DEST` must not
-exist. The source is never modified, and `.git` administration and `.state/`
-are not copied. `--dry-run` performs validation and previews any inferred
-format/config or new routine baseline without writing. The converter preserves
-task titles, values, custom fields, unknown configuration properties and
-unrelated files; it rejects ambiguous formats, malformed data, field
-collisions and unsafe paths rather than guessing. If a historical source has
-no `config.json`, conversion requires format-1 structural evidence and uses
-empty client-policy arrays. If routine state is genuinely absent, the
-converter starts the current default routines at the conversion date as a new
-scheduling baseline; it does not claim past work.
-
-`move --expect-line N` is optimistic concurrency: if the task is not on line
-`N` of its source file, `ztd` returns `stale_task` and writes nothing.
-
-### Agent store
-
-The `agent-*` commands record assignments and checkpoints in a local
-SQLite store (`--db` > `ZTD_AGENT_DB` > per-OS default). They need no Markdown
-store, reject `--root`, `--today` and `--dry-run`, accept `--json`, and
-print the JSON envelope by default. The store is independent of the Markdown
-lists; it does not replace them. Details and error codes: [docs/spec.md](docs/spec.md).
-
-Durability: `agent-export --out FILE` writes every scope, assignment,
-checkpoint, idempotency and knowledge row as a versioned JSON export
-(`format` `ztd-agent-export`, `version` 2; version-1 documents still
-restore); `agent-restore --from FILE`
-imports it into an empty store, refusing a non-empty target or a malformed
-file with `invalid_argument` and verifying counts and revisions before the
-commit, so a failed restore writes nothing; `agent-backup --out FILE` makes a
-consistent single-file copy (`VACUUM INTO`) that never overwrites an existing
-file and opens through the schema gate. `agent-prepare ID --scope S
---history N` returns up to `N` checkpoints newest-first alongside the latest
-one. These are operator actions and are CLI only.
-
-`agent-remember --scope S --kind K --text T` stores one knowledge record
-(`fact`, `decision`, `constraint` or `procedure`) and `agent-recall --scope S
---query Q` finds the records of that one scope by full text, best match
-first.
-
-## JSON
-
-All commands support `--json`:
-
-```json
-{"ok":true,"command":"list","data":{"tasks":[]}}
-{"ok":false,"command":"move","error":{"code":"stale_task","message":"StaleTask"}}
-```
-
-Exit codes: `0` success, `1` domain error, `2` usage.
-
-## Guarantees
-
-These apply to the Markdown task lists, not to the agent store.
-
-- Mutations take an exclusive lock; reads take a shared lock.
-- Every write is atomic: readers see the old or the new file, never a partial one.
-- A mutation writes `.state/pending.json` before touching task files. If the
-  process dies, `ztd recover` finishes the transaction or reports
-  `recover_conflict` if the file changed outside `ztd`.
-- `check` reports duplicate IDs, malformed entries, invalid states and
-  references to unknown IDs.
-
-## Development
-
-```bash
-zig build test
-zig fmt --check build.zig src
-```
-
-The test suite uses synthetic stores only. It never reads user data.
-
-See [docs/spec.md](docs/spec.md) for the data model, transition rules and the
-methodical specifications behind the engine.
+`scripts/check.sh` runs the same list.
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).

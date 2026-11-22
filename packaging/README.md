@@ -1,5 +1,11 @@
 # Packaging
 
+> **Legacy / follow-up:** the adapters documented here describe the Zig
+> release. The Go release workflow (`.github/workflows/release.yml`)
+> publishes only the native binaries and `sha256sums.txt`; re-enabling
+> Homebrew, npm, APT, RPM, APK, Scoop, WinGet, AUR and Nix publishing is a
+> follow-up, not part of the Go rewrite.
+
 The release workflow in `.github/workflows/release.yml` builds 12 native
 binaries, three package formats, and publishes to the external repositories
 below.
@@ -29,15 +35,14 @@ Jobs whose secret is absent are skipped. The binary release still succeeds.
 
 ## Package files
 
-- `packaging/nfpm.yaml` — deb, rpm and apk layout (binary + license).
+- `packaging/nfpm.yaml` — deb, rpm and apk layout (binary + license); the
+  man-page entry was dropped because the Go CLI has no man page yet.
 - `packaging/npm/` — npm wrapper and platform binary map.
-- `docs/ztd.1.scd` — manual page source; generate with `scdoc < docs/ztd.1.scd > ztd.1`.
 
 ## Release checklist
 
-1. `zig build test` and `bash test/integration.sh`.
+1. `bash scripts/check.sh` (gofmt, vet, tests, race, integration, build).
 2. Tag `vX.Y.Z`.
 3. Wait for the draft release; verify `sha256sums.txt` covers every asset.
 4. Publish the release.
-5. Check `brew`, `scoop`, `winget`, `npm`, `apt`, `dnf`, `apk`, `yay` and
-   `nix profile install` on a clean machine.
+5. Check the one-line installers on a clean machine.

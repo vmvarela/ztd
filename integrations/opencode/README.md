@@ -1,5 +1,12 @@
 # OpenCode adapter for ZTD
 
+> **Go rewrite caveat:** the Go rewrite does **not** implement
+> `ztd install opencode` or `ztd install templates`. The commands described
+> below belong to the previous Zig CLI. Until the install command is ported,
+> copy `integrations/opencode/` into `~/.config/opencode/` manually
+> (`skills/` → `~/.config/opencode/skills/`, `commands/` →
+> `~/.config/opencode/commands/`).
+
 This folder is only an adapter: the neutral method lives in
 [`../../method/README.md`](../../method/README.md). Here are the generic
 OpenCode assets —skills and commands— that apply
