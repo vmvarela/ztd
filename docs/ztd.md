@@ -168,6 +168,17 @@ A Profile may have one active primary goal and any number of subgoals.
 `goal set` is idempotent per key and refuses a second active primary.
 
 ```sh
+./ztd --db "$DB" goal complete
+./ztd --db "$DB" goal cancel
+```
+
+`goal complete` and `goal cancel` close the active primary goal as
+`completed` or `cancelled`, so a new primary can be set afterwards. Repeating
+the same close is idempotent, closing with the other status is
+`invalid_transition`, and a Profile without a primary goal is `not_found`.
+`goal show` returns `null` once the goal is closed.
+
+```sh
 ./ztd --db "$DB" prepare
 ```
 
@@ -233,10 +244,17 @@ Routines are recurring maintenance, not deadlines.
 ```sh
 ./ztd --db "$DB" routines due
 ./ztd --db "$DB" routines done --date 2026-11-19 inbox
+./ztd --db "$DB" routines add --id inbox --cadence daily
+./ztd --db "$DB" routines add --id review --cadence weekly:mon --last 2026-11-16
 ```
 
 `due` returns active routines whose cadence has elapsed. The operating system
 scheduler, not ZTD, is responsible for waking anyone up.
+
+`add` registers one routine row in the binding's primary scope: `--cadence`
+is `daily` or `weekly:<day>` (`mon`…`sun`), `--last` is the optional date of
+the last run (absent means due immediately), an unknown cadence or date is
+`invalid_input` and a duplicate id is `conflict`.
 
 ## 7. Find and inspect
 
@@ -287,8 +305,8 @@ reports the local environment.
   back as `null` with a `warning`, never as a failure, and `status` never
   creates the database.
 
-`due` and `routine done ID` are aliases of `routines due` and
-`routines done ID`. `recover` is a compatibility no-op: SQLite has no Markdown
+`due`, `routine done ID` and `routine add` are aliases of `routines due`,
+`routines done ID` and `routines add`. `recover` is a compatibility no-op: SQLite has no Markdown
 journal to replay, so it reports `recovered: false` and writes nothing.
 
 ## 9. Preserve the store

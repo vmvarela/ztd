@@ -215,6 +215,17 @@ func (s *Service) ActiveGoal(ctx context.Context, b domain.ScopeBinding) (*domai
 	return s.Repo.ActiveGoal(ctx, b)
 }
 
+// SetGoalStatus closes the Profile's primary goal: "completed" or
+// "cancelled". Repeating the same close is idempotent; the other terminal
+// status is invalid_transition and a Profile without a primary goal is
+// not_found.
+func (s *Service) SetGoalStatus(ctx context.Context, b domain.ScopeBinding, status string) (domain.Goal, error) {
+	if err := b.Validate(); err != nil {
+		return domain.Goal{}, err
+	}
+	return s.Repo.SetGoalStatus(ctx, b, status, s.now())
+}
+
 func (s *Service) Prepare(ctx context.Context, b domain.ScopeBinding, date string) (PlanBrief, error) {
 	if err := b.Validate(); err != nil {
 		return PlanBrief{}, err
@@ -253,6 +264,15 @@ func (s *Service) CommitPlan(ctx context.Context, cmd CommitPlanCmd) (domain.Pla
 		return domain.Plan{}, domain.NewError(domain.RulesAcknowledgement, "daily plan has %d MITs; an override is required", mits)
 	}
 	return s.Repo.CommitPlan(ctx, cmd, s.now())
+}
+
+// AddRoutine registers a routine row in the binding's primary scope; the
+// cadence follows the due list semantics (daily or weekly:<day>).
+func (s *Service) AddRoutine(ctx context.Context, cmd RoutineAddCmd) (domain.Routine, error) {
+	if err := cmd.Binding.Validate(); err != nil {
+		return domain.Routine{}, err
+	}
+	return s.Repo.AddRoutine(ctx, cmd)
 }
 
 func (s *Service) StartFocus(ctx context.Context, cmd FocusStartCmd) (domain.FocusSession, []domain.Checkpoint, error) {

@@ -126,13 +126,13 @@ one of them and is rejected when it is outside that view.
 | `capture` | Store text in the inbox |
 | `inbox next` | Return the oldest pending capture |
 | `process` | Turn a capture into work items, a reference, an immediate result, a defer or a discard |
-| `goal set\|show` | Record or read the active primary goal |
+| `goal set\|show\|complete\|cancel` | Record or read the active primary goal; close it with `complete` or `cancel` |
 | `prepare` | Read-only daily brief: active goal, committed MITs, candidates, checkpoints |
 | `plan commit` | Commit a daily or weekly plan |
 | `focus start\|checkpoint\|finish` | Run one open focus session |
 | `review` | Record a daily or weekly review |
 | `source add\|apply\|list\|review` | Register sources in an explicit scope, sync user configuration over the file's scopes, list coverage with `--all`/`--scope`, feed a reported batch |
-| `routines due\|done` | Track recurring routines |
+| `routines due\|done\|add` | Track recurring routines; `add` registers one |
 | `context add\|list` | Declare and read GTD context names inside a scope |
 | `doc put\|get\|list\|log\|lint\|archive\|search\|related` | Create, read and list documents (knowledge cards, plans, reviews, …) by kind and slug, with a history log, a link lint, full-text search, link relations and an `answers/` Q&A archive |
 | `project add\|list\|show` | Declare and read projects, including repository URL and clone path |
@@ -140,7 +140,7 @@ one of them and is rejected when it is outside that view.
 | `list` | Show one list: `--list inbox\|next\|waiting\|someday\|archive`, `--context`, `--project` |
 | `move` | Move a work item between `next`, `waiting`, `someday` and `archive`, with `--field` custom fields |
 | `status` | Report database, profile, actor, scopes and the `.ztd.json` binding hint |
-| `due`, `routine done` | Aliases of `routines due` and `routines done` |
+| `due`, `routine done`, `routine add` | Aliases of `routines due`, `routines done` and `routines add` |
 | `migrate import\|verify` | Import a verified copy of the legacy store |
 | `migrate documents` | Populate the document layer and project repositories from a verified legacy copy |
 | `mcp` | Run the local stdio MCP server for an agent |
