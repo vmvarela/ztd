@@ -28,6 +28,7 @@ type Repo interface {
 	Find(ctx context.Context, b domain.ScopeBinding, query string, limit int) ([]domain.WorkItem, error)
 	SetGoal(ctx context.Context, cmd GoalCmd, now time.Time) (domain.Goal, error)
 	ActiveGoal(ctx context.Context, b domain.ScopeBinding) (*domain.Goal, error)
+	SetGoalStatus(ctx context.Context, b domain.ScopeBinding, status string, now time.Time) (domain.Goal, error)
 
 	// Focus, checkpoints, reviews and routines.
 	StartFocus(ctx context.Context, cmd FocusStartCmd, now time.Time) (domain.FocusSession, []domain.Checkpoint, error)
@@ -36,6 +37,7 @@ type Repo interface {
 	RecordReview(ctx context.Context, cmd ReviewCmd, now time.Time) (domain.Review, error)
 	DueRoutines(ctx context.Context, b domain.ScopeBinding, date string) ([]domain.Routine, error)
 	CompleteRoutine(ctx context.Context, b domain.ScopeBinding, id domain.RoutineID, date string) (domain.Routine, error)
+	AddRoutine(ctx context.Context, cmd RoutineAddCmd) (domain.Routine, error)
 
 	// Scopes and profiles: user configuration, never product constants.
 	AddScope(ctx context.Context, cmd ScopeCmd, now time.Time) (domain.Scope, error)
@@ -178,6 +180,15 @@ type GoalCmd struct {
 	StartOn   string
 	EndOn     string
 	Statement string
+}
+
+// RoutineAddCmd registers one routine row in the binding's primary scope.
+// Last is the optional YYYY-MM-DD of the last run; empty means due now.
+type RoutineAddCmd struct {
+	Binding domain.ScopeBinding
+	ID      string
+	Cadence string
+	Last    string
 }
 
 type PlanBrief struct {

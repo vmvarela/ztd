@@ -35,8 +35,9 @@ requested period. Limit journal, calendar and reviews to the requested period.
    `ztd-plan` for the next sub-goal/week. About 30 minutes as a guide.
 7. After recording the review, mark the `review` routine done with
    `ztd routine done review` when its row exists (`ztd routines due` lists the
-   rows); if the row is absent, say so and continue — there is no command to
-   add a routine row yet. The monthly review does not mark it.
+   rows); if the row is absent, create it first with `ztd routines add --id
+   review --cadence weekly:<day>` (the agreed review day) and mark it done.
+   The monthly review does not mark it.
 
 ## Monthly review
 
@@ -58,9 +59,9 @@ Read the due rows (`ztd routines due`), the routine patterns
    free for MITs. Do not impose the book's schedules or unrequested personal
    practices.
 4. Save the routine as a pattern (`ztd doc put --kind routine --slug
-   daily|weekly`), not as duplicated tasks for each date; no command adds a
-   routine row yet, so it will not appear in `ztd routines due` until one
-   exists.
+   daily|weekly`), not as duplicated tasks for each date; make it due with
+   `ztd routines add --id <id> --cadence daily|weekly:<day> [--last YYYY-MM-DD]`
+   so it appears in `ztd routines due`.
 5. Agree when to review the experience. Record real practice in the journal
    (`ztd doc put --kind journal --slug YYYY-MM-DD`) or adoption
    (`ztd doc put --kind adoption --slug adoption`) only when known; move to

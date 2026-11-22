@@ -152,3 +152,97 @@ func TestDueRoutinesFiltersScope(t *testing.T) {
 		t.Fatalf("after completion = %+v, want only other", got)
 	}
 }
+
+func TestAddRoutine(t *testing.T) {
+	e := newTestEnv(t)
+
+	// Input is rejected before any row exists.
+	if _, err := e.s.AddRoutine(e.ctx(), app.RoutineAddCmd{Binding: e.binding, ID: " ", Cadence: "daily"}); !domain.Of(err, domain.InvalidInput) {
+		t.Fatalf("empty id: %v, want invalid_input", err)
+	}
+	if _, err := e.s.AddRoutine(e.ctx(), app.RoutineAddCmd{Binding: e.binding, ID: "x", Cadence: "monthly"}); !domain.Of(err, domain.InvalidInput) {
+		t.Fatalf("unknown cadence: %v, want invalid_input", err)
+	}
+	if _, err := e.s.AddRoutine(e.ctx(), app.RoutineAddCmd{Binding: e.binding, ID: "x", Cadence: "weekly:foo"}); !domain.Of(err, domain.InvalidInput) {
+		t.Fatalf("unknown weekday: %v, want invalid_input", err)
+	}
+	if _, err := e.s.AddRoutine(e.ctx(), app.RoutineAddCmd{Binding: e.binding, ID: "x", Cadence: "daily", Last: "19-11-2026"}); !domain.Of(err, domain.InvalidInput) {
+		t.Fatalf("bad last: %v, want invalid_input", err)
+	}
+	if n := e.count("SELECT count(*) FROM routines"); n != 0 {
+		t.Fatalf("routines after rejected adds = %d, want 0", n)
+	}
+
+	inbox, err := e.s.AddRoutine(e.ctx(), app.RoutineAddCmd{Binding: e.binding, ID: "inbox", Cadence: "daily"})
+	if err != nil {
+		t.Fatalf("add daily: %v", err)
+	}
+	if inbox.Scope != "personal" || inbox.Kind != "routine" || inbox.Cadence != "daily" ||
+		!inbox.Active || inbox.Revision != 1 || inbox.LastCompletedAt != nil {
+		t.Fatalf("daily routine = %+v", inbox)
+	}
+	if _, err := e.s.AddRoutine(e.ctx(), app.RoutineAddCmd{Binding: e.binding, ID: "review", Cadence: "weekly:mon"}); err != nil {
+		t.Fatalf("add weekly: %v", err)
+	}
+	deep, err := e.s.AddRoutine(e.ctx(), app.RoutineAddCmd{Binding: e.binding, ID: "deep", Cadence: "weekly:thu", Last: "2026-11-19"})
+	if err != nil {
+		t.Fatalf("add weekly with last: %v", err)
+	}
+	if deep.LastCompletedAt == nil || domain.FormatDate(*deep.LastCompletedAt) != "2026-11-19" {
+		t.Fatalf("deep last = %v, want 2026-11-19", deep.LastCompletedAt)
+	}
+
+	// A duplicate id conflicts.
+	if _, err := e.s.AddRoutine(e.ctx(), app.RoutineAddCmd{Binding: e.binding, ID: "inbox", Cadence: "daily"}); !domain.Of(err, domain.Conflict) {
+		t.Fatalf("duplicate id: %v, want conflict", err)
+	}
+
+	// Due now: the rows without --last are due; the weekly:thu row that ran
+	// today is not.
+	due, err := e.s.DueRoutines(e.ctx(), e.binding, "2026-11-19")
+	if err != nil {
+		t.Fatalf("DueRoutines: %v", err)
+	}
+	if ids := routineIDs(due); len(ids) != 2 || ids[0] != "inbox" || ids[1] != "review" {
+		t.Fatalf("due = %v, want [inbox review]", ids)
+	}
+
+	// Completing the daily row clears it from the due list.
+	if _, err := e.s.CompleteRoutine(e.ctx(), e.binding, "inbox", "2026-11-19"); err != nil {
+		t.Fatalf("CompleteRoutine: %v", err)
+	}
+	due, err = e.s.DueRoutines(e.ctx(), e.binding, "2026-11-19")
+	if err != nil {
+		t.Fatalf("DueRoutines: %v", err)
+	}
+	if ids := routineIDs(due); len(ids) != 1 || ids[0] != "review" {
+		t.Fatalf("due after completion = %v, want [review]", ids)
+	}
+
+	// A routine of another scope belongs to that scope only.
+	osBinding := domain.ScopeBinding{Profile: "personal", Actor: "tester", Scopes: []domain.ScopeID{"opensource"}}
+	if _, err := e.s.AddRoutine(e.ctx(), app.RoutineAddCmd{Binding: osBinding, ID: "os-routine", Cadence: "daily"}); err != nil {
+		t.Fatalf("add opensource routine: %v", err)
+	}
+	personalOnly := domain.ScopeBinding{Profile: "personal", Actor: "tester", Scopes: []domain.ScopeID{"personal"}}
+	due, err = e.s.DueRoutines(e.ctx(), personalOnly, "2026-11-19")
+	if err != nil {
+		t.Fatalf("DueRoutines personal: %v", err)
+	}
+	if ids := routineIDs(due); len(ids) != 1 || ids[0] != "review" {
+		t.Fatalf("personal due = %v, want [review] without the opensource row", ids)
+	}
+
+	rep, err := e.s.Check(e.ctx(), &e.binding)
+	if err != nil || !rep.OK {
+		t.Fatalf("check after adds: ok=%v errors=%v err=%v", rep.OK, rep.Errors, err)
+	}
+}
+
+func routineIDs(rs []domain.Routine) []string {
+	ids := make([]string, len(rs))
+	for i, r := range rs {
+		ids[i] = string(r.ID)
+	}
+	return ids
+}

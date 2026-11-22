@@ -40,8 +40,8 @@ source.
    drag open items along automatically nor create new tasks to fill gaps.
 7. After committing the plan, mark the `plan` routine done with
    `ztd routine done plan` when its row exists (`ztd routines due` lists the
-   rows); if the row is absent, say so and continue — there is no command to
-   add a routine row yet.
+   rows); if the row is absent, create it first with `ztd routines add --id
+   plan --cadence daily` (agree the cadence when it differs) and mark it done.
 
 ## Week
 
@@ -60,10 +60,10 @@ source.
 Review or define with the user the outcome, reason, achievement criterion,
 horizon, mantra and near sub-goal of the active goal (`ztd goal show`; create
 one with `ztd goal set --statement S`). When an existing goal changes,
-clarify whether it was completed, paused or abandoned; there is no
-complete/cancel-goal command yet — a new primary is refused while one is
-active — so keep the agreed decision in the conversation instead of forcing a
-write. One active goal does not mean a single goal for
+clarify whether it was completed, paused or abandoned, then close the active
+goal with `ztd goal complete` or `ztd goal cancel` — a new primary is refused
+while one is active — and record the next statement with `ztd goal set
+--statement S` if there is one. One active goal does not mean a single goal for
 the whole year. Agreed actions are stored canonically in the lists and
 referenced by ID. If a new action appears, capture it with `ztd capture` and
 process its context before moving it; do not write it only in the plan. Run

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"ztd/internal/app"
 	"ztd/internal/domain"
 )
 
@@ -133,4 +134,62 @@ func (s *Store) CompleteRoutine(ctx context.Context, b domain.ScopeBinding, id d
 	r.LastCompletedAt = &day
 	r.Revision++
 	return r, nil
+}
+
+// AddRoutine registers one routine row in the binding's primary scope with
+// kind 'routine', active and revision 1. The cadence must satisfy the same
+// routineDue semantics the due list uses (daily or weekly:<day>); an absent
+// last leaves the row due immediately. A duplicate id is conflict.
+//
+// No history event: check expects history for captures, work items and
+// plans only, and CompleteRoutine writes none either.
+func (s *Store) AddRoutine(ctx context.Context, cmd app.RoutineAddCmd) (domain.Routine, error) {
+	if err := cmd.Binding.Validate(); err != nil {
+		return domain.Routine{}, err
+	}
+	id := strings.TrimSpace(cmd.ID)
+	if id == "" {
+		return domain.Routine{}, domain.Invalid("routine id is required")
+	}
+	cadence := strings.TrimSpace(cmd.Cadence)
+	if _, err := routineDue(cadence, nil, time.Time{}); err != nil {
+		return domain.Routine{}, err
+	}
+	var last *time.Time
+	if strings.TrimSpace(cmd.Last) != "" {
+		day, err := time.Parse("2006-01-02", strings.TrimSpace(cmd.Last))
+		if err != nil {
+			return domain.Routine{}, domain.Invalid("last must be YYYY-MM-DD, got %q", cmd.Last)
+		}
+		last = &day
+	}
+	out := domain.Routine{
+		ID: domain.RoutineID(id), Scope: cmd.Binding.Scopes[0], Kind: "routine",
+		Cadence: cadence, LastCompletedAt: last, Active: true, Revision: 1,
+	}
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := requireScopeDeclared(ctx, tx, out.Scope); err != nil {
+			return err
+		}
+		var one int
+		switch err := tx.QueryRowContext(ctx, "SELECT 1 FROM routines WHERE id = ?", id).Scan(&one); {
+		case err == nil:
+			return domain.NewError(domain.Conflict, "routine %s already exists", id)
+		case errors.Is(err, sql.ErrNoRows):
+		default:
+			return err
+		}
+		var lastArg any
+		if last != nil {
+			lastArg = fmtTime(*last)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO routines (id, scope_id, kind, cadence, last_completed_at, active, revision)
+			 VALUES (?, ?, 'routine', ?, ?, 1, 1)`,
+			id, string(out.Scope), cadence, lastArg); err != nil {
+			return busyOrRaw(err)
+		}
+		return nil
+	})
+	return out, err
 }

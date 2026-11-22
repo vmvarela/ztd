@@ -448,11 +448,12 @@ func (c *CLI) run(ctx context.Context, command string, args []string) error {
 		// Alias for `routines due`.
 		return c.routines(ctx, append([]string{"due"}, args...))
 	case "routine":
-		// Alias for `routines done ID`.
-		if len(args) == 0 || args[0] != "done" {
-			return domain.Invalid("usage: routine done [flags] <routine-id>")
+		// Alias for `routines done ID` / `routines add`.
+		if len(args) == 0 || (args[0] != "done" && args[0] != "add") {
+			return domain.Invalid("usage: routine done [flags] <routine-id> | " +
+				"routine add --id ID --cadence daily|weekly:<day> [--last YYYY-MM-DD]")
 		}
-		return c.routines(ctx, append([]string{"done"}, args[1:]...))
+		return c.routines(ctx, append([]string{args[0]}, args[1:]...))
 	case "prepare":
 		return c.prepare(ctx, args)
 	case "goal":
@@ -1821,16 +1822,49 @@ func (c *CLI) prepare(ctx context.Context, args []string) error {
 
 func (c *CLI) goal(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return domain.Invalid("usage: goal set|show [flags]")
+		return domain.Invalid("usage: goal set|show|complete|cancel [flags]")
 	}
 	switch args[0] {
 	case "set":
 		return c.goalSet(ctx, args[1:])
 	case "show":
 		return c.goalShow(ctx, args[1:])
+	case "complete", "cancel":
+		return c.goalStatus(ctx, args[0], args[1:])
 	default:
-		return domain.Invalid("usage: goal set|show [flags]")
+		return domain.Invalid("usage: goal set|show|complete|cancel [flags]")
 	}
+}
+
+// goalStatus closes the profile's primary goal: the complete subcommand
+// records `completed`, cancel records `cancelled`. Repeating the same close
+// is idempotent; the other terminal status is invalid_transition and a
+// profile without a primary goal is not_found.
+func (c *CLI) goalStatus(ctx context.Context, sub string, args []string) error {
+	fs := flag.NewFlagSet("goal "+sub, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	scope := fs.String("scope", "", "scope")
+	if err := fs.Parse(args); err != nil {
+		return domain.Invalid("%v", err)
+	}
+	if fs.NArg() != 0 {
+		return domain.Invalid("usage: goal %s [--scope S]", sub)
+	}
+	st, svc, b, err := c.bound(ctx, oneScope(*scope))
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	status := "completed"
+	if sub == "cancel" {
+		status = "cancelled"
+	}
+	goal, err := svc.SetGoalStatus(ctx, b, status)
+	if err != nil {
+		return err
+	}
+	c.succeed("goal "+sub, goal)
+	return nil
 }
 
 func (c *CLI) goalSet(ctx context.Context, args []string) error {
@@ -2337,7 +2371,10 @@ func (c *CLI) sourceReview(ctx context.Context, args []string) error {
 
 func (c *CLI) routines(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return domain.Invalid("usage: routines due|done [flags]")
+		return domain.Invalid("usage: routines due|done|add [flags]")
+	}
+	if args[0] == "add" {
+		return c.routineAdd(ctx, args[1:])
 	}
 	sub := args[0]
 	fs := flag.NewFlagSet("routines "+sub, flag.ContinueOnError)
@@ -2372,8 +2409,40 @@ func (c *CLI) routines(ctx context.Context, args []string) error {
 		}
 		c.succeed("routines done", r)
 	default:
-		return domain.Invalid("unknown routines subcommand %q", sub)
+		return domain.Invalid("unknown routines subcommand %q (usage: routines due|done|add)", sub)
 	}
+	return nil
+}
+
+// routineAdd registers one routine row in the binding's primary scope. The
+// cadence must be daily or weekly:<day>; --last is the optional date of the
+// last run (absent means due immediately).
+func (c *CLI) routineAdd(ctx context.Context, args []string) error {
+	const usage = "usage: routines add --id ID --cadence daily|weekly:<day> [--last YYYY-MM-DD] [--scope S]"
+	fs := flag.NewFlagSet("routines add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	scope := fs.String("scope", "", "scope")
+	id := fs.String("id", "", "routine id")
+	cadence := fs.String("cadence", "", "daily or weekly:<day>")
+	last := fs.String("last", "", "YYYY-MM-DD of the last run (default: due immediately)")
+	if err := fs.Parse(args); err != nil {
+		return domain.Invalid("%v", err)
+	}
+	if fs.NArg() != 0 {
+		return domain.Invalid(usage)
+	}
+	st, svc, b, err := c.bound(ctx, oneScope(*scope))
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	r, err := svc.AddRoutine(ctx, app.RoutineAddCmd{
+		Binding: b, ID: *id, Cadence: *cadence, Last: *last,
+	})
+	if err != nil {
+		return err
+	}
+	c.succeed("routines add", r)
 	return nil
 }
 
@@ -2798,8 +2867,9 @@ const usage = `ztd — local ZTD
                                     .ztd.json binding)
   due [--date YYYY-MM-DD]          (alias of routines due)
   routine done ID [--date YYYY-MM-DD]  (alias of routines done ID)
+  routine add --id ID --cadence C  (alias of routines add)
   prepare [--scope S] [--date YYYY-MM-DD]
-  goal set --statement S | goal show
+  goal set --statement S | goal show | goal complete|cancel [--scope S]
   plan [--context C] [--date D] [--scope S]   (read-only prepare brief)
   plan commit --period P --item ID:role
   focus start ID | focus checkpoint ID | focus finish FOCUS
@@ -2808,7 +2878,7 @@ const usage = `ztd — local ZTD
   source apply [--file PATH]        (default ~/.ztd/sources.json, or ZTD_SOURCES)
   source list [--all | --scope S...]
   source review --source ID --batch B --key K --file FILE
-  routines due|done ID
+  routines due|done ID | routines add --id ID --cadence daily|weekly:<day> [--last YYYY-MM-DD]
   context add NAME [--scope S] | context list [--scope S]
   doc put --kind K --slug S [--scope X] [--title T] [--body TEXT | --file PATH]
        [--status draft|verified|superseded] [--expected N]
