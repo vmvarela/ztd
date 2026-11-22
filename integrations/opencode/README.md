@@ -1,12 +1,5 @@
 # OpenCode adapter for ZTD
 
-> **Go rewrite caveat:** the Go rewrite does **not** implement
-> `ztd install opencode` or `ztd install templates`. The commands described
-> below belong to the previous Zig CLI. Until the install command is ported,
-> copy `integrations/opencode/` into `~/.config/opencode/` manually
-> (`skills/` → `~/.config/opencode/skills/`, `commands/` →
-> `~/.config/opencode/commands/`).
-
 This folder is only an adapter: the neutral method lives in
 [`../../method/README.md`](../../method/README.md). Here are the generic
 OpenCode assets —skills and commands— that apply
@@ -44,14 +37,16 @@ configuration.
 ### 1. Store and templates (prerequisite)
 
 Prerequisite: an initialized store. `ztd init` creates the global store at
-`~/.ztd` by default; `ztd init PATH` creates it at exactly that root and
-`ztd init --local` at `./ztd`. It also seeds the six method templates into
-`<store>/templates/` when they are absent. This block uses an explicit root:
+`~/.ztd` by default; `--db PATH` chooses another root. It does not seed the
+templates: publish the six method templates with `ztd install templates`,
+which writes them into `<store>/templates/` — the directory of `--db`. This
+block uses an explicit root:
 
 ```bash
 # from the root of this repository
-STORE="$HOME/.ztd"          # explicit store root (edit it if you use another)
-ztd init "$STORE"           # creates the store structure and templates in $STORE
+STORE="$HOME/.ztd"             # explicit store root (edit it if you use another)
+ztd --db "$STORE/ztd.db" init  # creates the store (asks for actor and scopes)
+ztd --db "$STORE/ztd.db" install templates
 ```
 
 After upgrading the binary, `ztd install templates` refreshes the six templates

@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,8 +16,10 @@ import (
 
 	"github.com/mattn/go-isatty"
 
+	"ztd"
 	"ztd/internal/app"
 	"ztd/internal/domain"
+	"ztd/internal/install"
 	"ztd/internal/mcpserver"
 	"ztd/internal/store"
 )
@@ -413,6 +416,8 @@ func (c *CLI) run(ctx context.Context, command string, args []string) error {
 		return nil
 	case "init":
 		return c.init(ctx, args)
+	case "install":
+		return c.install(args)
 	case "scope":
 		return c.scope(ctx, args)
 	case "capture":
@@ -2364,6 +2369,67 @@ func (c *CLI) routines(ctx context.Context, args []string) error {
 	return nil
 }
 
+// install publishes an embedded bundle with a no-clobber preflight: the
+// whole bundle is classified before the first write, and any conflict
+// aborts with nothing written. `opencode` lands in $HOME/.config/opencode,
+// `templates` in the store root (the directory of --db), which must exist.
+func (c *CLI) install(args []string) error {
+	if len(args) == 0 {
+		return domain.Invalid(installUsage)
+	}
+	target := args[0]
+	flags := flag.NewFlagSet("install "+target, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	dryRun := flags.Bool("dry-run", false, "classify and report without writing")
+	if err := flags.Parse(args[1:]); err != nil {
+		return domain.Invalid("%v", err)
+	}
+	if flags.NArg() != 0 {
+		return domain.Invalid(installUsage)
+	}
+	var fsys fs.FS
+	cfg := install.Config{Version: Version, DryRun: *dryRun}
+	switch target {
+	case "opencode":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return domain.NewError(domain.IOError, "resolve home directory: %v", err)
+		}
+		fsys, cfg.Prefix, cfg.Root = ztd.OpencodeFS, "integrations/opencode",
+			filepath.Join(home, ".config", "opencode")
+	case "templates":
+		fsys, cfg.Prefix, cfg.Root = ztd.TemplatesFS, "method", filepath.Dir(c.DB)
+		cfg.RequireRoot = true
+	default:
+		return domain.Invalid(installUsage)
+	}
+	report, err := install.Run(fsys, cfg)
+	if err != nil {
+		if errors.Is(err, install.ErrMissingRoot) {
+			return domain.Invalid("%v", err)
+		}
+		return err
+	}
+	if len(report.Conflicts) > 0 {
+		c.data = report
+		return domain.NewError(domain.Conflict, "install aborted, nothing written:\n%s",
+			strings.Join(report.Conflicts, "\n"))
+	}
+	if c.JSON {
+		c.succeed("install", report)
+		return nil
+	}
+	summary := fmt.Sprintf("installed %d, updated %d, unchanged %d",
+		report.Installed, report.Updated, report.Unchanged)
+	if *dryRun {
+		summary += " (dry run, nothing written)"
+	}
+	c.succeed("install", summary)
+	return nil
+}
+
+const installUsage = "usage: install opencode|templates [--dry-run]"
+
 func (c *CLI) migrate(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return domain.Invalid("usage: migrate import|verify|documents [flags]")
@@ -2708,6 +2774,8 @@ const usage = `ztd — local ZTD
 
   init [--actor A] [--non-interactive] [--scope DECL]...
         DECL = id=salud,kind=personal,name=Salud
+  install opencode [--dry-run]   (publish skills/commands to ~/.config/opencode)
+  install templates [--dry-run]  (publish method templates to <store>/templates)
   scope add --id ID --kind KIND [--name NAME] | scope list
   capture TEXT... [--scope S] [--source ID] [--key K]
   inbox next [--scope S]
