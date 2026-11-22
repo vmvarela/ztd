@@ -1,7 +1,7 @@
 {
   "name": "@vmvarela/ztd",
   "version": "0.0.0",
-  "description": "Markdown task manager for humans and agents",
+  "description": "Local task system for humans and agents",
   "license": "MIT",
   "repository": {
     "type": "git",

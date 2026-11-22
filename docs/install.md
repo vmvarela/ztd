@@ -37,9 +37,7 @@ Every release ships `sha256sums.txt` covering all binaries below.
 | FreeBSD x86_64 | `ztd-x86_64-freebsd` |
 | FreeBSD aarch64 | `ztd-aarch64-freebsd` |
 
-`ztd-riscv64-linux` is built best-effort: if that cross-build fails, the
-asset is omitted from the release and `sha256sums.txt` covers only what was
-published.
+`ztd-riscv64-linux` is built and checksummed like every other target.
 
 ## From source
 
@@ -51,12 +49,29 @@ go build -o ztd ./cmd/ztd
 install -m 0755 ztd ~/.local/bin/ztd
 ```
 
-## Package managers
+## Packages, npm and the man page
 
-Homebrew, WinGet, Scoop, npm, Debian, RPM, APK, AUR and Nix packaging still
-describe the legacy Zig release and are a follow-up; see
-[packaging/README.md](../packaging/README.md). The current Go release
-workflow publishes only the binaries above and `sha256sums.txt`.
+Every release also ships `ztd.1.gz`, the gzipped `ztd(1)` man page
+(source: [docs/ztd.1.scd](ztd.1.scd)), and publishes:
+
+- `.deb` (amd64, arm64, armhf, i386), `.rpm` (x86_64, aarch64) and `.apk`
+  (x86_64, aarch64) packages built with nfpm 2.45.1 from
+  [packaging/nfpm.yaml](../packaging/nfpm.yaml): binary, man page and
+  license. They are covered by `sha256sums.txt` like every other asset.
+- The npm package `@vmvarela/ztd`, which picks the right platform binary
+  behind a Node wrapper. The first publish is manual; afterwards the
+  release workflow publishes when the `NPM_TRUSTED_PUBLISHING` repository
+  variable is `true` (npm Trusted Publishing via OIDC, with `NPM_TOKEN` as
+  the fallback).
+- A Homebrew formula in `vmvarela/homebrew-tap` (macOS/Linux binaries plus
+  the man page), Scoop, WinGet, AUR, Nix, and the APT/RPM/APK channel
+  repositories.
+
+Nothing goes public before `publish-release` verifies every draft asset
+against `sha256sums.txt`; channel jobs whose secret is missing are skipped
+and the binary release still succeeds. Secrets, repository paths and the
+full job graph are documented in
+[packaging/README.md](../packaging/README.md).
 
 ## First run
 

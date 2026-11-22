@@ -1,20 +1,56 @@
-# nfpm configuration for ztd. VERSION and GOARCH are injected by CI.
+# nfpm package configuration for ztd
+# Used by the CI release workflow to generate .deb, .rpm and .apk packages.
+#
+# Variables injected by the CI environment before invoking nfpm:
+#   VERSION  — semver without leading "v" (e.g. "0.1.0")
+#   GOARCH   — nfpm architecture token:
+#                amd64   → x86_64 binaries  (deb: amd64,   rpm: x86_64)
+#                arm64   → aarch64 binaries (deb: arm64,   rpm: aarch64)
+#                arm7    → armv7 binaries   (deb: armhf,   rpm: armv7hl)
+#                386     → x86 binaries     (deb: i386,    rpm: i686)
+#
+# Invocation (from the CI working directory that contains the staged files):
+#   VERSION=0.1.0 GOARCH=amd64 nfpm package -p deb -f packaging/nfpm.yaml -t dist/
+#   VERSION=0.1.0 GOARCH=amd64 nfpm package -p rpm  -f packaging/nfpm.yaml -t dist/
+#   VERSION=0.1.0 GOARCH=amd64 nfpm package -p apk  -f packaging/nfpm.yaml -t dist/
+#
+# Output names match the package-distribution catalog patterns:
+#   deb: ztd_{version}_{amd64|arm64|armhf|i386}.deb
+#   rpm: ztd-{version}-1.{x86_64|aarch64}.rpm
+#   apk: ztd_{version}_{x86_64|aarch64}.apk
+
 name: ztd
 arch: "${GOARCH}"
 version: "${VERSION}"
 maintainer: vmvarela <vmvarela@gmail.com>
-description: Markdown task manager for humans and agents
+description: "Local task system for humans and agents"
 homepage: https://github.com/vmvarela/ztd
 license: MIT
 
 contents:
+  # Binary — installed into /usr/bin and made executable
   - src: ./ztd
     dst: /usr/bin/ztd
     file_info:
       mode: 0755
+
+  # Man page
+  - src: ./ztd.1.gz
+    dst: /usr/share/man/man1/ztd.1.gz
+    file_info:
+      mode: 0644
+
+  # License — Debian policy: copyright file under /usr/share/doc/<pkg>/
   - src: ./LICENSE
     dst: /usr/share/doc/ztd/copyright
     packager: deb
+
+  # License — RPM convention: under /usr/share/licenses/<pkg>/
   - src: ./LICENSE
     dst: /usr/share/licenses/ztd/LICENSE
     packager: rpm
+
+  # License — Alpine convention: under /usr/share/licenses/<pkg>/
+  - src: ./LICENSE
+    dst: /usr/share/licenses/ztd/LICENSE
+    packager: apk
