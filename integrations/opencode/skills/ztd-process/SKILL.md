@@ -5,7 +5,7 @@ description: Process the local inbox or the selected sources, making decisions w
 
 # Process
 
-Paths relative to the store root; the root resolves as `--root` > `ZTD_ROOT` > `~/.ztd` — never derive it from the current directory. Do not read plans, journal or
+Paths relative to the store root; the task store is the SQLite database, resolved as `--db` > `ZTD_DB` > `~/.ztd/ztd.db` — never derive it from the current directory. The Markdown files under `~/.ztd` are a read-only legacy backup, not the task store. Do not read plans, journal or
 knowledge cards except to classify the entry in progress; load `ztd-knowledge`
 only in the "Information" branch.
 
@@ -17,8 +17,9 @@ only in the "Information" branch.
    An ID limits processing to that entry with `show ID`. A scope filters the
    local inbox; an explicit source queries that source. "All" includes the
    local inbox and the registered sources of every scope, even when the local
-   capture is empty. For external sources, discover their registration in the
-   context/client indexes and read the linked cards; do not keep another
+   capture is empty. For external sources, discover their registration with
+   `ztd source list --all` and read the linked knowledge cards
+   (`ztd doc search`, `ztd doc get`); do not keep another
    integration list nor confuse historical background with current sources.
    Reviewing an external scope requires a review request; it is not inferred
    from a simple local filter.
@@ -48,11 +49,12 @@ and interval remain valid and there are no known changes; "update" forces a new
 query. A failed access is pending, not an empty inbox, and does not stop the
 other sources.
 
-Keep a brief record per scope in `reviews/<scope>/YYYY-MM-DD-inbox.md`
-(`<scope>` is `<context>` or `<context>/<client>`), or at the location its
-card already registers. Note source, date/time with zone, non-secret identity,
+Keep a brief record per scope with `ztd doc put --kind review --slug
+'<scope>/YYYY-MM-DD-inbox' --title T --body TEXT`
+(`<scope>` is `<context>` or `<context>/<client>`). Note source, date/time with zone, non-secret identity,
 scope/interval, coverage complete/partial/unavailable/pending, links to
-evidence and next IDs/decisions. Keep previous results when updating; do not
+evidence and next IDs/decisions. Keep previous results when updating
+(`--expected` guards the revision); do not
 copy full tickets or histories. A plan or global summary links records and
 shows only coverage, without client content. Coverage age never substitutes for
 verifying a task's state before operating on it.
@@ -60,8 +62,8 @@ verifying a task's state before operating on it.
 ## Decide and move entries
 
 Query `list --list inbox` and, to cross-check duplicates,
-`list --context CONTEXT` with `--client CLIENT` when a client is known and
-the context accepts it, and `--project ID` when it applies. Do not dump complete lists from
+`list --context CONTEXT` (a known client is its own scope, `--scope
+client:NAME`) and `--project ID` when it applies. Do not dump complete lists from
 other scopes. A local capture without context is not skipped when processing
 the whole local inbox. Resolve what is unambiguous directly and group only
 ambiguous questions; apply each move transactionally, preserving order.
@@ -75,46 +77,57 @@ stays as defined above, and captures stay scope-free.
 
 1. Clarify the outcome and whether it requires action; ask only when ambiguous.
 2. Decide from the request and the available data:
-   - No use: archive with `resolution: discarded` and a reason.
-   - Information: load `ztd-knowledge`, store the card and archive the capture
-     with a link.
-   - Future possibility: `lists/someday.md`.
+   - No use: discard it with a reason (`ztd process --outcome discard --reason
+     ...`).
+   - Information: load `ztd-knowledge`, store the card and keep the capture as
+     a reference with a link (`ztd process --outcome reference --reason ...`).
+   - Future possibility: the `someday` list — or a dated
+     `ztd process --outcome defer --review-after YYYY-MM-DD`.
    - Short action (about two minutes): do it if it is within the request and
      the available tools; before any external write (push, publication,
      comment, send or remote close) or destructive action (deletion, e.g. of
      backups, reset, mass overwrite) ask for concrete authorization: processing
-     or selecting the entry does not authorize those effects. Archive it as
-     done only after a real result.
-   - Delegated or blocked: `lists/waiting.md`, with dependency and follow-up.
-   - Executable action: `lists/next.md`, phrased with a verb and an outcome.
-3. For anything multi-step, create a card with `templates/project.md`, link it
-   from `lists/projects/index.md` and define the next action. Do not invent
+     or selecting the entry does not authorize those effects. Record it done
+     only after a real result (`ztd process --outcome immediate --evidence
+     ...`).
+   - Delegated or blocked: the `waiting` list, with dependency and follow-up.
+   - Executable action: the `next` list, phrased with a verb and an outcome.
+3. For anything multi-step, register a project with `ztd project add <id>
+   --scope S [--desired-outcome TEXT] [--repo-url URL] [--clone-path PATH]`
+   and define the next action. Do not invent
    repo URLs or clones without having them.
-4. Fill in `context` and, when a client is known, `client`; the store
-   configuration only decides whether a missing client blocks, and never drops
-   a known optional client. `project` when it applies. Register firm dates in
-   `calendar.md` with the ID, without duplicating task state.
-5. Keep the ID when moving the entry with `ztd move ID DEST` using the
-   declared root, adding `--field 'key: value'` for `context`, `client`,
-   `project`, `waiting_on` or `resolution`, or `--unset key` to drop a field. Use
+4. Fill in `context` (`ztd process --context ctx:...`) and `project`
+   (`ztd process --project ID`) when the capture is processed; a known client
+   is its own scope (`--scope client:NAME`), and no command changes them on an
+   existing item. Register firm dates with `ztd doc put --kind calendar
+   --slug calendar` with the ID, without duplicating task state.
+5. Keep the ID: resolve an inbox capture with `ztd process --outcome
+   work_items|reference|immediate|discard|defer` on the declared database
+   (`--db`/`ZTD_DB`), and move an existing work item with `ztd move ID DEST`
+   (DEST is `next`, `waiting`, `someday` or `archive`). `--field 'key: value'`
+   sets `waiting_on`, `resolution` or a custom key; `context`, `client` and
+   `project` are set at processing time and have no later setter, and there is
+   no `--unset`. Use
    `--text` only to rephrase the outcome. `ztd` validates, recovers interrupted
    moves and verifies that only one canonical location remains.
     Do not edit the lists directly. Run `check` when closing a batch of moves
     or reference changes, not after a query with no changes.
    If a decision is still missing, ask for it in this pass. If the answer does
-   not arrive, move the entry to `someday` as deferred, or to `waiting` when it
+   not arrive, defer the capture (`ztd process --outcome defer --review-after
+   YYYY-MM-DD`) or move the item to `someday`, or to `waiting` when it
    depends on a third party, adding `waiting_on` with an `@YYYY-MM-DD` follow-up
    date when known. Do not leave it in the inbox.
 
 ## Give a place
 
 When what is out of place is not an action, decide its location: knowledge to
-its context/client/project card (`ztd-knowledge`), code to registered clones
+its context/client/project cards (`ztd-knowledge`), code to registered clones
 (`ztd-repo`). When moving documents, update the links of the indexes and cards
-that reference them; consolidate duplicates only after comparing contents and
+that reference them (`ztd doc lint` re-checks them); consolidate duplicates only after comparing contents and
 keeping what is necessary. For physical materials, agree on a place and a
 concrete action; do not declare a physical organization done from the agent.
-Check that what was reorganized is findable through its indexes and summarize
+Check that what was reorganized is findable through its indexes
+(`ztd doc search`) and summarize
 the paths.
 
 Summarize decisions, pending entries and the next step. For each source state
@@ -125,6 +138,7 @@ inbox processed if some were not consulted or keep pending decisions; an empty
 local list is not enough.
 
 When the pass covered the whole local inbox and it is empty afterwards, mark
-the `inbox` routine done with `ztd routine done inbox` when `routines/state.md`
-has that row; if the row is absent, say so and continue. A pass limited to an
+the `inbox` routine done with `ztd routine done inbox` when its row exists
+(`ztd routines due` lists the rows); if the row is absent, say so and continue.
+A pass limited to an
 ID, a scope or only external sources does not mark it.

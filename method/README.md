@@ -85,19 +85,22 @@ the next day. The book example's times are not mandatory.
 ## Store conventions
 
 The book's forms inspire the goal, week, day and review templates that live in
-[`templates/`](templates/); `ztd init` seeds them into `templates/` at the
-store root when they are absent (an edited template is never overwritten).
+[`templates/`](templates/); `ztd install templates` publishes them into
+`templates/` at the store root (an edited template is never overwritten).
 
-The store root is the task-data directory. The root resolves as `--root` >
-`ZTD_ROOT` > `~/.ztd`; never derive it from the current directory.
-`ztd status [--json]` reports that root, its source (`flag`/`env`/`home`),
-whether the store exists and its format; it never creates files.
-`ztd init` creates the canonical structure (`contexts.md`, `config.json`,
-`inbox.md`, `lists/`, `plans/`, `routines/`, `README.md`) and seeds the
-`inbox`, `plan` and `review` routine rows. They are scheduling defaults, not
-obligations: delete the `review` row until you adopt the weekly habit, and
-restore it when you do. The method adds the files below, which you create as
-you adopt each habit (paths relative to the store root):
+The task store is a SQLite database: it resolves as `--db` > `ZTD_DB` >
+`~/.ztd/ztd.db`, never from the current directory. `ztd status [--json]`
+reports `database`, `profile`, `actor`, `scopes`, `effective_scopes`,
+`binding` and `warning`; it never creates files. `ztd init` creates the
+database and declares the scopes that make up the planning view. Routine rows
+(`inbox`, `plan`, `review`) arrive with a migrated store
+(`ztd migrate import`) and are scheduling defaults, not obligations:
+`ztd routine done ID` marks one only while its row exists.
+
+The Markdown layout below is the legacy store: under the store root it is a
+read-only backup that `ztd migrate import` copies into the database, not the
+task store itself. The method still adds those files as you adopt each habit
+(paths relative to the store root):
 
 | File | Contents |
 | --- | --- |
@@ -109,7 +112,7 @@ you adopt each habit (paths relative to the store root):
 | `knowledge/` | Knowledge indexes and cards per scope |
 | `passion.md` | Interests and experiments (optional) |
 | `reviews/` | Reviews and coverage records |
-| `routines/daily.md`, `routines/weekly.md` | Routine patterns (due state lives in `routines/state.md`, created by `ztd init`) |
+| `routines/daily.md`, `routines/weekly.md` | Routine patterns (legacy; in the Go store, due state lives in the database — `ztd routines due` — and only a migrated store carries rows) |
 
 Format notes (format 2): `contexts.md` is a Markdown table with `Context` and
 `Use` columns (plus optional `Clients` and `Knowledge` columns);
@@ -120,13 +123,16 @@ the weekly review checks, and the CLI does not parse it.
 
 Tasks are mutated only through the `ztd` CLI; IDs are the canonical reference
 and plans, reviews and cards reference them without duplicating state. Every
-path in this method is relative to the store root.
+path in this method is relative to the store root (the read-only Markdown
+backup).
 
 A repository's `.ztd.json` binding declares exactly its `context`, `client` and
 `project`; it is not the store and holds no tasks, clone paths, or repository
 URLs. The CLI discovers the nearest binding from the current directory up to
-the current Git repository boundary. `ztd status --json` reports it, and
-`ztd check --bindings` validates it against the resolved store. A binding is a
+the current Git repository boundary. `ztd status --json` reports it as
+`binding` (the raw object or `null`, with `warning` for a missing or malformed
+file), and `ztd check --bindings` validates it against the resolved store. A
+binding is a
 routing hint, not authorization: explicit user scope remains authoritative.
 Each clone's local path lives in its project card, outside the binding and
 store.

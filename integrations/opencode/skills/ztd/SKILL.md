@@ -5,24 +5,27 @@ description: Orient the Zen To Done system of the task store, consult its state 
 
 # ZTD
 
-Every path in the ZTD skills is relative to the store root: the task-data
-directory. The root resolves as `--root` > `ZTD_ROOT` > `~/.ztd`; never derive
-it from the current directory or look for a `ztd/` from the working directory.
-`ztd status [--json]` reports that root, its source (`flag`/`env`/`home`),
-whether the store exists and its format — without creating files — plus
-`data.binding` (step 2). Do not use this skill's directory as the root.
+Every path in the ZTD skills is relative to the store root, but the task
+store is the SQLite database: it resolves as `--db` > `ZTD_DB` > `~/.ztd/ztd.db`;
+never derive it from the current directory or look for a `ztd/` from the
+working directory. The Markdown files under `~/.ztd` are a read-only legacy
+backup, not the task store. `ztd status --json` reports `database`, `profile`,
+`actor`, `scopes`, `effective_scopes`, `binding` and `warning` — without
+creating files (step 2). Do not use this skill's directory as the store.
 
-1. For initial orientation, read `adoption.md`; for formats or structural
-   changes, `README.md` (both at the store root). Neither is a prerequisite
-   for each operation.
-2. Resolve and verify the root with `ztd status --json`: it reports `root`,
-   `source` (`flag`, `env` or `home`), `exists` and `format`, and never creates
-   files (it works when the store is absent). The same payload carries
-   `data.binding`: `null`, or `{path, value, error}` where a valid `value` is
-   exactly `{context, client, project}`, discovered within the current Git
-   repository only — a malformed nearest binding is reported and never falls
+1. For initial orientation, run `ztd status` and `ztd --help`; for the
+   adoption habit read `ztd doc get --kind adoption --slug adoption`. Neither
+   is a prerequisite for each operation.
+2. Resolve the environment with `ztd status --json`: it never creates files
+   (it works when the database is absent). It reports `database` (the
+   resolved SQLite path), `profile`, `actor`, `scopes` (declared),
+   `effective_scopes` (what a command sees with no explicit `--scope`, after
+   `ZTD_SCOPES` and the `.ztd.json` hint), `binding` and `warning`.
+   `data.binding` is the raw `.ztd.json` object or `null`, read from the
+   current Git repository only; `data.warning` explains a missing or
+   malformed file, so a malformed nearest binding is reported and never falls
    through to another file. The binding is a routing hint, not authorization,
-   and it never changes the store root (`--root` > `ZTD_ROOT` > `~/.ztd`
+   and it never changes the store database (`--db` > `ZTD_DB` > `~/.ztd/ztd.db`
    stays independent of the cwd and of the binding). An explicit request scope
    or the selected task's scope always wins; only when no scope exists
    anywhere and the binding is valid, default the filters to its context, its
@@ -31,8 +34,9 @@ whether the store exists and its format — without creating files — plus
    scope-based work. `ztd check --bindings` validates the selected repo
    binding against the resolved store and fails when it is missing or invalid.
    Then use `ztd list`, `ztd show` and `ztd plan` for task state, filtered to
-   the resolved scope, the goal and today's plan if any. A global state
-   summarizes coverage without client details. Do not open every card or
+   the resolved scope, the goal and today's plan if any.
+   `ztd source list --all` summarizes coverage globally, without client
+   details. Do not open every card or
    create empty plans.
 3. When the intent is already clear, load the specific skill directly with no
    preliminary tour:

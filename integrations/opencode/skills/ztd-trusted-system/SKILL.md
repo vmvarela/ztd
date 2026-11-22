@@ -5,8 +5,9 @@ description: Repair duplicates, broken references and missing next actions in th
 
 # Trusted system
 
-Paths relative to the store root; the root resolves as `--root` > `ZTD_ROOT` > `~/.ztd` — never derive it from the current directory. Query the lists and projects of
-the affected scope; read `README.md` for recovery or structural changes.
+Paths relative to the store root; the task store is the SQLite database, resolved as `--db` > `ZTD_DB` > `~/.ztd/ztd.db` — never derive it from the current directory. The Markdown files under `~/.ztd` are a read-only legacy backup, not the task store. Query the lists and projects of
+the affected scope; use `ztd --help` and `ztd status` for recovery or
+structural changes.
 Run `ztd check` before repairing: it detects duplicates, invalid states and
 orphan references without modifying data. Use `show ID` to locate them.
 `ztd check --bindings` additionally validates the selected repo binding
@@ -19,7 +20,7 @@ a routing hint, not authorization, and never changes the store root.
 1. A pending transaction cannot be recovered from queries: when executing use
    `ztd recover` and repeat the check. In Plan mode only report.
    If you find duplicates or a transaction with external edits, stop
-   automatic mutations and keep the files/journal. Compare the content and ask
+   automatic mutations and keep the records. Compare the content and ask
    for a decision before reconciling; do not confuse plan references with
    duplicates. Never resolve a discrepancy by deleting an entry to make the
    error disappear.

@@ -5,9 +5,7 @@ description: Pick daily MITs, weekly Big Rocks or an active goal from real capac
 
 # Plan
 
-Paths relative to the store root; the root resolves as `--root` > `ZTD_ROOT` > `~/.ztd` — never derive it from the current directory. Read `goals/active.md`,
-`calendar.md`, actions/waitings through `list` with filters, and only the
-relevant project cards. Do not walk knowledge indexes or cards without candidate
+Paths relative to the store root; the task store is the SQLite database, resolved as `--db` > `ZTD_DB` > `~/.ztd/ztd.db` — never derive it from the current directory. The Markdown files under `~/.ztd` are a read-only legacy backup, not the task store. Read the active goal with `ztd goal show` and today's brief with `ztd prepare`, actions/waitings through `list` with filters, and only the relevant project cards. Do not walk knowledge indexes or cards without candidate
 actions. Get the current local date; interpret an explicit date when provided.
 With no scope in the request or from a selected task, default those `list`
 filters from a valid `data.binding` (`ztd status --json`); a malformed binding
@@ -23,38 +21,49 @@ source.
    pending accesses without blocking the plan. Do not process or automatically
    import every capture or finding. For future/past dates do not simulate that
    day's coverage.
-2. Read the day plan if it exists, yesterday's plan and the week plan; consult
-   the journal only when it affects capacity or priorities. Preserve results
-   and decisions already recorded. If yesterday's plan exists, list its MITs
-   still in `next` as capacity input and those in `waiting` as blocked; do not
-   move them.
+2. Read the day plan if it exists and yesterday's plan with
+   `ztd prepare --date YYYY-MM-DD` (`data.plan`); the weekly plan has no read
+   command yet, so ask the user for last week's Big Rocks. Consult the
+   journal (`ztd doc list --kind journal`) only when it affects capacity or
+   priorities. Preserve results and decisions already recorded. If
+   yesterday's plan exists, list its MITs still in `next` as capacity input
+   and those in `waiting` as blocked; do not move them.
 3. Consider commitments and known availability; ask only what is missing to choose.
 4. Pick 1–3 MITs in total, not per context. Connect one to the goal when one
    exists. For each MIT, note in one line which outcome would make it enough today.
-5. Use `templates/day.md` for `plans/daily/YYYY-MM-DD.md`.
-   Reference canonical IDs and propose blocks with slack and batched small
-   tasks. Omit sections that have nothing to record.
-6. Reuse the file when it exists, preserving results; do not drag open items
-   along automatically nor create new tasks to fill gaps.
-7. After saving the plan, mark the `plan` routine done with
-   `ztd routine done plan` when `routines/state.md` has that row; if the row is
-   absent, say so and continue.
+5. Commit the day plan with `ztd plan commit --kind daily --period
+   YYYY-MM-DD --item ID:mit ...` (repeat `--item`; roles `mit`, `big_rock`,
+   `batch`). Reference canonical IDs and propose blocks with slack and batched
+   small tasks. Omit items that have nothing to record.
+6. When the plan already exists, re-commit over it with `--expected
+   <revision>` (from `ztd prepare`'s `data.plan`), preserving results; do not
+   drag open items along automatically nor create new tasks to fill gaps.
+7. After committing the plan, mark the `plan` routine done with
+   `ztd routine done plan` when its row exists (`ztd routines due` lists the
+   rows); if the row is absent, say so and continue — there is no command to
+   add a routine row yet.
 
 ## Week
 
 1. Compute the Monday of the requested week (current by default).
-2. Read the previous review, calendar and goals. Choose few Big Rocks: 4–6 as
-   a guide.
-3. Save `plans/weekly/YYYY-MM-DD.md` from `templates/week.md`, with IDs and
-   proposed blocks according to capacity. Honor real dates from every client.
-   Omit sections that have nothing to record.
+2. Read the previous review (`ztd doc list --kind review`; structured
+   `ztd review` records have no read command yet), the calendar
+   (`ztd doc get --kind calendar --slug calendar`) and the goal
+   (`ztd goal show`). Choose few Big Rocks: 4–6 as a guide.
+3. Commit the week plan with `ztd plan commit --kind weekly --period
+   YYYY-Www --item ID:big_rock ...` (roles `big_rock` and `batch` only), with
+   IDs and proposed blocks according to capacity. Honor real dates from every
+   client. Omit items that have nothing to record.
 
 ## Goal
 
 Review or define with the user the outcome, reason, achievement criterion,
-horizon, mantra and near sub-goal in `goals/active.md`. When an existing goal
-changes, clarify whether it was completed, paused or abandoned and keep the
-record in `goals/archive.md`. One active goal does not mean a single goal for
+horizon, mantra and near sub-goal of the active goal (`ztd goal show`; create
+one with `ztd goal set --statement S`). When an existing goal changes,
+clarify whether it was completed, paused or abandoned; there is no
+complete/cancel-goal command yet — a new primary is refused while one is
+active — so keep the agreed decision in the conversation instead of forcing a
+write. One active goal does not mean a single goal for
 the whole year. Agreed actions are stored canonically in the lists and
 referenced by ID. If a new action appears, capture it with `ztd capture` and
 process its context before moving it; do not write it only in the plan. Run

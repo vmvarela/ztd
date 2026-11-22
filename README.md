@@ -55,9 +55,17 @@ go build -o ztd ./cmd/ztd
 ./ztd version
 ```
 
-The OpenCode integration in `integrations/opencode/` is copied manually until
-`ztd install opencode` is ported; the Go binary does not implement
-`ztd install templates`.
+Then publish the embedded assets — the OpenCode skills and commands to
+`~/.config/opencode/{skills,commands}` and the method templates to
+`<store-root>/templates/`:
+
+```sh
+./ztd install opencode
+./ztd install templates
+```
+
+Both preflight the complete bundle before writing and refuse to overwrite a
+file you edited; `--dry-run` reports what would happen without writing.
 
 ## Quick start
 
@@ -113,6 +121,7 @@ one of them and is rejected when it is outside that view.
 | Command | Purpose |
 | --- | --- |
 | `init` | Declare the database's scopes (interactive on a terminal, flags in scripts) |
+| `install opencode\|templates` | Publish the embedded OpenCode skills/commands and the method templates, without clobbering files you edited |
 | `scope add\|list` | Declare and list scopes |
 | `capture` | Store text in the inbox |
 | `inbox next` | Return the oldest pending capture |

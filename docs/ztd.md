@@ -88,6 +88,24 @@ The binding of a command is resolved in this order:
 `--scope` beats `ZTD_SCOPES`, `ZTD_SCOPES` beats `.ztd.json`, and `.ztd.json`
 beats the default. No model argument can widen any of them.
 
+## Install the agent assets
+
+The binary embeds the OpenCode adapter (skills and commands) and the six
+method templates; `install` publishes them:
+
+```sh
+./ztd install opencode             # → $HOME/.config/opencode/{skills,commands}
+./ztd --db "$DB" install templates # → <store root>/templates/ (directory of --db)
+```
+
+Both commands preflight the whole bundle before the first write: a missing
+file is installed, an identical one is left unchanged, and a file whose hash
+matches the previous `.ztd-assets.json` manifest is upgraded. Anything else —
+a file you edited, a symlink, a foreign file — is a conflict: every conflict
+is reported and no files are written. `--dry-run` reports the counts and
+conflicts without writing. `install templates` never creates the store root:
+it is `invalid_input` until `ztd init` has created it.
+
 ## 1. Capture
 
 Capture first, decide later. Capture is cheap and never asks for a category.

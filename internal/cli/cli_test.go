@@ -595,3 +595,24 @@ func TestSplitMoveArgs(t *testing.T) {
 		}
 	}
 }
+
+// TestHelp pins the top-level help: --help/-h/help print the usage and exit
+// 0, while a bare invocation keeps exiting 2 with the same text.
+func TestHelp(t *testing.T) {
+	for _, arg := range []string{"--help", "-h", "help"} {
+		var out, errOut bytes.Buffer
+		if code := Main([]string{arg}, &out, &errOut); code != 0 {
+			t.Fatalf("Main(%q) exit = %d, want 0", arg, code)
+		}
+		if !strings.Contains(out.String(), "ztd — local ZTD") {
+			t.Fatalf("Main(%q) output = %q, want the usage", arg, out.String())
+		}
+	}
+	var out, errOut bytes.Buffer
+	if code := Main(nil, &out, &errOut); code != 2 {
+		t.Fatalf("bare Main exit = %d, want 2", code)
+	}
+	if !strings.Contains(errOut.String(), "ztd — local ZTD") {
+		t.Fatalf("bare Main output = %q, want the usage on stderr", errOut.String())
+	}
+}

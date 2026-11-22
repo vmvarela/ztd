@@ -71,7 +71,15 @@ scopes and shows a summary before it writes. In scripts pass `--actor` and
 
 ## OpenCode integration
 
-The Go binary does not implement `ztd install opencode` yet. Copy
-`integrations/opencode/` (skills and commands) into your OpenCode
-configuration manually until that command is ported. `ztd install templates`
-is not implemented either; method templates live in `method/`.
+After installing the binary, publish the embedded assets:
+
+```bash
+ztd install opencode     # → ~/.config/opencode/{skills,commands}
+ztd install templates    # → <store root>/templates/ (the directory of --db)
+```
+
+Both preflight the complete bundle before writing and refuse to overwrite a
+file you edited, so an edited skill or template is a conflict and nothing is
+written. `install templates` requires an existing store root (`ztd init`);
+`--dry-run` reports the counts without writing. See the
+[OpenCode adapter](../integrations/opencode/README.md) for the details.
