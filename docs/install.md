@@ -14,10 +14,6 @@ Both download the release asset for the current platform, verify it against
 `sha256sums.txt`, and install to `~/.local/bin` (POSIX) or
 `%LOCALAPPDATA%\ztd\bin` (Windows). Set `ZTD_INSTALL_DIR` to override.
 
-> **Caveat:** the one-line installers resolve the latest GitHub release.
-> Until the first Go release is tagged they will install the previous Zig
-> binary. Build from source (below) or set `ZTD_VERSION` to the Go release.
-
 On macOS arm64, the POSIX installer re-signs the copied binary ad hoc
 (`codesign --force --sign -`). Without that step macOS kills the copied
 binary with exit code 137.

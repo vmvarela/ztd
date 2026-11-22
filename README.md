@@ -38,10 +38,6 @@ Release binaries ship on the
 [releases page](https://github.com/vmvarela/ztd/releases) with a
 `sha256sums.txt` manifest:
 
-> **Caveat:** the one-line installers resolve the latest GitHub release.
-> Until the first Go release is tagged they will install the previous Zig
-> binary. Build from source (below) or set `ZTD_VERSION` to the Go release.
-
 ```sh
 # macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/vmvarela/ztd/master/install.sh | sh
