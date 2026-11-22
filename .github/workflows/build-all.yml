@@ -1,0 +1,81 @@
+name: Build all targets
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cross-compile:
+    name: Cross-compile ${{ matrix.asset }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The 12 release targets, with the names install.sh and the
+          # package catalog expect.
+          - { goos: linux, goarch: amd64, asset: ztd-x86_64-linux }
+          - { goos: linux, goarch: arm64, asset: ztd-aarch64-linux }
+          - { goos: linux, goarch: arm, goarm: "7", asset: ztd-armv7-linux }
+          - { goos: linux, goarch: riscv64, asset: ztd-riscv64-linux }
+          - { goos: linux, goarch: 386, asset: ztd-x86-linux }
+          - { goos: darwin, goarch: amd64, asset: ztd-x86_64-macos }
+          - { goos: darwin, goarch: arm64, asset: ztd-aarch64-macos }
+          - { goos: windows, goarch: amd64, asset: ztd-x86_64-windows.exe }
+          - { goos: windows, goarch: arm64, asset: ztd-aarch64-windows.exe }
+          - { goos: windows, goarch: 386, asset: ztd-x86-windows.exe }
+          - { goos: freebsd, goarch: amd64, asset: ztd-x86_64-freebsd }
+          - { goos: freebsd, goarch: arm64, asset: ztd-aarch64-freebsd }
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+
+      # Compile only (no run) — catches cross-target breakage in PRs before
+      # it surfaces in release builds.
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o "dist/${{ matrix.asset }}" ./cmd/ztd
+
+  # NetBSD is not a release target: it is compiled here only when it builds,
+  # and never fails a PR. netbsd/amd64 builds with CGO_ENABLED=0; netbsd/arm64
+  # is excluded because modernc.org/libc has no netbsd/arm64 support.
+  netbsd:
+    name: Cross-compile netbsd/${{ matrix.goarch }} (best effort)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: netbsd
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o "dist/ztd-${{ matrix.goarch }}-netbsd" ./cmd/ztd

@@ -48,6 +48,12 @@ curl -fsSL https://raw.githubusercontent.com/vmvarela/ztd/master/install.sh | sh
 irm https://raw.githubusercontent.com/vmvarela/ztd/master/install.ps1 | iex
 ```
 
+Each release also ships the `ztd.1.gz` man page, `.deb`/`.rpm`/`.apk`
+packages, the `@vmvarela/ztd` npm package (the first publish is manual;
+later releases publish from CI), a Homebrew formula, Scoop, WinGet, AUR,
+Nix and the APT/RPM/APK channels — see
+[packaging/README.md](packaging/README.md).
+
 Or build from source (requires Go 1.27.4):
 
 ```sh
