@@ -550,7 +550,7 @@ The initial model-facing tools are intentionally finite and typed:
 | `focus_finish` | Pause or complete the focus with the relevant result, next action, and resolution. |
 | `record_review` | Record outcomes and explicit coverage, including an intentionally partial review. |
 | `find` | Return a bounded list of IDs, titles, scope-allowed status, provenance, and freshness. |
-| `read` | Expand a small set of authorized IDs into body, evidence, links, and required constraints. |
+| `read` | Expand a small set of authorized IDs into body, evidence, links, required constraints, and the latest checkpoint for each WorkItem when present. |
 | `doc_search` | Full-text search over the bound scopes' documents: document, rank and snippet, best match first. |
 | `doc_get` | Read one document by kind and slug, body included; optionally select a bound scope; ambiguous matches require scope. |
 | `doc_related` | Return a document's outlinks and backlinks, resolved inside its own scope; optionally select a bound scope. |

@@ -21,8 +21,29 @@ func TestToolErrorHidesForeignScope(t *testing.T) {
 	if family := domain.FamilyOf(got); family != domain.NotFound {
 		t.Fatalf("family = %q, want not_found", family)
 	}
-	if strings.Contains(got.Error(), "personal") {
-		t.Fatalf("error leaks foreign scope: %q", got)
+	if got.Error() != "not_found: not found" || strings.Contains(got.Error(), "personal") {
+		t.Fatalf("error = %q, want generic not_found without foreign scope", got)
+	}
+}
+
+func TestReadErrorHidesMissingEntityIdentity(t *testing.T) {
+	for name, err := range map[string]error{
+		"missing": domain.NewError(domain.NotFound, "work item T-20261123-999 not found"),
+		"foreign": domain.NewError(domain.ScopeDenied, "work item belongs to scope personal"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := readError(err)
+			if got == nil || got.Error() != "not_found: not found" {
+				t.Fatalf("error = %v, want generic not_found", got)
+			}
+		})
+	}
+}
+
+func TestToolErrorPreservesMissingEntityDetail(t *testing.T) {
+	err := domain.NewError(domain.NotFound, "no capture is awaiting processing")
+	if got := toolError(err); got == nil || got.Error() != err.Error() {
+		t.Fatalf("error = %v, want original detail %q", got, err)
 	}
 }
 

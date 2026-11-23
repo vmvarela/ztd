@@ -252,6 +252,13 @@ type checkpointData struct {
 	ID         string `json:"id"`
 	WorkItemID string `json:"work_item_id"`
 	Result     string `json:"result"`
+	NextAction string `json:"next_action"`
+}
+
+type showCheckpointData struct {
+	ID         string          `json:"id"`
+	Title      string          `json:"title"`
+	Checkpoint *checkpointData `json:"checkpoint"`
 }
 
 type reviewData struct {
@@ -346,14 +353,15 @@ func TestPass2Journey(t *testing.T) {
 	// Flags must precede the positional ID: Go's flag package stops parsing at
 	// the first non-flag argument.
 	pr := decode[processData](t, run(t, db, "process",
-		"--outcome", "work_items", "--title", "Draft quarterly report", cap.ID).wantOK(t, "process"))
+		"--outcome", "work_items", "--title", "Draft quarterly report", "--title", "Check report references", cap.ID).wantOK(t, "process"))
 	if pr.Capture.ID != cap.ID || pr.Capture.State != "processed" || pr.Capture.Revision != 2 {
 		t.Fatalf("processed capture = %+v, want %s processed revision 2", pr.Capture, cap.ID)
 	}
-	if len(pr.WorkItems) != 1 {
-		t.Fatalf("work items = %d, want 1", len(pr.WorkItems))
+	if len(pr.WorkItems) != 2 {
+		t.Fatalf("work items = %d, want 2", len(pr.WorkItems))
 	}
 	item := pr.WorkItems[0]
+	unplanned := pr.WorkItems[1]
 	if !workItemIDRe.MatchString(item.ID) || item.Lifecycle != "next" {
 		t.Fatalf("work item = %+v, want a next T-YYYYMMDD-NNN", item)
 	}
@@ -367,6 +375,10 @@ func TestPass2Journey(t *testing.T) {
 	}
 	if !containsID(brief.Next, item.ID) {
 		t.Fatalf("prepare next = %+v, want %s", brief.Next, item.ID)
+	}
+	shown := decode[showCheckpointData](t, run(t, db, "show", unplanned.ID).wantOK(t, "show"))
+	if shown.Checkpoint != nil {
+		t.Fatalf("show without checkpoint = %+v, want null checkpoint", shown.Checkpoint)
 	}
 
 	plan := decode[planData](t, run(t, db, "plan", "commit",
@@ -384,15 +396,32 @@ func TestPass2Journey(t *testing.T) {
 	}
 
 	cp := decode[checkpointData](t, run(t, db, "focus", "checkpoint",
-		"--result", "halfway through", item.ID).wantOK(t, "focus checkpoint"))
+		"--result", "halfway through", "--next", "resume with references", item.ID).wantOK(t, "focus checkpoint"))
 	if cp.WorkItemID != item.ID || cp.Result != "halfway through" {
 		t.Fatalf("checkpoint = %+v, want result on %s", cp, item.ID)
+	}
+	shown = decode[showCheckpointData](t, run(t, db, "show", item.ID).wantOK(t, "show"))
+	if shown.ID != item.ID || shown.Title != item.Title ||
+		shown.Checkpoint == nil || shown.Checkpoint.Result != cp.Result || shown.Checkpoint.NextAction != cp.NextAction {
+		t.Fatalf("show = %+v, want item %q and checkpoint result %q with next action %q", shown, item.ID, cp.Result, cp.NextAction)
 	}
 
 	fin := decode[focusData](t, run(t, db, "focus", "finish",
 		"--outcome", "done for now", fs.Focus.ID).wantOK(t, "focus finish"))
 	if fin.ID != fs.Focus.ID || fin.EndedAt == nil {
 		t.Fatalf("focus finish = %+v, want %s with ended_at", fin, fs.Focus.ID)
+	}
+	unplannedFocus := decode[focusStartData](t, run(t, db, "focus", "start", unplanned.ID).wantOK(t, "focus start"))
+	run(t, db, "focus", "checkpoint", "--result", "references checked", unplanned.ID).wantOK(t, "focus checkpoint")
+	run(t, db, "focus", "checkpoint", "--result", "report ready", unplanned.ID).wantOK(t, "focus checkpoint")
+	shown = decode[showCheckpointData](t, run(t, db, "show", unplanned.ID).wantOK(t, "show"))
+	if shown.Checkpoint == nil || shown.Checkpoint.Result != "report ready" {
+		t.Fatalf("show unplanned checkpoint = %+v, want latest result", shown.Checkpoint)
+	}
+	unplannedFinish := decode[focusData](t, run(t, db, "focus", "finish",
+		"--outcome", "done", unplannedFocus.Focus.ID).wantOK(t, "focus finish"))
+	if unplannedFinish.ID != unplannedFocus.Focus.ID || unplannedFinish.EndedAt == nil {
+		t.Fatalf("show changed active focus: finish = %+v, focus = %+v", unplannedFinish, unplannedFocus.Focus)
 	}
 
 	rev := decode[reviewData](t, run(t, db, "review", "daily",
@@ -420,8 +449,8 @@ func TestPass2Journey(t *testing.T) {
 	restoredDB := filepath.Join(t.TempDir(), "restored.db")
 	rest := decode[restoreData](t, run(t, restoredDB, "restore", "--from", exportPath).wantOK(t, "restore"))
 	for table, want := range map[string]int{
-		"scopes": 2, "profiles": 1, "captures": 1, "work_items": 1,
-		"plans": 1, "plan_items": 1, "reviews": 1, "focus_sessions": 1, "checkpoints": 1,
+		"scopes": 2, "profiles": 1, "captures": 1, "work_items": 2,
+		"plans": 1, "plan_items": 1, "reviews": 1, "focus_sessions": 2, "checkpoints": 3,
 	} {
 		if rest.Tables[table] != want {
 			t.Errorf("restored %s = %d, want %d", table, rest.Tables[table], want)

@@ -55,7 +55,7 @@ key.
 | `focus_finish` | Close the focus session |
 | `record_review` | Record a daily, weekly, monthly or yearly review |
 | `find` | Search visible work items; default 8, maximum 20 |
-| `read` | Expand up to 5 work items or captures by ID |
+| `read` | Expand up to 5 work items or captures by ID; work items also include their latest checkpoint, if any |
 | `sources` | List configured sources: identity, kind, connector, coverage and cursor; never provider contents |
 | `record_source_review` | Ingest one reported batch for a source as pending captures |
 | `delete_source` | Delete one source that no capture or review refers to; requires `idempotency_key`; served only with `--allow-delete-source` |
