@@ -357,12 +357,12 @@ func TestMCPStdioJourney(t *testing.T) {
 		checkpointRead.Checkpoints[unplanned.ID] != nil {
 		t.Fatalf("read checkpoints before unplanned checkpoint = %+v, want saved and null entries", checkpointRead.Checkpoints)
 	}
-	for key, checkpoint := range map[string]struct{ result, nextAction string }{
-		"mcp-checkpoint-unplanned-1": {result: "references checked"},
-		"mcp-checkpoint-unplanned-2": {result: "report ready", nextAction: "send draft"},
+	for _, checkpoint := range []struct{ key, result, nextAction string }{
+		{key: "mcp-checkpoint-unplanned-1", result: "references checked"},
+		{key: "mcp-checkpoint-unplanned-2", result: "report ready", nextAction: "send draft"},
 	} {
 		checkpointRes := mcpCall(t, cs, "checkpoint", map[string]any{
-			"idempotency_key": key,
+			"idempotency_key": checkpoint.key,
 			"work_item_id":    unplanned.ID,
 			"result":          checkpoint.result,
 			"next_action":     checkpoint.nextAction,
@@ -455,8 +455,7 @@ func TestMCPStdioJourney(t *testing.T) {
 		t.Fatalf("read error text = %q, want it to contain invalid_input", text)
 	}
 
-	// Scope boundary: a server bound to opensource must not reveal that a
-	// personal capture exists, and must not name the foreign scope.
+	// Scope boundary: foreign and missing IDs must be indistinguishable.
 	foreign := mcpConnectArgs(t, db, "--scope", "opensource")
 	hidden := mcpCall(t, foreign, "read", map[string]any{"ids": []string{cap.ID}})
 	if !hidden.IsError {
@@ -466,10 +465,18 @@ func TestMCPStdioJourney(t *testing.T) {
 	if !strings.Contains(text, "not_found") || strings.Contains(text, "personal") {
 		t.Fatalf("read foreign id leaked scope: %q", text)
 	}
+	missing := mcpCall(t, foreign, "read", map[string]any{"ids": []string{"C-00000000-000"}})
+	if !missing.IsError || toolText(missing) != text {
+		t.Fatalf("foreign capture error %q differs from missing capture error %q", text, toolText(missing))
+	}
 	hidden = mcpCall(t, foreign, "read", map[string]any{"ids": []string{item.ID}})
-	text = toolText(hidden)
-	if !hidden.IsError || !strings.Contains(text, "not_found") || strings.Contains(text, "personal") {
-		t.Fatalf("read foreign work item leaked data: %q", text)
+	workItemError := toolText(hidden)
+	if !hidden.IsError || !strings.Contains(workItemError, "not_found") || strings.Contains(workItemError, "personal") {
+		t.Fatalf("read foreign work item leaked data: %q", workItemError)
+	}
+	missing = mcpCall(t, foreign, "read", map[string]any{"ids": []string{"T-00000000-000"}})
+	if !missing.IsError || toolText(missing) != workItemError {
+		t.Fatalf("foreign work item error %q differs from missing work item error %q", workItemError, toolText(missing))
 	}
 }
 

@@ -377,13 +377,13 @@ func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding, boundScope
 			case strings.HasPrefix(id, "C-"):
 				c, err := svc.Repo.GetCapture(ctx, b, domain.CaptureID(id))
 				if err != nil {
-					return nil, readOut{}, toolError(err)
+					return nil, readOut{}, readError(err)
 				}
 				out.Captures = append(out.Captures, c)
 			case strings.HasPrefix(id, "T-"):
 				w, checkpoint, err := svc.Repo.GetWorkItemWithCheckpoint(ctx, b, domain.WorkItemID(id))
 				if err != nil {
-					return nil, readOut{}, toolError(err)
+					return nil, readOut{}, readError(err)
 				}
 				out.WorkItems = append(out.WorkItems, w)
 				if out.Checkpoints == nil {
@@ -517,6 +517,14 @@ func toolError(err error) error {
 		return domain.NewError(domain.NotFound, "not found")
 	}
 	return err
+}
+
+// readError makes missing and out-of-scope IDs indistinguishable to read.
+func readError(err error) error {
+	if domain.FamilyOf(err) == domain.NotFound {
+		return domain.NewError(domain.NotFound, "not found")
+	}
+	return toolError(err)
 }
 
 // sourceRefError answers a missing explicit source and a source owned by
