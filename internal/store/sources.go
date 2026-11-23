@@ -133,6 +133,23 @@ func sameSourceConfig(src domain.Source, cmd app.SourceCmd) bool {
 		src.Cadence == cmd.Cadence
 }
 
+// checkSourceRef admits an explicit capture source only when it is registered
+// in the primary scope. A missing id is not_found and a source owned by another
+// scope is scope_denied; the MCP boundary folds both into one wire answer.
+func checkSourceRef(ctx context.Context, q queryer, id string, scope domain.ScopeID) error {
+	var owner string
+	err := q.QueryRowContext(ctx, "SELECT scope_id FROM sources WHERE id = ?", id).Scan(&owner)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return domain.NewError(domain.NotFound, "source %s not found", id)
+	case err != nil:
+		return err
+	case domain.ScopeID(owner) != scope:
+		return domain.NewError(domain.ScopeDenied, "source %s belongs to scope %s, not %s", id, owner, scope)
+	}
+	return nil
+}
+
 // refuseReusedSourceID keeps a deleted source id retired: its history stays,
 // so registering the same id again would make that history ambiguous.
 func refuseReusedSourceID(ctx context.Context, q queryer, id string) error {

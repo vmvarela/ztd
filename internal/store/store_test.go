@@ -351,7 +351,7 @@ func TestCaptureIdempotencyConflictsAndExternalIdentity(t *testing.T) {
 	if c1.ID != "C-20261119-001" {
 		t.Fatalf("capture id = %s, want C-20261119-001", c1.ID)
 	}
-	if c1.SourceID != "manual" || c1.ExternalID != nil || c1.State != domain.Pending || c1.Revision != 1 {
+	if c1.SourceID != domain.ImplicitSourceID || c1.ExternalID != nil || c1.State != domain.Pending || c1.Revision != 1 {
 		t.Fatalf("unexpected capture defaults: %+v", c1)
 	}
 	if c1.ContentHash != sha256hex("hola") {

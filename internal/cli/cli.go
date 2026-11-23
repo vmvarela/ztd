@@ -2920,6 +2920,7 @@ const usage = `ztd — local ZTD
   source apply [--file PATH]        (default ~/.ztd/sources.json, or ZTD_SOURCES)
   source list [--all | --scope S...]
   source review --source ID --batch B --key K --file FILE
+  source delete --id ID             (refused while a capture or review refers to it)
   routines due|done ID | routines add --id ID --cadence daily|weekly:<day> [--last YYYY-MM-DD]
   context add NAME [--scope S] | context list [--scope S]
   doc put --kind K --slug S [--scope X] [--title T] [--body TEXT | --file PATH]

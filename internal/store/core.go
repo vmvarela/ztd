@@ -249,11 +249,13 @@ func (s *Store) Capture(ctx context.Context, cmd app.CaptureCmd, now time.Time) 
 		return domain.Capture{}, domain.Invalid("external revision cannot be empty")
 	}
 	source := cmd.SourceID
-	if source == "" {
-		source = "manual"
-	}
 	hashCmd := cmd
-	hashCmd.SourceID = source
+	if source == "" {
+		// The payload hash keeps the pre-split implicit value "manual", so a
+		// retry from an earlier version with the same key still replays.
+		hashCmd.SourceID = "manual"
+		source = domain.ImplicitSourceID
+	}
 	hash, err := hashPayload(hashCmd)
 	if err != nil {
 		return domain.Capture{}, err
@@ -270,7 +272,7 @@ func (s *Store) Capture(ctx context.Context, cmd app.CaptureCmd, now time.Time) 
 		// An implicit source (empty SourceID) stays the unregistered manual
 		// entry point; an explicit one must be registered in the primary scope.
 		if cmd.SourceID != "" {
-			if err := checkSameScope(ctx, tx, "sources", "source", source, scope); err != nil {
+			if err := checkSourceRef(ctx, tx, source, scope); err != nil {
 				return err
 			}
 		}

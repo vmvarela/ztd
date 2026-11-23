@@ -754,3 +754,36 @@ func TestMCPDeleteSourceAnswersMissingAndForeignAlike(t *testing.T) {
 		t.Fatalf("foreign and missing differ: %q vs %q", toolText(foreign), toolText(missing))
 	}
 }
+
+// TestMCPCaptureSourceReferenceAnswersAlike pins the capture boundary: a source
+// registered in another scope and a source that does not exist produce the
+// same wire result, byte for byte, so capture cannot probe the registry.
+func TestMCPCaptureSourceReferenceAnswersAlike(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "ztd.db")
+	run(t, db, initArgs...).wantOK(t, "init")
+	run(t, db, "source", "add",
+		"--id", "vault", "--name", "Vault",
+		"--scope", "opensource", "--kind", "capture", "--connector", "manual",
+	).wantOK(t, "source add")
+
+	cs := mcpConnectArgs(t, db, "--scope", "personal")
+	foreign := mcpCall(t, cs, "capture", map[string]any{"idempotency_key": "cap-foreign", "text": "x", "source_id": "vault"})
+	missing := mcpCall(t, cs, "capture", map[string]any{"idempotency_key": "cap-missing", "text": "x", "source_id": "ghost"})
+	if !foreign.IsError || !missing.IsError {
+		t.Fatalf("foreign isError=%v missing isError=%v, want both refused", foreign.IsError, missing.IsError)
+	}
+	foreignWire, err := json.Marshal(foreign)
+	if err != nil {
+		t.Fatalf("marshal foreign result: %v", err)
+	}
+	missingWire, err := json.Marshal(missing)
+	if err != nil {
+		t.Fatalf("marshal missing result: %v", err)
+	}
+	if string(foreignWire) != string(missingWire) {
+		t.Fatalf("capture wire results differ:\nforeign: %s\nmissing: %s", foreignWire, missingWire)
+	}
+	if got := toolText(missing); got != "not_found: not found\n" {
+		t.Fatalf("capture missing source text = %q, want not_found: not found", got)
+	}
+}

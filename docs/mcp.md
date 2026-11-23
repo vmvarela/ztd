@@ -144,7 +144,9 @@ narrated confidently.
   service enforces the global one-focus and 1–3 MIT rules.
 - Every read and write is filtered by the fixed `ScopeBinding`. `scope_denied`
   is returned to the model as `not_found`, and the detail is scrubbed, so a
-  foreign entity's existence is not disclosed.
+  foreign entity's existence is not disclosed. A `capture` with an explicit
+  `source_id` that is missing or registered in another scope gets the same
+  `not_found` result, byte for byte.
 - `commit_plan` still requires an override when a day exceeds three MITs;
   that path returns `rules_acknowledgement_required`.
 

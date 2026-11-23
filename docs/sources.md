@@ -37,8 +37,11 @@ source without writing; the same `id` with a different configuration fails
 with `conflict`.
 
 For a manual capture, omit `--source` (or MCP `source_id`); it uses the
-unregistered `manual` entry point. An explicit source ID must name a registered
-source in the capture's primary scope.
+unregistered entry point, stored with the provenance `MANUAL`. Imported legacy
+records use `LEGACY`. Both are upper case, which no source ID can have, so a
+source named `manual` or `legacy` never collides with them. An explicit source
+ID must name a registered source in the capture's primary scope; a missing one
+is `not_found`.
 
 ## Deleting a source
 
@@ -63,6 +66,13 @@ by `source apply`: a file that omits an id leaves that source in place.
 
 A deleted id is retired. `source add` and `source apply` refuse it with
 `conflict`, so its deleted history stays unambiguous.
+
+Captures written before this split stored the implicit entry point and legacy
+imports as the lower-case `manual` and `legacy`. Those rows cannot be told apart
+from captures of a registered source with the same id, so they are not rewritten
+automatically. While such a row exists in a scope, deleting a registered source
+with that id in that scope stays refused with `conflict`; clearing that block
+needs an explicit operator migration, which this change does not perform.
 
 ## User configuration
 

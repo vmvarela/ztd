@@ -849,7 +849,7 @@ func TestCaptureExplicitSourceMustBeRegisteredInPrimaryScope(t *testing.T) {
 	_, err := e.s.Capture(e.ctx(), app.CaptureCmd{Binding: e.binding, Key: "c-1", Text: "x", SourceID: "gh"}, e.now)
 	wantFamily(t, err, domain.ScopeDenied)
 	_, err = e.s.Capture(e.ctx(), app.CaptureCmd{Binding: e.binding, Key: "c-2", Text: "x", SourceID: "missing"}, e.now)
-	wantFamily(t, err, domain.InvalidInput)
+	wantFamily(t, err, domain.NotFound)
 	if after := e.counts(); after != before {
 		t.Fatalf("refused capture wrote state: before %v after %v", before, after)
 	}
@@ -860,8 +860,45 @@ func TestCaptureExplicitSourceMustBeRegisteredInPrimaryScope(t *testing.T) {
 		t.Fatalf("registered explicit source: capture %+v, err %v", c, err)
 	}
 	implicit := e.capture("implicit", "c-4")
-	if implicit.SourceID != "manual" {
-		t.Fatalf("implicit capture source = %q, want manual", implicit.SourceID)
+	if implicit.SourceID != domain.ImplicitSourceID {
+		t.Fatalf("implicit capture source = %q, want %s", implicit.SourceID, domain.ImplicitSourceID)
+	}
+}
+
+// TestImplicitProvenanceDoesNotBlockRegisteredSourceDelete pins the namespace
+// split: implicit captures and imported legacy rows carry an upper-case
+// provenance that no source can register, so a source named "manual" or
+// "legacy" deletes freely.
+func TestImplicitProvenanceDoesNotBlockRegisteredSourceDelete(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("manual", "personal")
+	e.mustAddSource("legacy", "personal")
+	e.capture("implicit", "c-1")
+	e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+	     processing_state, revision)
+	   VALUES ('C-imported', 'personal', ?, 'plain', 'h', ?, 'pending', 1)`, domain.LegacySourceID, fmtTime(e.now))
+	for _, id := range []string{"manual", "legacy"} {
+		if _, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: id}, e.now); err != nil {
+			t.Fatalf("delete %s with only internal provenance rows: %v", id, err)
+		}
+	}
+}
+
+// TestPreSplitManualRowsKeepRegisteredManualSourceReferenced pins the
+// conservative rule for historical rows: a capture written before the split
+// with source_id "manual" cannot be told apart from a capture of a registered
+// source "manual", so deleting that source stays refused and nothing is rewritten.
+func TestPreSplitManualRowsKeepRegisteredManualSourceReferenced(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("manual", "personal")
+	e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+	     processing_state, revision)
+	   VALUES ('C-old', 'personal', 'manual', 'plain', 'h', ?, 'pending', 1)`, fmtTime(e.now))
+	before := e.counts()
+	_, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "manual"}, e.now)
+	wantFamily(t, err, domain.Conflict)
+	if after := e.counts(); after != before {
+		t.Fatalf("refused delete wrote state: before %v after %v", before, after)
 	}
 }
 

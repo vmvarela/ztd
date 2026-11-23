@@ -187,6 +187,9 @@ func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding) {
 		out, err := svc.Capture(ctx, app.CaptureCmd{
 			Binding: b, Key: in.IdempotencyKey, Text: in.Text, SourceID: in.SourceID,
 		})
+		if in.SourceID != "" {
+			err = sourceRefError(err)
+		}
 		return nil, out, toolError(err)
 	})
 
@@ -457,6 +460,18 @@ func toolError(err error) error {
 	}
 	var e *domain.Error
 	if errors.As(err, &e) && e.Family == domain.ScopeDenied {
+		return domain.NewError(domain.NotFound, "not found")
+	}
+	return err
+}
+
+// sourceRefError answers a missing explicit source and a source owned by
+// another scope with the same not_found, so capture cannot probe the registry.
+func sourceRefError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if family := domain.FamilyOf(err); family == domain.NotFound || family == domain.ScopeDenied {
 		return domain.NewError(domain.NotFound, "not found")
 	}
 	return err

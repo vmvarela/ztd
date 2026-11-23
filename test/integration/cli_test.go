@@ -1084,7 +1084,7 @@ func TestSourceDeleteFlow(t *testing.T) {
 	}
 	run(t, db, "source", "add", "--id", "scratch", "--name", "scratch",
 		"--scope", "personal", "--kind", "capture", "--connector", "manual").wantErr(t, 1, "source", "conflict")
-	run(t, db, "capture", "--source", "ghost", "a capture from nowhere").wantErr(t, 1, "capture", "invalid_input")
+	run(t, db, "capture", "--source", "ghost", "a capture from nowhere").wantErr(t, 1, "capture", "not_found")
 	list := decode[[]sourceData](t, run(t, db, "source", "list").wantOK(t, "source list"))
 	if len(list) != 1 || list[0].ID != "notes-dir" {
 		t.Fatalf("list after delete = %+v, want [notes-dir]", list)
