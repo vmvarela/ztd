@@ -68,11 +68,12 @@ A deleted id is retired. `source add` and `source apply` refuse it with
 `conflict`, so its deleted history stays unambiguous.
 
 Captures written before this split stored the implicit entry point and legacy
-imports as the lower-case `manual` and `legacy`. Those rows cannot be told apart
-from captures of a registered source with the same id, so they are not rewritten
-automatically. While such a row exists in a scope, deleting a registered source
-with that id in that scope stays refused with `conflict`; clearing that block
-needs an explicit operator migration, which this change does not perform.
+imports as the lower-case `manual` and `legacy`. Those rows are not rewritten
+automatically. A lower-case `manual` row remains ambiguous with a capture of a
+registered source, so it blocks deleting that source. An old `legacy` row is
+excluded from the delete guard only when its `capture/imported` history event
+proves the import in the same scope; an unproven row still blocks deletion.
+This change does not migrate ambiguous historical rows.
 
 ## User configuration
 
