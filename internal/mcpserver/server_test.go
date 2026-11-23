@@ -65,19 +65,17 @@ func newTestSessionBinding(t *testing.T, binding domain.ScopeBinding, allowDelet
 	return clientSession
 }
 
-// TestDocPutAdvertisesPrimaryScope pins the dynamic tool description: doc_put
-// names its binding's primary scope — the only scope it writes to — and tells
-// the model to compare a capture's scope against it before writing, so a
-// capture from another bound scope is not filed into the wrong scope.
-func TestDocPutAdvertisesPrimaryScope(t *testing.T) {
+// TestDocPutAdvertisesBoundScopes pins the dynamic description: the agent
+// chooses a destination scope from the fixed binding based on document content.
+func TestDocPutAdvertisesBoundScopes(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
 		scopes []domain.ScopeID
-		want   string
+		want   []string
 		absent string
 	}{
-		{[]domain.ScopeID{"personal"}, `primary scope "personal"`, `"opensource"`},
-		{[]domain.ScopeID{"opensource", "salud"}, `primary scope "opensource"`, `"salud"`},
+		{[]domain.ScopeID{"personal"}, []string{"personal", "destination scope"}, "opensource"},
+		{[]domain.ScopeID{"opensource", "salud"}, []string{"opensource", "salud"}, "work"},
 	}
 	for _, tc := range cases {
 		cs := newTestSessionBinding(t, domain.ScopeBinding{
@@ -96,14 +94,16 @@ func TestDocPutAdvertisesPrimaryScope(t *testing.T) {
 		if desc == "" {
 			t.Fatal("doc_put not listed")
 		}
-		if !strings.Contains(desc, tc.want) {
-			t.Errorf("doc_put description missing %q: %s", tc.want, desc)
+		for _, want := range tc.want {
+			if !strings.Contains(desc, want) {
+				t.Errorf("doc_put description missing %q: %s", want, desc)
+			}
 		}
 		if strings.Contains(desc, tc.absent) {
 			t.Errorf("doc_put description must not name non-primary %s: %s", tc.absent, desc)
 		}
-		if !strings.Contains(desc, "compare the capture's scope") {
-			t.Errorf("doc_put description missing the capture-scope comparison: %s", desc)
+		if !strings.Contains(desc, "may differ from the capture's source scope") {
+			t.Errorf("doc_put description missing independent destination guidance: %s", desc)
 		}
 	}
 }
@@ -178,7 +178,7 @@ func TestDeleteSourceListedWithOptIn(t *testing.T) {
 }
 
 // TestDocPutSchemaPinsWritableFields pins doc_put's surface: only slug, title,
-// body and expected_revision are accepted. Scope, kind and status must not
+// body, scope and expected_revision are accepted. Kind and status must not
 // appear, so the model cannot widen the write beyond a knowledge draft.
 func TestDocPutSchemaPinsWritableFields(t *testing.T) {
 	cs := newTestSession(t, false)
@@ -207,7 +207,7 @@ func TestDocPutSchemaPinsWritableFields(t *testing.T) {
 	if err := json.Unmarshal(raw, &schema); err != nil {
 		t.Fatalf("decode input schema: %v", err)
 	}
-	want := []string{"body", "expected_revision", "slug", "title"}
+	want := []string{"body", "expected_revision", "scope", "slug", "title"}
 	sort.Strings(want)
 	got := make([]string, 0, len(schema.Properties))
 	for name := range schema.Properties {
@@ -229,30 +229,35 @@ func TestDocPutSchemaPinsWritableFields(t *testing.T) {
 }
 
 // TestDocPutRejectsProhibitedArgs pins the guard at the protocol boundary:
-// extra status/kind/scope arguments fail schema validation before the handler
-// runs (svc is nil here), so no service or store code is ever reached.
+// extra status/kind arguments and missing scope fail schema validation before
+// the handler runs (svc is nil here), so no service or store code is reached.
 func TestDocPutRejectsProhibitedArgs(t *testing.T) {
 	cs := newTestSession(t, false)
 	ctx := context.Background()
 	cases := []struct {
 		name string
 		args map[string]any
+		want string
 	}{
 		{"status", map[string]any{
-			"slug": "k/test.md", "title": "T", "body": "B",
+			"slug": "k/test.md", "title": "T", "body": "B", "scope": "personal",
 			"expected_revision": 0, "status": "verified",
-		}},
+		}, "validating"},
 		{"kind", map[string]any{
-			"slug": "k/test.md", "title": "T", "body": "B",
+			"slug": "k/test.md", "title": "T", "body": "B", "scope": "personal",
 			"expected_revision": 0, "kind": "project_note",
-		}},
-		{"scope", map[string]any{
-			"slug": "k/test.md", "title": "T", "body": "B",
-			"expected_revision": 0, "scope": "work",
-		}},
+		}, "validating"},
 		{"missing expected_revision", map[string]any{
+			"slug": "k/test.md", "title": "T", "body": "B", "scope": "personal",
+		}, "validating"},
+		{"missing scope", map[string]any{
 			"slug": "k/test.md", "title": "T", "body": "B",
-		}},
+			"expected_revision": 0,
+		}, "validating"},
+		{"blank scope", map[string]any{
+			"slug": "k/test.md", "title": "T", "body": "B", "scope": "  ",
+			"expected_revision": 0,
+		}, "invalid_input"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -271,8 +276,8 @@ func TestDocPutRejectsProhibitedArgs(t *testing.T) {
 					text.WriteString(txt.Text)
 				}
 			}
-			if !strings.Contains(text.String(), "validating") {
-				t.Errorf("error text = %q, want schema validation failure", text.String())
+			if !strings.Contains(text.String(), tc.want) {
+				t.Errorf("error text = %q, want %q", text.String(), tc.want)
 			}
 		})
 	}

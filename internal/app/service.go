@@ -581,6 +581,9 @@ func ValidateDocumentCmd(cmd DocumentCmd) error {
 	if err := cmd.Binding.Validate(); err != nil {
 		return err
 	}
+	if cmd.Scope != "" && !cmd.Binding.Allows(cmd.Scope) {
+		return domain.NewError(domain.ScopeDenied, "document scope is outside this binding")
+	}
 	if !domain.ValidDocumentKind(cmd.Kind) {
 		return domain.Invalid("unknown document kind %q", cmd.Kind)
 	}
@@ -701,9 +704,15 @@ func (s *Service) PutDocument(ctx context.Context, cmd DocumentCmd) (domain.Docu
 }
 
 // GetDocument returns one document of the binding scopes.
-func (s *Service) GetDocument(ctx context.Context, b domain.ScopeBinding, kind domain.DocumentKind, slug string) (domain.Document, error) {
+func (s *Service) GetDocument(ctx context.Context, b domain.ScopeBinding, kind domain.DocumentKind, slug string, scope ...domain.ScopeID) (domain.Document, error) {
 	if err := b.Validate(); err != nil {
 		return domain.Document{}, err
+	}
+	if len(scope) > 1 {
+		return domain.Document{}, domain.Invalid("at most one document scope may be selected")
+	}
+	if len(scope) == 1 && scope[0] != "" && !b.Allows(scope[0]) {
+		return domain.Document{}, domain.NewError(domain.ScopeDenied, "document scope is outside this binding")
 	}
 	if !domain.ValidDocumentKind(kind) {
 		return domain.Document{}, domain.Invalid("unknown document kind %q", kind)
@@ -711,7 +720,7 @@ func (s *Service) GetDocument(ctx context.Context, b domain.ScopeBinding, kind d
 	if strings.TrimSpace(slug) == "" {
 		return domain.Document{}, domain.Invalid("document slug is required")
 	}
-	return s.Repo.GetDocument(ctx, b, kind, slug)
+	return s.Repo.GetDocument(ctx, b, kind, slug, scope...)
 }
 
 // ListDocuments returns the documents of the binding scopes. An empty kind
@@ -756,9 +765,15 @@ func (s *Service) SearchDocuments(ctx context.Context, b domain.ScopeBinding, qu
 // RelatedDocuments returns the link neighbourhood of one document: the
 // documents it links to and the ones that link back, resolved inside the
 // source's own scope. A document outside the binding is not_found.
-func (s *Service) RelatedDocuments(ctx context.Context, b domain.ScopeBinding, kind domain.DocumentKind, slug string) (DocumentRelations, error) {
+func (s *Service) RelatedDocuments(ctx context.Context, b domain.ScopeBinding, kind domain.DocumentKind, slug string, scope ...domain.ScopeID) (DocumentRelations, error) {
 	if err := b.Validate(); err != nil {
 		return DocumentRelations{}, err
+	}
+	if len(scope) > 1 {
+		return DocumentRelations{}, domain.Invalid("at most one document scope may be selected")
+	}
+	if len(scope) == 1 && scope[0] != "" && !b.Allows(scope[0]) {
+		return DocumentRelations{}, domain.NewError(domain.ScopeDenied, "document scope is outside this binding")
 	}
 	if !domain.ValidDocumentKind(kind) {
 		return DocumentRelations{}, domain.Invalid("unknown document kind %q", kind)
@@ -766,7 +781,7 @@ func (s *Service) RelatedDocuments(ctx context.Context, b domain.ScopeBinding, k
 	if strings.TrimSpace(slug) == "" {
 		return DocumentRelations{}, domain.Invalid("document slug is required")
 	}
-	source, err := s.Repo.GetDocument(ctx, b, kind, slug)
+	source, err := s.Repo.GetDocument(ctx, b, kind, slug, scope...)
 	if err != nil {
 		return DocumentRelations{}, err
 	}

@@ -125,14 +125,18 @@ The MCP server exposes a small typed set of seventeen tools over stdio:
 `focus_start`, `checkpoint`, `focus_finish`, `record_review`,
 `find`, `read`, `sources`, `record_source_review`, `doc_search`, `doc_get`,
 `doc_related` and `doc_put`. It does not expose raw SQL, arbitrary updates,
-scope overrides or provider tools.
+arbitrary scope overrides or provider tools. Document tools may select a
+scope only from the fixed session binding.
 `sources` returns registry state only; `record_source_review`
 ingests `reported` batches and rejects `observed`, which stays reserved for a
 trusted host adapter outside model-controlled arguments.
-`doc_put` is the only document write: it takes `slug`, `title`, `body` and
-`expected_revision`, hardcodes `kind=knowledge` and `status=draft` under the
-fixed binding, and the store refuses create-only overwrites and any promotion
-past draft.
+`doc_put` is the only document write: it takes `scope`, `slug`, `title`,
+`body` and `expected_revision`, validates the selected scope against the fixed
+binding, hardcodes `kind=knowledge` and `status=draft`, and the store refuses
+create-only overwrites and any promotion past draft. Reads with duplicate
+kind/slug matches require an explicit bound scope rather than choosing one.
+The combined slug, title and body input is capped at 512 KiB before persistence
+to keep the MCP response within transport limits.
 
 MCP prompts and resources are guidance, not scheduling. A disconnected server
 cannot remind anyone; reminders require the operating system scheduler.

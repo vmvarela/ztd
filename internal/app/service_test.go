@@ -121,6 +121,9 @@ func TestServiceValidatesBeforeRepo(t *testing.T) {
 	if _, err := svc.PutDocument(ctx, DocumentCmd{Binding: b, Kind: "wiki", Slug: "s", Title: "t", Body: "b", Status: domain.DocumentDraft}); !domain.Of(err, domain.InvalidInput) {
 		t.Errorf("PutDocument bad kind = %v, want invalid_input", err)
 	}
+	if _, err := svc.PutDocument(ctx, DocumentCmd{Binding: b, Scope: "outside", Kind: domain.DocumentKnowledge, Slug: "s", Title: "t", Body: "b", Status: domain.DocumentDraft}); !domain.Of(err, domain.ScopeDenied) {
+		t.Errorf("PutDocument unbound scope = %v, want scope_denied", err)
+	}
 	if _, err := svc.AddProject(ctx, ProjectCmd{Binding: b, ID: "x", Status: "doing"}); !domain.Of(err, domain.InvalidInput) {
 		t.Errorf("AddProject bad status = %v, want invalid_input", err)
 	}

@@ -239,6 +239,45 @@ func TestPutDocumentLifecycle(t *testing.T) {
 	}
 }
 
+func TestDocumentScopeSelection(t *testing.T) {
+	e := newTestEnv(t)
+	for _, tc := range []struct {
+		scope domain.ScopeID
+		body  string
+	}{
+		{"personal", "personal body"},
+		{"opensource", "opensource body"},
+	} {
+		doc, err := e.s.PutDocument(e.ctx(), app.DocumentCmd{
+			Binding: e.binding, Scope: tc.scope, Kind: domain.DocumentKnowledge,
+			Slug: "shared/card", Title: "Shared card", Body: tc.body,
+			Status: domain.DocumentDraft,
+		}, e.now)
+		if err != nil {
+			t.Fatalf("PutDocument in %s: %v", tc.scope, err)
+		}
+		if doc.Scope != string(tc.scope) {
+			t.Fatalf("document scope = %q, want %q", doc.Scope, tc.scope)
+		}
+	}
+
+	if _, err := e.s.GetDocument(e.ctx(), e.binding, "knowledge", "shared/card"); !domain.Of(err, domain.Conflict) {
+		t.Fatalf("unscoped duplicate get = %v, want conflict", err)
+	}
+	for _, tc := range []struct {
+		scope domain.ScopeID
+		body  string
+	}{
+		{"personal", "personal body"},
+		{"opensource", "opensource body"},
+	} {
+		doc, err := e.s.GetDocument(e.ctx(), e.binding, "knowledge", "shared/card", tc.scope)
+		if err != nil || doc.Scope != string(tc.scope) || doc.Body != tc.body {
+			t.Fatalf("scoped get in %s = %+v (err %v)", tc.scope, doc, err)
+		}
+	}
+}
+
 // TestPutDocumentDraftOnly pins the MCP write path: expected 0 never touches
 // an existing document, only a draft may be updated, the CLI path keeps its
 // existing behavior, and DraftOnly stays out of the idempotency hash.

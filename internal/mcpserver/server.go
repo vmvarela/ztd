@@ -1,7 +1,8 @@
 // Package mcpserver exposes the ZTD application service over MCP stdio.
 //
-// The ScopeBinding is frozen when the process starts. No tool accepts a scope,
-// profile, actor, SQL or arbitrary update, so the model cannot widen access.
+// The ScopeBinding is frozen when the process starts. Document tools may select
+// only a scope inside that binding; no tool accepts a profile, actor, SQL or
+// arbitrary update, so the model cannot widen access.
 package mcpserver
 
 import (
@@ -21,6 +22,7 @@ const (
 	defaultFindLimit = 8
 	maxFindLimit     = 20
 	maxReadIDs       = 5
+	maxDocPutBytes   = 512 << 10
 )
 
 // NewServer builds the typed tool and prompt catalog for one fixed binding.
@@ -28,11 +30,16 @@ const (
 // destructive tool, so the host must opt in at startup.
 func NewServer(svc *app.Service, binding domain.ScopeBinding, version string, allowDeleteSource bool) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "ztd", Version: version}, nil)
-	addTools(s, svc, binding)
+	scopeNames := make([]string, len(binding.Scopes))
+	for i, scope := range binding.Scopes {
+		scopeNames[i] = string(scope)
+	}
+	boundScopes := strings.Join(scopeNames, ", ")
+	addTools(s, svc, binding, boundScopes)
 	if allowDeleteSource {
 		addDeleteSourceTool(s, svc, binding)
 	}
-	addPrompts(s)
+	addPrompts(s, boundScopes)
 	return s
 }
 
@@ -147,14 +154,16 @@ type docSearchOut struct {
 }
 
 type docRefIn struct {
-	Kind string `json:"kind" jsonschema:"document kind, for example knowledge"`
-	Slug string `json:"slug"`
+	Kind  string  `json:"kind" jsonschema:"document kind, for example knowledge"`
+	Slug  string  `json:"slug"`
+	Scope *string `json:"scope,omitempty" jsonschema:"optional bound scope; required to disambiguate a slug present in multiple scopes"`
 }
 
 type docPutIn struct {
 	Slug             string `json:"slug"`
 	Title            string `json:"title"`
 	Body             string `json:"body"`
+	Scope            string `json:"scope" jsonschema:"destination scope selected from the session's bound scopes"`
 	ExpectedRevision int64  `json:"expected_revision" jsonschema:"0 to create only when no document exists, otherwise the current revision to update"`
 }
 
@@ -187,13 +196,7 @@ type deleteSourceOut struct {
 	Source domain.Source `json:"source"`
 }
 
-func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding) {
-	// The primary scope is where every write lands, so doc_put names it: the
-	// model needs it to compare against a capture's scope before writing.
-	primaryScope := "primary scope"
-	if len(b.Scopes) > 0 {
-		primaryScope = fmt.Sprintf("primary scope %q", b.Scopes[0])
-	}
+func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding, boundScopes string) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "capture",
 		Description: "Capture one item into the inbox. Never filters or classifies it.",
@@ -405,26 +408,46 @@ func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "doc_get",
-		Description: "Read one document by kind and slug, body included. Read-only; a document outside the fixed binding is not_found.",
+		Description: "Read one document by kind and slug, body included. Supply scope when the slug may exist in multiple bound scopes; omitted scope is ambiguous in that case. A document outside the fixed binding is not_found.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in docRefIn) (*mcp.CallToolResult, domain.Document, error) {
-		doc, err := svc.GetDocument(ctx, b, domain.DocumentKind(in.Kind), in.Slug)
+		var scope []domain.ScopeID
+		if in.Scope != nil {
+			if strings.TrimSpace(*in.Scope) == "" {
+				return nil, domain.Document{}, domain.Invalid("scope must not be blank")
+			}
+			scope = append(scope, domain.ScopeID(*in.Scope))
+		}
+		doc, err := svc.GetDocument(ctx, b, domain.DocumentKind(in.Kind), in.Slug, scope...)
 		return nil, doc, toolError(err)
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "doc_related",
-		Description: "Return the document's link neighbourhood: the documents it links to and the ones that link back, resolved inside its own scope. Read-only.",
+		Description: "Return the document's link neighbourhood: the documents it links to and the ones that link back, resolved inside its own scope. Supply scope when the slug may exist in multiple bound scopes. Read-only.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in docRefIn) (*mcp.CallToolResult, app.DocumentRelations, error) {
-		rel, err := svc.RelatedDocuments(ctx, b, domain.DocumentKind(in.Kind), in.Slug)
+		var scope []domain.ScopeID
+		if in.Scope != nil {
+			if strings.TrimSpace(*in.Scope) == "" {
+				return nil, app.DocumentRelations{}, domain.Invalid("scope must not be blank")
+			}
+			scope = append(scope, domain.ScopeID(*in.Scope))
+		}
+		rel, err := svc.RelatedDocuments(ctx, b, domain.DocumentKind(in.Kind), in.Slug, scope...)
 		return nil, rel, toolError(err)
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "doc_put",
-		Description: fmt.Sprintf("Create or update one knowledge draft in the binding's %s (the first bound scope). Scope, kind and status are never arguments: every write is kind=knowledge, status=draft. expected_revision=0 creates only when no document exists; a positive value updates only the current draft at that revision. inbox_next can return captures from any bound scope, so compare the capture's scope with this primary scope before writing: if they differ, leave the capture pending and use a session whose primary scope matches the capture. Use it before process_capture with outcome reference, so a capture is only marked processed after the draft write succeeds.", primaryScope),
+		Description: fmt.Sprintf("Create or update one knowledge draft. Choose the destination scope by interpreting the document's content; it may differ from the capture's source scope, but must be one of the session's bound scopes: %s. Scope is required; kind and status are fixed to knowledge and draft. Combined slug, title and body are limited to 512 KiB. expected_revision=0 creates only when no document exists; a positive value updates only the current draft at that revision. Use before process_capture with outcome reference, so a capture is only marked processed after the draft write succeeds.", boundScopes),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in docPutIn) (*mcp.CallToolResult, domain.Document, error) {
+		if strings.TrimSpace(in.Scope) == "" {
+			return nil, domain.Document{}, domain.Invalid("scope is required")
+		}
+		if len(in.Slug)+len(in.Title)+len(in.Body) > maxDocPutBytes {
+			return nil, domain.Document{}, domain.Invalid("combined slug, title and body exceed %d bytes", maxDocPutBytes)
+		}
 		out, err := svc.PutDocument(ctx, app.DocumentCmd{
-			Binding: b, Kind: domain.DocumentKnowledge, Slug: in.Slug,
+			Binding: b, Scope: domain.ScopeID(in.Scope), Kind: domain.DocumentKnowledge, Slug: in.Slug,
 			Title: in.Title, Body: in.Body, Status: domain.DocumentDraft,
 			Expected: domain.Revision(in.ExpectedRevision), DraftOnly: true,
 		})
@@ -503,11 +526,11 @@ func sourceRefError(err error) error {
 	return err
 }
 
-func addPrompts(s *mcp.Server) {
+func addPrompts(s *mcp.Server, boundScopes string) {
 	addPrompt(s, "Collect", "Capture without filtering; empty the inbox later.",
 		"Capture every commitment, idea or interruption in one line, verbatim. Do not classify, prioritize or drop anything. Use capture. Return when the inbox holds what the user said.")
 	addPrompt(s, "Process", "Decide one inbox item at a time, top to bottom.",
-		"Take the oldest item with inbox_next. Offer exactly one decision: discard, delegate or wait, do it if it takes two minutes, defer with a review date, or turn it into one or more work items. For a knowledge reference, first compare the capture's scope with doc_put's primary scope (stated in its tool description): if they differ, leave the capture pending and use a session whose primary scope matches the capture. Then write the card first with doc_put as a draft and call process_capture with outcome reference only after that write succeeds, putting the doc_put result's document ID in reason: if doc_put fails, keep the capture pending; if process_capture's response is lost, retry the identical request with the same idempotency key and payload; if it fails, keep the draft and retry the reference later — there is no atomic combined operation. Use process_capture. Do not batch decisions.")
+		fmt.Sprintf("Take the oldest item with inbox_next. Offer exactly one decision: discard, delegate or wait, do it if it takes two minutes, defer with a review date, or turn it into one or more work items. For a knowledge reference, use ztd-knowledge to interpret the lesson and choose a destination from the session's bound scopes (%s); the document's meaning determines the destination, not the capture's source scope. Pass that scope to doc_put. If updating an existing card, use doc_get with the same scope to read its current revision. Write the card first with doc_put as a draft, then call process_capture with outcome reference and the doc_put result's document ID in reason. If doc_put fails, keep the capture pending; if process_capture's response is lost, retry the identical request with the same idempotency key and payload; if it fails, keep the draft and retry the reference later — there is no atomic combined operation. Use process_capture. Do not batch decisions.", boundScopes))
 	addPrompt(s, "Plan", "Choose one to three MITs from real state.",
 		"Call prepare. Propose one to three MITs for the person and day across scopes, using the committed plan, candidates and checkpoints. State why each one matters. Never claim a plan exists before commit_plan succeeds.")
 	addPrompt(s, "Do", "One focus, one next action.",

@@ -447,7 +447,9 @@ read.
 - Over MCP the same three reads are `doc_search`, `doc_get` and
   `doc_related`, plus `doc_put`, which creates or updates only a `knowledge`
   draft from `slug`, `title`, `body` and `expected_revision`. The binding is
-  fixed when the server starts, so none of them accepts a scope.
+  fixed when the server starts. `doc_put` requires a destination `scope`, and
+  `doc_get`/`doc_related` accept one to disambiguate matching slugs; any
+  explicit scope must be in the binding.
 - A **project** keeps its caller-chosen id, including legacy path-style ids
   like `opensource/ztd`. Re-adding the same id with the same configuration is
   a no-op; a different configuration is `conflict`. `--repo-url` must be an

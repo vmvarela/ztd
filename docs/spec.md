@@ -552,16 +552,16 @@ The initial model-facing tools are intentionally finite and typed:
 | `find` | Return a bounded list of IDs, titles, scope-allowed status, provenance, and freshness. |
 | `read` | Expand a small set of authorized IDs into body, evidence, links, and required constraints. |
 | `doc_search` | Full-text search over the bound scopes' documents: document, rank and snippet, best match first. |
-| `doc_get` | Read one document by kind and slug, body included; a foreign-scope document is `not_found`. |
-| `doc_related` | Return a document's outlinks and backlinks, resolved inside its own scope. |
-| `doc_put` | Create or update one knowledge draft in the fixed binding from `slug`, `title`, `body` and `expected_revision`; never another kind, status or scope. |
+| `doc_get` | Read one document by kind and slug, body included; optionally select a bound scope; ambiguous matches require scope. |
+| `doc_related` | Return a document's outlinks and backlinks, resolved inside its own scope; optionally select a bound scope. |
+| `doc_put` | Create or update one knowledge draft in an explicitly selected bound scope from `slug`, `title`, `body` and `expected_revision`; never another kind or status; combined input capped at 512 KiB. |
 
 > **Note (2026-11-20):** These are the current tool names. The redundant
 > `ztd_` tool prefix was removed; the MCP server itself is still named `ztd`,
 > so host permission keys read `ztd_<tool>` (e.g. `ztd_capture`). The old
 > `ztd_*` tool names were removed with no aliases.
 
-There is no generic `update`, arbitrary SQL/query language, arbitrary scope parameter, or raw remote-provider tool. Source registration, restore, migration, backup scheduling, and scope configuration remain operator commands. `doc_put` is the single bounded write: it addresses exactly one knowledge draft under the fixed binding, so it is not a generic document update.
+There is no generic `update`, arbitrary SQL/query language, unbound scope override, or raw remote-provider tool. Source registration, restore, migration, backup scheduling, and scope configuration remain operator commands. `doc_put` is the single bounded write: it addresses exactly one knowledge draft in a selected scope from the fixed binding, so it is not a generic document update.
 
 Every mutating MCP tool requires an idempotency key supplied by the trusted host or SDK and a canonical request hash. A model-generated fresh key cannot prove retry uniqueness; the CLI therefore generates and prints keys and requires explicit confirmation to reuse one. External captures are additionally deduplicated by external identity. `doc_put` derives its key from scope, kind, slug and expected revision instead of asking the caller for one; the replay and conflict rules are unchanged.
 

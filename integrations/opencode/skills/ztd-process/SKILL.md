@@ -79,21 +79,28 @@ stays as defined above, and captures stay scope-free.
 2. Decide from the request and the available data:
    - No use: discard it with a reason (`ztd process --outcome discard --reason
      ...`).
-   - Information: load `ztd-knowledge`. Compare the capture's scope with the
-     primary scope `doc_put` writes to (stated in its tool description): when
-     they differ, leave the capture pending and use a session whose primary
-     scope matches the capture. Then store the card first — with MCP, write
-     it as a draft with `doc_put` (`ztd doc put` over the CLI) — and only after
-      that write succeeds keep the capture as a reference, putting the written
-      document's ID in the reason as audit context (`ztd process --outcome
-      reference --reason <doc-id>`; the MCP `reason` argument likewise carries
-      it). Normal reads retain only the outcome kind, not the reason, so retain
-      the document ID, scope, kind and slug from the successful write; to open
-      the card later, use `doc_get` in a session bound only to that scope. If
-      the card write fails, leave the capture pending; if the reference step
-      fails, keep the draft and retry the identical MCP request with the same
-      idempotency key and payload when its response was lost. The two steps are
-      not atomic.
+   - Information: load `ztd-knowledge` and interpret the lesson to choose a
+     destination scope from the session binding. The document's meaning, not
+     automatically the capture's source scope, determines the destination.
+     With MCP, pass that scope to `doc_put`; over the CLI, pass it as
+     `--scope DEST` (`ztd doc put --kind knowledge --slug SLUG --scope DEST
+     --title TITLE --file BODY_FILE --expected REV`). Before a CLI write, use
+     `ztd doc get --kind knowledge --slug SLUG --scope DEST` to check whether
+     the card exists and pass its current revision to `--expected` when
+     updating; MCP treats `expected_revision=0` as create-only, but CLI
+     `--expected 0` is not create-only and can overwrite an existing card.
+     The MCP server rejects scopes outside the binding. When updating, use
+     `doc_get` with the same scope to read the current revision. Store the
+     card first as a draft, and only after that write succeeds keep the
+     capture as a reference, putting the written document's ID in the reason
+     as audit context (`ztd process --scope CAPTURE_SCOPE --outcome reference
+     --reason DOC_ID CAPTURE_ID`; the MCP `reason` argument likewise carries
+     it). Normal reads retain only the
+     outcome kind, not the reason, so retain the document ID, scope, kind and
+     slug from the successful write. If the card write fails, leave the
+     capture pending; if the reference step fails, keep the draft and retry the
+     identical MCP request with the same idempotency key and payload when its
+     response was lost. The two steps are not atomic.
    - Future possibility: the `someday` list — or a dated
      `ztd process --outcome defer --review-after YYYY-MM-DD`.
    - Short action (about two minutes): do it if it is within the request and
