@@ -902,6 +902,96 @@ func TestPreSplitManualRowsKeepRegisteredManualSourceReferenced(t *testing.T) {
 	}
 }
 
+// seedLegacyImport writes a capture the way the pre-split importer did: source
+// "legacy" in the scope, with a capture "imported" history event at revision 1.
+func (e *testEnv) seedLegacyImport(id string, scope domain.ScopeID) {
+	e.t.Helper()
+	e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+	     processing_state, revision)
+	   VALUES (?, ?, 'legacy', 'plain', 'h', ?, 'pending', 1)`, id, string(scope), fmtTime(e.now))
+	if err := insertHistory(e.ctx(), e.s.db, "capture", id, "imported", string(scope), "", 1,
+		map[string]string{"legacy_id": id}, e.now); err != nil {
+		e.t.Fatalf("history for %s: %v", id, err)
+	}
+}
+
+// TestDeleteSourceIgnoresImportedLegacyCaptures pins the false conflict fix: an
+// old importer row with source "legacy" and its "imported" history does not
+// reference a registered source "legacy", so that source deletes and the row
+// is left as it was.
+func TestDeleteSourceIgnoresImportedLegacyCaptures(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("legacy", "personal")
+	e.seedLegacyImport("C-imp", "personal")
+	e.seedLegacyImport("C-other", "opensource")
+
+	if _, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "legacy"}, e.now); err != nil {
+		t.Fatalf("delete with only imported legacy rows: %v", err)
+	}
+	if n := e.count(`SELECT count(*) FROM captures WHERE source_id = 'legacy'`); n != 2 {
+		t.Fatalf("imported legacy rows after delete = %d, want 2 untouched", n)
+	}
+	if n := e.count(`SELECT count(*) FROM sources WHERE id = 'legacy'`); n != 0 {
+		t.Fatalf("source legacy still registered after delete")
+	}
+}
+
+// TestDeleteSourceKeepsNonImportedLegacyCapturesReferenced pins the retained
+// blocking: a "legacy" capture without the importer's proof, including an
+// "imported" event recorded in another scope, still references the source.
+func TestDeleteSourceKeepsNonImportedLegacyCapturesReferenced(t *testing.T) {
+	cases := map[string]func(e *testEnv){
+		"explicit capture with captured history": func(e *testEnv) {
+			e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+			     processing_state, revision) VALUES ('C-ex', 'personal', 'legacy', 'plain', 'h', ?, 'pending', 1)`, fmtTime(e.now))
+			if err := insertHistory(e.ctx(), e.s.db, "capture", "C-ex", "captured", "personal", "", 1, map[string]string{}, e.now); err != nil {
+				e.t.Fatal(err)
+			}
+		},
+		"capture without any history": func(e *testEnv) {
+			e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+			     processing_state, revision) VALUES ('C-nh', 'personal', 'legacy', 'plain', 'h', ?, 'pending', 1)`, fmtTime(e.now))
+		},
+		"imported event recorded in another scope": func(e *testEnv) {
+			e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+			     processing_state, revision) VALUES ('C-sc', 'personal', 'legacy', 'plain', 'h', ?, 'pending', 1)`, fmtTime(e.now))
+			if err := insertHistory(e.ctx(), e.s.db, "capture", "C-sc", "imported", "opensource", "", 1, map[string]string{}, e.now); err != nil {
+				e.t.Fatal(err)
+			}
+		},
+	}
+	for name, seed := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newTestEnv(t)
+			e.mustAddSource("legacy", "personal")
+			seed(e)
+			before := e.counts()
+			_, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "legacy"}, e.now)
+			wantFamily(t, err, domain.Conflict)
+			if after := e.counts(); after != before {
+				t.Fatalf("refused delete wrote state: before %v after %v", before, after)
+			}
+		})
+	}
+}
+
+// TestDeleteSourceCountsOnlyNonImportedLegacyCaptures pins the exact count: an
+// imported row is excluded while a sibling explicit row still blocks, and the
+// refusal reports only the blocking capture.
+func TestDeleteSourceCountsOnlyNonImportedLegacyCaptures(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("legacy", "personal")
+	e.seedLegacyImport("C-imp", "personal")
+	e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+	     processing_state, revision) VALUES ('C-ex', 'personal', 'legacy', 'plain', 'h', ?, 'pending', 1)`, fmtTime(e.now))
+
+	_, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "legacy"}, e.now)
+	wantFamily(t, err, domain.Conflict)
+	if err == nil || !strings.Contains(err.Error(), "referenced by 1 captures") {
+		t.Fatalf("refusal = %v, want it to count one blocking capture", err)
+	}
+}
+
 // TestDeletedSourceIDCannotBeReused pins the no-reuse rule: after a delete the
 // id keeps its deleted history, so add and apply both refuse it with conflict
 // and write nothing.

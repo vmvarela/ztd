@@ -340,6 +340,119 @@ func TestSeedDefaultsTwiceCreatesNoDuplicates(t *testing.T) {
 	}
 }
 
+// seedPreUpgradeCapture stores a capture the way an earlier build did: a
+// capture row, plus an idempotency record under the pre-split hash, which
+// normalized an omitted source to "manual", with the stored source given.
+func (e *testEnv) seedPreUpgradeCapture(id string, cmd app.CaptureCmd, storedSource string) {
+	e.t.Helper()
+	e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+	     processing_state, revision) VALUES (?, 'personal', ?, ?, ?, ?, 'pending', 1)`,
+		id, storedSource, cmd.Text, sha256hex(cmd.Text), fmtTime(e.now))
+	legacy := cmd
+	if legacy.SourceID == "" {
+		legacy.SourceID = "manual"
+	}
+	hash, err := hashPayload(legacy)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	cap := domain.Capture{ID: domain.CaptureID(id), Scope: "personal", SourceID: storedSource,
+		OriginalText: cmd.Text, ContentHash: sha256hex(cmd.Text), CapturedAt: e.now,
+		State: domain.Pending, Revision: 1}
+	if err := writeIdem(e.ctx(), e.s.db, "capture", cmd.Key, hash, cap, e.now); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// TestImplicitAndExplicitManualCapturesDoNotReplayEachOther reproduces the
+// collision: an implicit capture and an explicit registered "manual" capture
+// with the same key and text must conflict in both orders, never replay.
+func TestImplicitAndExplicitManualCapturesDoNotReplayEachOther(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("manual", "personal")
+	ctx := e.ctx()
+	explicitCmd := func(key string) app.CaptureCmd {
+		return app.CaptureCmd{Binding: e.binding, Key: key, Text: "hola", SourceID: "manual"}
+	}
+	implicitCmd := func(key string) app.CaptureCmd {
+		return app.CaptureCmd{Binding: e.binding, Key: key, Text: "hola"}
+	}
+
+	implicit := e.capture("hola", "k-impl")
+	_, err := e.s.Capture(ctx, explicitCmd("k-impl"), e.now)
+	wantFamily(t, err, domain.IdempotencyConflict)
+
+	explicit, err := e.s.Capture(ctx, explicitCmd("k-expl"), e.now)
+	if err != nil || explicit.SourceID != "manual" || explicit.ID == implicit.ID {
+		t.Fatalf("explicit manual capture = %+v, err %v; want a new capture", explicit, err)
+	}
+	_, err = e.s.Capture(ctx, implicitCmd("k-expl"), e.now)
+	wantFamily(t, err, domain.IdempotencyConflict)
+
+	replay, err := e.s.Capture(ctx, explicitCmd("k-expl"), e.now)
+	if err != nil || replay.ID != explicit.ID {
+		t.Fatalf("explicit retry = %+v, err %v; want replay of %s", replay, err, explicit.ID)
+	}
+	if n := e.count(`SELECT count(*) FROM captures`); n != 2 {
+		t.Fatalf("captures = %d, want 2 (one implicit, one explicit)", n)
+	}
+}
+
+// TestCapturePreUpgradeRetriesStillReplay pins compatibility with records
+// written before the split and the source split: retries replay, while an
+// explicit "manual" never replays an implicit record.
+func TestCapturePreUpgradeRetriesStillReplay(t *testing.T) {
+	t.Run("omitted source from the pre-split build", func(t *testing.T) {
+		e := newTestEnv(t)
+		cmd := app.CaptureCmd{Binding: e.binding, Key: "old-1", Text: "hola"}
+		e.seedPreUpgradeCapture("C-20261119-001", cmd, "manual")
+		replay, err := e.s.Capture(e.ctx(), cmd, e.now.Add(time.Hour))
+		if err != nil || replay.ID != "C-20261119-001" {
+			t.Fatalf("retry = %+v, err %v; want replay of C-20261119-001", replay, err)
+		}
+		if n := e.count(`SELECT count(*) FROM captures`); n != 1 {
+			t.Fatalf("captures = %d, want 1", n)
+		}
+	})
+	t.Run("omitted source from the split build", func(t *testing.T) {
+		e := newTestEnv(t)
+		cmd := app.CaptureCmd{Binding: e.binding, Key: "old-2", Text: "hola"}
+		e.seedPreUpgradeCapture("C-20261119-001", cmd, domain.ImplicitSourceID)
+		replay, err := e.s.Capture(e.ctx(), cmd, e.now.Add(time.Hour))
+		if err != nil || replay.ID != "C-20261119-001" {
+			t.Fatalf("retry = %+v, err %v; want replay of C-20261119-001", replay, err)
+		}
+	})
+	t.Run("explicit manual from the pre-split build", func(t *testing.T) {
+		e := newTestEnv(t)
+		e.mustAddSource("manual", "personal")
+		cmd := app.CaptureCmd{Binding: e.binding, Key: "old-3", Text: "hola", SourceID: "manual"}
+		e.seedPreUpgradeCapture("C-20261119-001", cmd, "manual")
+		replay, err := e.s.Capture(e.ctx(), cmd, e.now.Add(time.Hour))
+		if err != nil || replay.ID != "C-20261119-001" {
+			t.Fatalf("retry = %+v, err %v; want replay of C-20261119-001", replay, err)
+		}
+	})
+	t.Run("explicit manual never replays a split-build implicit record", func(t *testing.T) {
+		e := newTestEnv(t)
+		e.mustAddSource("manual", "personal")
+		implicit := app.CaptureCmd{Binding: e.binding, Key: "old-4", Text: "hola"}
+		e.seedPreUpgradeCapture("C-20261119-001", implicit, domain.ImplicitSourceID)
+		_, err := e.s.Capture(e.ctx(), app.CaptureCmd{Binding: e.binding, Key: "old-4", Text: "hola", SourceID: "manual"}, e.now)
+		wantFamily(t, err, domain.IdempotencyConflict)
+	})
+	t.Run("explicit registered source from the pre-split build", func(t *testing.T) {
+		e := newTestEnv(t)
+		e.mustAddSource("notes", "personal")
+		cmd := app.CaptureCmd{Binding: e.binding, Key: "old-5", Text: "hola", SourceID: "notes"}
+		e.seedPreUpgradeCapture("C-20261119-001", cmd, "notes")
+		replay, err := e.s.Capture(e.ctx(), cmd, e.now.Add(time.Hour))
+		if err != nil || replay.ID != "C-20261119-001" {
+			t.Fatalf("retry = %+v, err %v; want replay of C-20261119-001", replay, err)
+		}
+	})
+}
+
 func TestCaptureIdempotencyConflictsAndExternalIdentity(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := e.ctx()
@@ -369,17 +482,14 @@ func TestCaptureIdempotencyConflictsAndExternalIdentity(t *testing.T) {
 	if string(a) != string(b) {
 		t.Fatalf("replay differs:\n%s\n%s", a, b)
 	}
-	legacyReplay, err := e.s.Capture(ctx, app.CaptureCmd{
+	// A new implicit capture never replays for an explicit "manual" request;
+	// the pre-upgrade replay is covered by TestCapturePreUpgradeRetriesStillReplay.
+	_, err = e.s.Capture(ctx, app.CaptureCmd{
 		Binding: e.binding, Key: "k1", Text: "hola", SourceID: "manual",
 	}, later)
-	if err != nil {
-		t.Fatalf("replay with the pre-upgrade manual source default: %v", err)
-	}
-	if legacyReplay.ID != c1.ID {
-		t.Fatalf("pre-upgrade replay ID = %s, want %s", legacyReplay.ID, c1.ID)
-	}
+	wantFamily(t, err, domain.IdempotencyConflict)
 	if n := e.count(`SELECT count(*) FROM captures`); n != 1 {
-		t.Fatalf("captures after replay = %d, want 1", n)
+		t.Fatalf("captures after explicit manual conflict = %d, want 1", n)
 	}
 
 	// Same key + different payload fails and writes nothing.

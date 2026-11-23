@@ -214,6 +214,57 @@ func loadCaptureScope(ctx context.Context, q queryer, b domain.ScopeBinding, id 
 	return cap, nil
 }
 
+// captureHashVersion tags capture request hashes. Versions before the split
+// hashed an omitted source as "manual", so an explicit registered "manual"
+// hashed exactly like an implicit capture; the tag keeps the two apart.
+const captureHashVersion = 2
+
+// captureRequest is the versioned payload hashed for a capture request.
+type captureRequest struct {
+	Version int
+	Cmd     app.CaptureCmd
+}
+
+// lookupCaptureIdem is lookupIdem for captures. A stored record also replays
+// when it was written under the pre-split hash (legacyHash) and its stored
+// source is one that build could have stored for this request: an omitted
+// source was stored as "manual", and as domain.ImplicitSourceID by the build
+// that split it. An explicit "manual" never replays such an implicit record.
+// Pre-split rows cannot tell an omitted source from an explicit "manual", so an
+// omitted retry may replay an explicit one; that is the inherited ambiguity.
+func lookupCaptureIdem(ctx context.Context, q queryer, cmd app.CaptureCmd, hash, legacyHash string, out *domain.Capture) (bool, error) {
+	var storedHash, result string
+	err := q.QueryRowContext(ctx,
+		"SELECT request_hash, result_json FROM idempotency_records WHERE command = 'capture' AND idempotency_key = ?",
+		cmd.Key).Scan(&storedHash, &result)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	var stored domain.Capture
+	if err := json.Unmarshal([]byte(result), &stored); err != nil {
+		return false, domain.NewError(domain.IOError, "stored result for idempotency key %q is unreadable: %v", cmd.Key, err)
+	}
+	legacy := storedHash == legacyHash && legacySourceMatches(cmd.SourceID, stored.SourceID)
+	if storedHash != hash && !legacy {
+		return false, domain.NewError(domain.IdempotencyConflict,
+			"idempotency key %q was already used with a different payload", cmd.Key)
+	}
+	*out = stored
+	return true, nil
+}
+
+// legacySourceMatches reports whether a pre-split record stored under the
+// legacy hash may replay for a request with the given source id.
+func legacySourceMatches(requested, stored string) bool {
+	if requested == "" {
+		return stored == "manual" || stored == domain.ImplicitSourceID
+	}
+	return stored == requested
+}
+
 // Capture stores one immutable inbox entry.
 //
 // Pre: binding validates with at least one scope; key is set; text is nonblank
@@ -249,14 +300,18 @@ func (s *Store) Capture(ctx context.Context, cmd app.CaptureCmd, now time.Time) 
 		return domain.Capture{}, domain.Invalid("external revision cannot be empty")
 	}
 	source := cmd.SourceID
-	hashCmd := cmd
 	if source == "" {
-		// The payload hash keeps the pre-split implicit value "manual", so a
-		// retry from an earlier version with the same key still replays.
-		hashCmd.SourceID = "manual"
 		source = domain.ImplicitSourceID
 	}
-	hash, err := hashPayload(hashCmd)
+	hash, err := hashPayload(captureRequest{Version: captureHashVersion, Cmd: cmd})
+	if err != nil {
+		return domain.Capture{}, err
+	}
+	legacyCmd := cmd
+	if legacyCmd.SourceID == "" {
+		legacyCmd.SourceID = "manual"
+	}
+	legacyHash, err := hashPayload(legacyCmd)
 	if err != nil {
 		return domain.Capture{}, err
 	}
@@ -265,7 +320,7 @@ func (s *Store) Capture(ctx context.Context, cmd app.CaptureCmd, now time.Time) 
 	scope := cmd.Binding.Scopes[0]
 	var cap domain.Capture
 	err = s.withTx(ctx, func(tx *sql.Tx) error {
-		done, err := lookupIdem(ctx, tx, "capture", cmd.Key, hash, &cap)
+		done, err := lookupCaptureIdem(ctx, tx, cmd, hash, legacyHash, &cap)
 		if err != nil || done {
 			return err
 		}

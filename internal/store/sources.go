@@ -417,7 +417,7 @@ func (s *Store) DeleteSource(ctx context.Context, cmd app.SourceDeleteCmd, now t
 		}
 		var captures, reviews int
 		if err := tx.QueryRowContext(ctx,
-			`SELECT (SELECT count(*) FROM captures WHERE source_id = ? AND scope_id = ?),
+			`SELECT (SELECT count(*) FROM captures c WHERE c.source_id = ? AND c.scope_id = ? AND NOT `+importedLegacyCapture+`),
 			        (SELECT count(*) FROM source_reviews WHERE source_id = ?)`,
 			src.ID, string(src.Scope), src.ID).Scan(&captures, &reviews); err != nil {
 			return err
@@ -444,6 +444,15 @@ func (s *Store) DeleteSource(ctx context.Context, cmd app.SourceDeleteCmd, now t
 	}
 	return out, nil
 }
+
+// importedLegacyCapture matches a row the pre-split importer wrote under the
+// registered-looking source "legacy" and proved with its persistent capture
+// "imported" history event in the same scope. The importer never linked those
+// rows to a registered source, so they do not reference one.
+const importedLegacyCapture = `(c.source_id = 'legacy' AND EXISTS (
+	SELECT 1 FROM history_events h
+	 WHERE h.entity_type = 'capture' AND h.entity_id = c.id AND h.scope_id = c.scope_id
+	   AND h.event = 'imported'))`
 
 // sourceDeleteCommand namespaces source-deletion idempotency by the trusted
 // binding (profile, actor and the sorted scope set), so a key reused under
