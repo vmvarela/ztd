@@ -15,8 +15,9 @@ The bundle no longer ships Markdown commands: the skills carry the whole
 circuit and the host's native roles cover its permissions. `/ztd:*` prompts
 keep coming from the MCP server. An older install may leave `agents/ztd.md`
 and the ZTD-specific command files (`commands/ztd.md` and
-`commands/ztd/*.md`) in place. This installer does not remove them; remove
-only those files if desired, and leave unrelated commands untouched.
+`commands/ztd/*.md`) in place. This installer does not remove them. If
+cleaning up manually, remove only files that still match the old ZTD defaults;
+preserve edited or user-added files and unrelated commands.
 
 ## Install globally
 
