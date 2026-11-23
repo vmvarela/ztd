@@ -13,9 +13,10 @@ the method on the task store (store root `~/.ztd`).
 
 The bundle no longer ships Markdown commands: the skills carry the whole
 circuit and the host's native roles cover its permissions. `/ztd:*` prompts
-keep coming from the MCP server. An `agents/ztd.md` or a `commands/` tree
-installed by an earlier checkout is left untouched and can be removed by
-hand.
+keep coming from the MCP server. An older install may leave `agents/ztd.md`
+and the ZTD-specific command files (`commands/ztd.md` and
+`commands/ztd/*.md`) in place. This installer does not remove them; remove
+only those files if desired, and leave unrelated commands untouched.
 
 ## Install globally
 
