@@ -137,6 +137,6 @@ routing hint, not authorization: explicit user scope remains authoritative.
 Each clone's local path lives in its project card, outside the binding and
 store.
 
-The OpenCode adapter —skills, commands and agent— lives in
+The OpenCode adapter —the skills— lives in
 [`../integrations/opencode/`](../integrations/opencode/README.md). It is
 optional: the method works the same with a notebook, an editor or any tool.

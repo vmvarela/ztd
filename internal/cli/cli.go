@@ -2851,7 +2851,7 @@ const usage = `ztd — local ZTD
 
   init [--actor A] [--non-interactive] [--scope DECL]...
         DECL = id=salud,kind=personal,name=Salud
-  install opencode [--dry-run]   (publish skills/commands to ~/.config/opencode)
+  install opencode [--dry-run]   (publish skills to ~/.config/opencode)
   install templates [--dry-run]  (publish method templates to <store>/templates)
   scope add --id ID --kind KIND [--name NAME] | scope list
   capture TEXT... [--scope S] [--source ID] [--key K]

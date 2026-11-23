@@ -61,8 +61,8 @@ go build -o ztd ./cmd/ztd
 ./ztd version
 ```
 
-Then publish the embedded assets — the OpenCode skills and commands to
-`~/.config/opencode/{skills,commands}` and the method templates to
+Then publish the embedded assets — the OpenCode skills to
+`~/.config/opencode/skills` and the method templates to
 `<store-root>/templates/`:
 
 ```sh
@@ -127,7 +127,7 @@ one of them and is rejected when it is outside that view.
 | Command | Purpose |
 | --- | --- |
 | `init` | Declare the database's scopes (interactive on a terminal, flags in scripts) |
-| `install opencode\|templates` | Publish the embedded OpenCode skills/commands and the method templates, without clobbering files you edited |
+| `install opencode\|templates` | Publish the embedded OpenCode skills and the method templates, without clobbering files you edited |
 | `scope add\|list` | Declare and list scopes |
 | `capture` | Store text in the inbox |
 | `inbox next` | Return the oldest pending capture |

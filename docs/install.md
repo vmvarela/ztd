@@ -89,7 +89,7 @@ scopes and shows a summary before it writes. In scripts pass `--actor` and
 After installing the binary, publish the embedded assets:
 
 ```bash
-ztd install opencode     # → ~/.config/opencode/{skills,commands}
+ztd install opencode     # → ~/.config/opencode/skills
 ztd install templates    # → <store root>/templates/ (the directory of --db)
 ```
 

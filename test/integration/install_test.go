@@ -48,9 +48,7 @@ func TestInstallOpenCodeDryRun(t *testing.T) {
 	r := runHome(t, home, db, "install", "opencode", "--dry-run")
 	rep := decode[installReport](t, r.wantOK(t, "install"))
 
-	want := countBundle(t,
-		filepath.Join("integrations", "opencode", "skills"),
-		filepath.Join("integrations", "opencode", "commands"))
+	want := countBundle(t, filepath.Join("integrations", "opencode", "skills"))
 	if rep.Installed != want || rep.Updated != 0 || rep.Unchanged != 0 || len(rep.Conflicts) != 0 {
 		t.Fatalf("report = %+v, want %d installed", rep, want)
 	}
@@ -122,9 +120,7 @@ func TestInstallTemplatesMissingRoot(t *testing.T) {
 func TestInstallOpenCodeForReal(t *testing.T) {
 	home := t.TempDir()
 	db := filepath.Join(t.TempDir(), "ztd.db")
-	want := countBundle(t,
-		filepath.Join("integrations", "opencode", "skills"),
-		filepath.Join("integrations", "opencode", "commands"))
+	want := countBundle(t, filepath.Join("integrations", "opencode", "skills"))
 
 	r := runHome(t, home, db, "install", "opencode")
 	rep := decode[installReport](t, r.wantOK(t, "install"))

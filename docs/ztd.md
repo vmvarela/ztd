@@ -90,11 +90,11 @@ beats the default. No model argument can widen any of them.
 
 ## Install the agent assets
 
-The binary embeds the OpenCode adapter (skills and commands) and the six
+The binary embeds the OpenCode adapter (skills) and the six
 method templates; `install` publishes them:
 
 ```sh
-./ztd install opencode             # → $HOME/.config/opencode/{skills,commands}
+./ztd install opencode             # → $HOME/.config/opencode/skills
 ./ztd --db "$DB" install templates # → <store root>/templates/ (directory of --db)
 ```
 
