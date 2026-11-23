@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -132,14 +133,49 @@ func sameSourceConfig(src domain.Source, cmd app.SourceCmd) bool {
 		src.Cadence == cmd.Cadence
 }
 
+// checkSourceRef admits an explicit capture source only when it is registered
+// in the primary scope. A missing id is not_found and a source owned by another
+// scope is scope_denied; the MCP boundary folds both into one wire answer.
+func checkSourceRef(ctx context.Context, q queryer, id string, scope domain.ScopeID) error {
+	var owner string
+	err := q.QueryRowContext(ctx, "SELECT scope_id FROM sources WHERE id = ?", id).Scan(&owner)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return domain.NewError(domain.NotFound, "source %s not found", id)
+	case err != nil:
+		return err
+	case domain.ScopeID(owner) != scope:
+		return domain.NewError(domain.ScopeDenied, "source %s belongs to scope %s, not %s", id, owner, scope)
+	}
+	return nil
+}
+
+// refuseReusedSourceID keeps a deleted source id retired: its history stays,
+// so registering the same id again would make that history ambiguous.
+func refuseReusedSourceID(ctx context.Context, q queryer, id string) error {
+	var one int
+	err := q.QueryRowContext(ctx,
+		`SELECT 1 FROM history_events WHERE entity_type = 'source' AND entity_id = ? AND event = 'deleted' LIMIT 1`,
+		id).Scan(&one)
+	switch {
+	case err == nil:
+		return domain.NewError(domain.Conflict,
+			"source id %s was deleted and cannot be reused; choose another id", id)
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	default:
+		return err
+	}
+}
+
 // AddSource registers one source under a bound scope.
 //
 // Pre: binding validates; id matches [a-z][a-z0-9_-]{1,63}; name, kind,
 // connector and scope are set; the scope is in the binding and exists.
 // Post: one transaction inserts the source and its history. Re-adding the
 // same id with an identical configuration returns the existing row without
-// writing; a different configuration is conflict. Nothing is written on
-// failure.
+// writing; a different configuration is conflict. A deleted id is conflict and
+// is never registered again. Nothing is written on failure.
 func (s *Store) AddSource(ctx context.Context, cmd app.SourceCmd, now time.Time) (domain.Source, error) {
 	now = now.UTC().Truncate(time.Second)
 	if err := cmd.Binding.Validate(); err != nil {
@@ -171,6 +207,9 @@ func (s *Store) AddSource(ctx context.Context, cmd app.SourceCmd, now time.Time)
 			}
 			return domain.NewError(domain.Conflict,
 				"source id %s is already registered; choose another id", cmd.ID)
+		}
+		if err := refuseReusedSourceID(ctx, tx, cmd.ID); err != nil {
+			return err
 		}
 		out = domain.Source{
 			ID: cmd.ID, Name: cmd.Name, Scope: cmd.Scope, Kind: cmd.Kind,
@@ -205,6 +244,7 @@ func (s *Store) AddSource(ctx context.Context, cmd app.SourceCmd, now time.Time)
 //
 // Pre: every command validates, ids are unique, and every scope is in the
 // binding and exists. A source id already owned by another scope is conflict.
+// A deleted source id is conflict too.
 // Post: missing sources are inserted; existing sources with the same scope
 // have only their configuration updated and keep coverage, cursor and auth
 // state; identical entries are untouched. Any failure rolls back the batch.
@@ -245,6 +285,9 @@ func (s *Store) ApplySources(ctx context.Context, cmds []app.SourceCmd, now time
 				"SELECT "+sourceColumns+" FROM sources WHERE id = ?", cmd.ID))
 			switch {
 			case errors.Is(err, sql.ErrNoRows):
+				if err := refuseReusedSourceID(ctx, tx, cmd.ID); err != nil {
+					return err
+				}
 				src := domain.Source{
 					ID: cmd.ID, Name: cmd.Name, Scope: cmd.Scope, Kind: cmd.Kind,
 					Connector: cmd.Connector, Provider: cmd.Provider,
@@ -332,6 +375,97 @@ func (s *Store) ListSources(ctx context.Context, b domain.ScopeBinding) ([]domai
 		out = append(out, src)
 	}
 	return out, rows.Err()
+}
+
+// DeleteSource removes one registered source in the binding scopes.
+//
+// Pre: binding validates; id matches the source id pattern; the source exists
+// in the binding scopes. A source still referred to by a capture of its own
+// scope or by any source review is not deleted, because those rows would
+// dangle. Key is optional; its idempotency record is namespaced by the binding.
+// Post: one transaction deletes the source row and records a "deleted" history
+// event carrying its last state. With a key, the same key and payload replay
+// the stored source without a write; the same key with another payload is
+// idempotency_conflict. Any refusal or error writes nothing.
+func (s *Store) DeleteSource(ctx context.Context, cmd app.SourceDeleteCmd, now time.Time) (domain.Source, error) {
+	now = now.UTC().Truncate(time.Second)
+	if err := cmd.Binding.Validate(); err != nil {
+		return domain.Source{}, err
+	}
+	if !domain.ValidSourceID(cmd.ID) {
+		return domain.Source{}, domain.Invalid("source id must match [a-z][a-z0-9_-]{1,63}")
+	}
+	command := sourceDeleteCommand(cmd.Binding)
+	hash, err := hashPayload(struct {
+		Command string `json:"command"`
+		ID      string `json:"id"`
+	}{command, cmd.ID})
+	if err != nil {
+		return domain.Source{}, err
+	}
+	var out domain.Source
+	err = s.withTx(ctx, func(tx *sql.Tx) error {
+		if cmd.Key != "" {
+			done, err := lookupIdem(ctx, tx, command, cmd.Key, hash, &out)
+			if err != nil || done {
+				return err
+			}
+		}
+		src, err := loadSourceScope(ctx, tx, cmd.Binding, cmd.ID)
+		if err != nil {
+			return err
+		}
+		var captures, reviews int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT (SELECT count(*) FROM captures c WHERE c.source_id = ? AND c.scope_id = ? AND NOT `+importedLegacyCapture+`),
+			        (SELECT count(*) FROM source_reviews WHERE source_id = ?)`,
+			src.ID, string(src.Scope), src.ID).Scan(&captures, &reviews); err != nil {
+			return err
+		}
+		if captures > 0 || reviews > 0 {
+			return domain.NewError(domain.Conflict,
+				"source %s is referenced by %d captures and %d reviews; it cannot be deleted",
+				src.ID, captures, reviews)
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM sources WHERE id = ?", src.ID); err != nil {
+			return err
+		}
+		if err := insertHistory(ctx, tx, "source", src.ID, "deleted", string(src.Scope), "", 1, src, now); err != nil {
+			return err
+		}
+		out = src
+		if cmd.Key != "" {
+			return writeIdem(ctx, tx, command, cmd.Key, hash, out, now)
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.Source{}, err
+	}
+	return out, nil
+}
+
+// importedLegacyCapture matches a row the pre-split importer wrote under the
+// registered-looking source "legacy" and proved with its persistent capture
+// "imported" history event in the same scope. The importer never linked those
+// rows to a registered source, so they do not reference one.
+const importedLegacyCapture = `(c.source_id = 'legacy' AND EXISTS (
+	SELECT 1 FROM history_events h
+	 WHERE h.entity_type = 'capture' AND h.entity_id = c.id AND h.scope_id = c.scope_id
+	   AND h.event = 'imported'))`
+
+// sourceDeleteCommand namespaces source-deletion idempotency by the trusted
+// binding (profile, actor and the sorted scope set), so a key reused under
+// another binding neither replays nor collides with this one.
+func sourceDeleteCommand(b domain.ScopeBinding) string {
+	scopes := make([]string, 0, len(b.Scopes))
+	for _, s := range b.Scopes {
+		scopes = append(scopes, string(s))
+	}
+	slices.Sort(scopes)
+	scopes = slices.Compact(scopes)
+	canon := strings.Join(append([]string{string(b.Profile), string(b.Actor)}, scopes...), "\x00")
+	return "source_delete:" + sha256hex(canon)
 }
 
 // sourceReviewResult is the idempotent result of RecordSourceReview.

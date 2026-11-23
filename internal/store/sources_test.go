@@ -727,3 +727,365 @@ func TestPrepareSurfacesSourceCoverage(t *testing.T) {
 		t.Fatalf("prepare sources = %+v, want gh unverified", brief.Sources)
 	}
 }
+
+func TestDeleteSourceRemovesUnreferencedSource(t *testing.T) {
+	e := newTestEnv(t)
+	svc := app.New(e.s)
+	src := e.mustAddSource("gh", "personal")
+	e.mustAddSource("mail", "personal")
+
+	got, err := svc.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "gh"})
+	if err != nil {
+		t.Fatalf("DeleteSource: %v", err)
+	}
+	if got.ID != src.ID || got.Scope != "personal" || got.Name != src.Name {
+		t.Fatalf("deleted source = %+v, want the registered row %+v", got, src)
+	}
+	if n := e.count(`SELECT count(*) FROM sources WHERE id = 'gh'`); n != 0 {
+		t.Fatalf("source row survived delete: %d", n)
+	}
+	if n := e.count(`SELECT count(*) FROM history_events WHERE entity_type = 'source' AND entity_id = 'gh' AND event = 'deleted'`); n != 1 {
+		t.Fatalf("deleted history events = %d, want 1 (created history must stay)", n)
+	}
+	if n := e.count(`SELECT count(*) FROM history_events WHERE entity_type = 'source' AND entity_id = 'gh' AND event = 'created'`); n != 1 {
+		t.Fatalf("created history events = %d, want 1 kept", n)
+	}
+	listed, err := e.s.ListSources(e.ctx(), e.binding)
+	if err != nil || len(listed) != 1 || listed[0].ID != "mail" {
+		t.Fatalf("after delete ListSources = %+v (err %v), want only mail", listed, err)
+	}
+}
+
+func TestDeleteSourceRefusesReferencedSource(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("gh", "personal")
+	cmd := reportedBatch("rev-1", "batch-1", domain.SourceItem{OriginalText: "a report"})
+	cmd.Binding = e.binding
+	cmd.SourceID = "gh"
+	if _, _, err := e.s.RecordSourceReview(e.ctx(), cmd, e.now); err != nil {
+		t.Fatalf("seed review: %v", err)
+	}
+	before := e.counts()
+
+	_, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "gh"}, e.now)
+	wantFamily(t, err, domain.Conflict)
+	if after := e.counts(); after != before {
+		t.Fatalf("refused delete wrote state: before %v after %v", before, after)
+	}
+	if n := e.count(`SELECT count(*) FROM sources WHERE id = 'gh'`); n != 1 {
+		t.Fatalf("referenced source was removed")
+	}
+}
+
+func TestDeleteSourceRefusesCapturesFromSource(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("gh", "personal")
+	if _, err := e.s.db.ExecContext(e.ctx(),
+		`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+		   processing_state, revision)
+		 VALUES ('C-x', 'personal', 'gh', 'plain', 'h', ?, 'pending', 1)`, fmtTime(e.now)); err != nil {
+		t.Fatalf("seed capture: %v", err)
+	}
+	_, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "gh"}, e.now)
+	wantFamily(t, err, domain.Conflict)
+}
+
+func TestDeleteSourceScopeAndNotFound(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("personal-src", "personal")
+	onlyOS := domain.ScopeBinding{Profile: "personal", Actor: "tester", Scopes: []domain.ScopeID{"opensource"}}
+	before := e.counts()
+
+	_, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: onlyOS, ID: "personal-src"}, e.now)
+	wantFamily(t, err, domain.ScopeDenied)
+	_, err = e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "missing"}, e.now)
+	wantFamily(t, err, domain.NotFound)
+	_, err = e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "Bad Id"}, e.now)
+	wantFamily(t, err, domain.InvalidInput)
+	if after := e.counts(); after != before {
+		t.Fatalf("rejected deletes wrote state: before %v after %v", before, after)
+	}
+}
+
+func TestDeleteSourceIdempotentReplay(t *testing.T) {
+	e := newTestEnv(t)
+	first := e.mustAddSource("gh", "personal")
+	cmd := app.SourceDeleteCmd{Binding: e.binding, ID: "gh", Key: "del-1"}
+	if _, err := e.s.DeleteSource(e.ctx(), cmd, e.now); err != nil {
+		t.Fatalf("first delete: %v", err)
+	}
+	before := e.counts()
+
+	// The same key replays the stored source without writing, even though the
+	// row is gone now.
+	replay, err := e.s.DeleteSource(e.ctx(), cmd, e.now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if replay.ID != first.ID || replay.Name != first.Name {
+		t.Fatalf("replay = %+v, want stored source %+v", replay, first)
+	}
+	if after := e.counts(); after != before {
+		t.Fatalf("replay wrote state: before %v after %v", before, after)
+	}
+
+	// The same key for another id is an idempotency conflict.
+	e.mustAddSource("mail", "personal")
+	other := app.SourceDeleteCmd{Binding: e.binding, ID: "mail", Key: "del-1"}
+	_, err = e.s.DeleteSource(e.ctx(), other, e.now)
+	wantFamily(t, err, domain.IdempotencyConflict)
+}
+
+// TestCaptureExplicitSourceMustBeRegisteredInPrimaryScope pins the source
+// reference of a capture: an explicit id must be registered in the primary
+// scope of the binding, and a refused capture writes nothing. An empty id keeps
+// the implicit manual entry point, which needs no registered row.
+func TestCaptureExplicitSourceMustBeRegisteredInPrimaryScope(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("gh", "opensource")
+	before := e.counts()
+
+	// The primary scope of e.binding is personal; gh lives in opensource.
+	_, err := e.s.Capture(e.ctx(), app.CaptureCmd{Binding: e.binding, Key: "c-1", Text: "x", SourceID: "gh"}, e.now)
+	wantFamily(t, err, domain.ScopeDenied)
+	_, err = e.s.Capture(e.ctx(), app.CaptureCmd{Binding: e.binding, Key: "c-2", Text: "x", SourceID: "missing"}, e.now)
+	wantFamily(t, err, domain.NotFound)
+	if after := e.counts(); after != before {
+		t.Fatalf("refused capture wrote state: before %v after %v", before, after)
+	}
+
+	e.mustAddSource("notes", "personal")
+	c, err := e.s.Capture(e.ctx(), app.CaptureCmd{Binding: e.binding, Key: "c-3", Text: "x", SourceID: "notes"}, e.now)
+	if err != nil || c.SourceID != "notes" || c.Scope != "personal" {
+		t.Fatalf("registered explicit source: capture %+v, err %v", c, err)
+	}
+	implicit := e.capture("implicit", "c-4")
+	if implicit.SourceID != domain.ImplicitSourceID {
+		t.Fatalf("implicit capture source = %q, want %s", implicit.SourceID, domain.ImplicitSourceID)
+	}
+}
+
+// TestImplicitProvenanceDoesNotBlockRegisteredSourceDelete pins the namespace
+// split: implicit captures and imported legacy rows carry an upper-case
+// provenance that no source can register, so a source named "manual" or
+// "legacy" deletes freely.
+func TestImplicitProvenanceDoesNotBlockRegisteredSourceDelete(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("manual", "personal")
+	e.mustAddSource("legacy", "personal")
+	e.capture("implicit", "c-1")
+	e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+	     processing_state, revision)
+	   VALUES ('C-imported', 'personal', ?, 'plain', 'h', ?, 'pending', 1)`, domain.LegacySourceID, fmtTime(e.now))
+	for _, id := range []string{"manual", "legacy"} {
+		if _, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: id}, e.now); err != nil {
+			t.Fatalf("delete %s with only internal provenance rows: %v", id, err)
+		}
+	}
+}
+
+// TestPreSplitManualRowsKeepRegisteredManualSourceReferenced pins the
+// conservative rule for historical rows: a capture written before the split
+// with source_id "manual" cannot be told apart from a capture of a registered
+// source "manual", so deleting that source stays refused and nothing is rewritten.
+func TestPreSplitManualRowsKeepRegisteredManualSourceReferenced(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("manual", "personal")
+	e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+	     processing_state, revision)
+	   VALUES ('C-old', 'personal', 'manual', 'plain', 'h', ?, 'pending', 1)`, fmtTime(e.now))
+	before := e.counts()
+	_, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "manual"}, e.now)
+	wantFamily(t, err, domain.Conflict)
+	if after := e.counts(); after != before {
+		t.Fatalf("refused delete wrote state: before %v after %v", before, after)
+	}
+}
+
+// seedLegacyImport writes a capture the way the pre-split importer did: source
+// "legacy" in the scope, with a capture "imported" history event at revision 1.
+func (e *testEnv) seedLegacyImport(id string, scope domain.ScopeID) {
+	e.t.Helper()
+	e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+	     processing_state, revision)
+	   VALUES (?, ?, 'legacy', 'plain', 'h', ?, 'pending', 1)`, id, string(scope), fmtTime(e.now))
+	if err := insertHistory(e.ctx(), e.s.db, "capture", id, "imported", string(scope), "", 1,
+		map[string]string{"legacy_id": id}, e.now); err != nil {
+		e.t.Fatalf("history for %s: %v", id, err)
+	}
+}
+
+// TestDeleteSourceIgnoresImportedLegacyCaptures pins the false conflict fix: an
+// old importer row with source "legacy" and its "imported" history does not
+// reference a registered source "legacy", so that source deletes and the row
+// is left as it was.
+func TestDeleteSourceIgnoresImportedLegacyCaptures(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("legacy", "personal")
+	e.seedLegacyImport("C-imp", "personal")
+	e.seedLegacyImport("C-other", "opensource")
+
+	if _, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "legacy"}, e.now); err != nil {
+		t.Fatalf("delete with only imported legacy rows: %v", err)
+	}
+	if n := e.count(`SELECT count(*) FROM captures WHERE source_id = 'legacy'`); n != 2 {
+		t.Fatalf("imported legacy rows after delete = %d, want 2 untouched", n)
+	}
+	if n := e.count(`SELECT count(*) FROM sources WHERE id = 'legacy'`); n != 0 {
+		t.Fatalf("source legacy still registered after delete")
+	}
+}
+
+// TestDeleteSourceKeepsNonImportedLegacyCapturesReferenced pins the retained
+// blocking: a "legacy" capture without the importer's proof, including an
+// "imported" event recorded in another scope, still references the source.
+func TestDeleteSourceKeepsNonImportedLegacyCapturesReferenced(t *testing.T) {
+	cases := map[string]func(e *testEnv){
+		"explicit capture with captured history": func(e *testEnv) {
+			e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+			     processing_state, revision) VALUES ('C-ex', 'personal', 'legacy', 'plain', 'h', ?, 'pending', 1)`, fmtTime(e.now))
+			if err := insertHistory(e.ctx(), e.s.db, "capture", "C-ex", "captured", "personal", "", 1, map[string]string{}, e.now); err != nil {
+				e.t.Fatal(err)
+			}
+		},
+		"capture without any history": func(e *testEnv) {
+			e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+			     processing_state, revision) VALUES ('C-nh', 'personal', 'legacy', 'plain', 'h', ?, 'pending', 1)`, fmtTime(e.now))
+		},
+		"imported event recorded in another scope": func(e *testEnv) {
+			e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+			     processing_state, revision) VALUES ('C-sc', 'personal', 'legacy', 'plain', 'h', ?, 'pending', 1)`, fmtTime(e.now))
+			if err := insertHistory(e.ctx(), e.s.db, "capture", "C-sc", "imported", "opensource", "", 1, map[string]string{}, e.now); err != nil {
+				e.t.Fatal(err)
+			}
+		},
+	}
+	for name, seed := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newTestEnv(t)
+			e.mustAddSource("legacy", "personal")
+			seed(e)
+			before := e.counts()
+			_, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "legacy"}, e.now)
+			wantFamily(t, err, domain.Conflict)
+			if after := e.counts(); after != before {
+				t.Fatalf("refused delete wrote state: before %v after %v", before, after)
+			}
+		})
+	}
+}
+
+// TestDeleteSourceCountsOnlyNonImportedLegacyCaptures pins the exact count: an
+// imported row is excluded while a sibling explicit row still blocks, and the
+// refusal reports only the blocking capture.
+func TestDeleteSourceCountsOnlyNonImportedLegacyCaptures(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("legacy", "personal")
+	e.seedLegacyImport("C-imp", "personal")
+	e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+	     processing_state, revision) VALUES ('C-ex', 'personal', 'legacy', 'plain', 'h', ?, 'pending', 1)`, fmtTime(e.now))
+
+	_, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "legacy"}, e.now)
+	wantFamily(t, err, domain.Conflict)
+	if err == nil || !strings.Contains(err.Error(), "referenced by 1 captures") {
+		t.Fatalf("refusal = %v, want it to count one blocking capture", err)
+	}
+}
+
+// TestDeletedSourceIDCannotBeReused pins the no-reuse rule: after a delete the
+// id keeps its deleted history, so add and apply both refuse it with conflict
+// and write nothing.
+func TestDeletedSourceIDCannotBeReused(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("gh", "personal")
+	if _, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "gh"}, e.now); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	before := e.counts()
+
+	_, err := e.s.AddSource(e.ctx(), e.sourceCmd("gh", "personal"), e.now)
+	wantFamily(t, err, domain.Conflict)
+	_, err = e.s.ApplySources(e.ctx(), []app.SourceCmd{e.sourceCmd("fresh", "personal"), e.sourceCmd("gh", "personal")}, e.now)
+	wantFamily(t, err, domain.Conflict)
+	if after := e.counts(); after != before {
+		t.Fatalf("reused id wrote state: before %v after %v", before, after)
+	}
+	if n := e.count(`SELECT count(*) FROM sources WHERE id IN ('gh', 'fresh')`); n != 0 {
+		t.Fatalf("sources after refused reuse = %d, want 0", n)
+	}
+}
+
+// TestDeleteSourceRefusesReviewWithoutCaptures pins the source_reviews guard on
+// its own: an empty reported batch leaves no captures, yet the source is still
+// referenced and cannot be deleted.
+func TestDeleteSourceRefusesReviewWithoutCaptures(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("gh", "personal")
+	cmd := reportedBatch("rev-empty", "batch-empty")
+	cmd.Binding = e.binding
+	cmd.SourceID = "gh"
+	if _, _, err := e.s.RecordSourceReview(e.ctx(), cmd, e.now); err != nil {
+		t.Fatalf("seed empty review: %v", err)
+	}
+	if n := e.count(`SELECT count(*) FROM captures`); n != 0 {
+		t.Fatalf("empty review created %d captures, want 0", n)
+	}
+	before := e.counts()
+
+	_, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "gh"}, e.now)
+	wantFamily(t, err, domain.Conflict)
+	if after := e.counts(); after != before {
+		t.Fatalf("refused delete wrote state: before %v after %v", before, after)
+	}
+	if n := e.count(`SELECT count(*) FROM sources WHERE id = 'gh'`); n != 1 {
+		t.Fatalf("referenced source was removed")
+	}
+}
+
+// TestDeleteSourceCountsOnlySameScopeCaptures pins the capture half of the
+// reference guard: only captures in the source's own scope block deletion.
+func TestDeleteSourceCountsOnlySameScopeCaptures(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("gh", "personal")
+	e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+	     processing_state, revision)
+	   VALUES ('C-foreign', 'opensource', 'gh', 'plain', 'h', ?, 'pending', 1)`, fmtTime(e.now))
+	if _, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "gh"}, e.now); err != nil {
+		t.Fatalf("foreign-scope capture blocked delete: %v", err)
+	}
+
+	e.mustAddSource("mail", "personal")
+	e.mustExec(`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+	     processing_state, revision)
+	   VALUES ('C-local', 'personal', 'mail', 'plain', 'h', ?, 'pending', 1)`, fmtTime(e.now))
+	_, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "mail"}, e.now)
+	wantFamily(t, err, domain.Conflict)
+}
+
+// TestDeleteSourceIdempotencyIsNamespacedByBinding pins the namespace: the same
+// binding replays even with its scopes reordered, while another binding that
+// reuses the key neither replays the stored result nor collides with it.
+func TestDeleteSourceIdempotencyIsNamespacedByBinding(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("gh", "personal")
+	e.mustAddSource("mail", "personal")
+	if _, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "gh", Key: "del-1"}, e.now); err != nil {
+		t.Fatalf("first delete: %v", err)
+	}
+
+	reordered := e.binding
+	reordered.Scopes = []domain.ScopeID{"opensource", "personal"}
+	if _, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: reordered, ID: "gh", Key: "del-1"}, e.now); err != nil {
+		t.Fatalf("same binding with reordered scopes did not replay: %v", err)
+	}
+
+	narrow := domain.ScopeBinding{Profile: "personal", Actor: "tester", Scopes: []domain.ScopeID{"personal"}}
+	_, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: narrow, ID: "gh", Key: "del-1"}, e.now)
+	wantFamily(t, err, domain.NotFound) // not a replay of the other binding's result
+	if _, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: narrow, ID: "mail", Key: "del-1"}, e.now); err != nil {
+		t.Fatalf("other binding collided with the stored key: %v", err)
+	}
+	if n := e.count(`SELECT count(*) FROM sources`); n != 0 {
+		t.Fatalf("sources after deletes = %d, want 0", n)
+	}
+}

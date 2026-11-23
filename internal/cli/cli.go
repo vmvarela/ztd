@@ -1351,7 +1351,7 @@ func (c *CLI) capture(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("capture", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	scope := fs.String("scope", "", "scope")
-	source := fs.String("source", "manual", "source id")
+	source := fs.String("source", "", "registered source id; default is the manual entry point")
 	key := fs.String("key", "", "idempotency key")
 	stdin := fs.Bool("stdin", false, "read text from stdin")
 	if err := fs.Parse(args); err != nil {
@@ -2106,7 +2106,7 @@ func (c *CLI) review(ctx context.Context, args []string) error {
 
 func (c *CLI) source(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return domain.Invalid("usage: source add|apply|list|review [flags]")
+		return domain.Invalid("usage: source add|apply|list|review|delete [flags]")
 	}
 	switch args[0] {
 	case "add":
@@ -2117,8 +2117,10 @@ func (c *CLI) source(ctx context.Context, args []string) error {
 		return c.sourceList(ctx, args[1:])
 	case "review":
 		return c.sourceReview(ctx, args[1:])
+	case "delete":
+		return c.sourceDelete(ctx, args[1:])
 	default:
-		return domain.Invalid("usage: source add|apply|list|review [flags]")
+		return domain.Invalid("usage: source add|apply|list|review|delete [flags]")
 	}
 }
 
@@ -2243,6 +2245,44 @@ func (c *CLI) sourceAdd(ctx context.Context, args []string) error {
 		return err
 	}
 	c.succeed("source add", src)
+	return nil
+}
+
+// sourceDelete removes one registered source. The binding is every declared
+// scope, as in source list --all, so a source outside them is not_found. A
+// source that captures or reviews still refer to is refused with conflict.
+func (c *CLI) sourceDelete(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("source delete", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	id := fs.String("id", "", "source id")
+	if err := fs.Parse(args); err != nil {
+		return domain.Invalid("%v", err)
+	}
+	if fs.NArg() != 0 {
+		return domain.Invalid("usage: source delete --id ID")
+	}
+	if *id == "" {
+		return domain.Invalid("--id is required")
+	}
+	st, svc, err := c.open()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	declared, err := svc.Repo.ListScopes(ctx)
+	if err != nil {
+		return err
+	}
+	ids := make([]domain.ScopeID, 0, len(declared))
+	for _, sc := range declared {
+		ids = append(ids, sc.ID)
+	}
+	b := domain.ScopeBinding{Profile: operatorProfile, Actor: domain.ActorID(c.Actor), Scopes: ids}
+	src, err := svc.DeleteSource(ctx, app.SourceDeleteCmd{Binding: b, ID: *id})
+	if err != nil {
+		return err
+	}
+	c.succeed("source delete", src)
 	return nil
 }
 
@@ -2825,11 +2865,13 @@ func (c *CLI) checkBindings(ctx context.Context) error {
 // protocol stream and failures go back through the CLI's stderr path.
 // Without --scope (or ZTD_SCOPES) the server starts with the default
 // personal binding, so a client session must select its scope explicitly:
-// `ztd mcp --scope client:<name>`.
+// `ztd mcp --scope client:<name>`. --allow-delete-source registers the
+// destructive delete_source tool; without it the tool does not exist.
 func (c *CLI) mcp(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	scope := fs.String("scope", "", "scope")
+	allowDelete := fs.Bool("allow-delete-source", false, "register delete_source; only where the host gates MCP calls with a real approval prompt (not --auto)")
 	if err := fs.Parse(args); err != nil {
 		return domain.Invalid("%v", err)
 	}
@@ -2838,7 +2880,7 @@ func (c *CLI) mcp(ctx context.Context, args []string) error {
 		return err
 	}
 	defer st.Close()
-	return mcpserver.Serve(ctx, svc, b, Version)
+	return mcpserver.Serve(ctx, svc, b, Version, *allowDelete)
 }
 
 func newKey(prefix string) string {
@@ -2878,6 +2920,7 @@ const usage = `ztd — local ZTD
   source apply [--file PATH]        (default ~/.ztd/sources.json, or ZTD_SOURCES)
   source list [--all | --scope S...]
   source review --source ID --batch B --key K --file FILE
+  source delete --id ID             (refused while a capture or review refers to it)
   routines due|done ID | routines add --id ID --cadence daily|weekly:<day> [--last YYYY-MM-DD]
   context add NAME [--scope S] | context list [--scope S]
   doc put --kind K --slug S [--scope X] [--title T] [--body TEXT | --file PATH]
@@ -2897,7 +2940,7 @@ const usage = `ztd — local ZTD
   export --out FILE | restore --from FILE | snapshot --out FILE
   check [--scope S] [--bindings]  (--bindings validates the .ztd.json hint)
   recover                            (compatibility no-op; no Markdown journal)
-  mcp [--scope S]
+  mcp [--scope S] [--allow-delete-source]
 
   Scope binding (one store, one set of tasks; the binding only narrows the view):
   --scope, then ZTD_SCOPES, then .ztd.json, else the profile scopes

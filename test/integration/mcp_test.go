@@ -655,3 +655,135 @@ func TestMCPDocumentTools(t *testing.T) {
 		t.Fatalf("foreign doc_search leaked the card: %s", scJSON(t, hiddenSearch))
 	}
 }
+
+// TestMCPDeleteSource drives delete_source over stdio with the explicit
+// --allow-delete-source opt-in: an unreferenced source is deleted, a retry with
+// the same key replays the stored result, a new key for the now-missing source
+// is not_found, and the registry shows no source.
+func TestMCPDeleteSource(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "ztd.db")
+	run(t, db, initArgs...).wantOK(t, "init")
+	run(t, db, "source", "add",
+		"--id", "scratch", "--name", "Scratch",
+		"--scope", "personal", "--kind", "capture", "--connector", "manual",
+	).wantOK(t, "source add")
+
+	cs := mcpConnectArgs(t, db, "--allow-delete-source")
+	del := mcpCall(t, cs, "delete_source", map[string]any{"source_id": "scratch", "idempotency_key": "mcp-del-1"})
+	wantToolOK(t, "delete_source", del)
+	var delEnv struct {
+		Source struct {
+			ID string `json:"id"`
+		} `json:"source"`
+	}
+	scUnmarshal(t, "delete_source", del, &delEnv)
+	if delEnv.Source.ID != "scratch" {
+		t.Fatalf("delete_source = %+v, want scratch", delEnv)
+	}
+
+	replay := mcpCall(t, cs, "delete_source", map[string]any{"source_id": "scratch", "idempotency_key": "mcp-del-1"})
+	wantToolOK(t, "delete_source replay", replay)
+
+	missing := mcpCall(t, cs, "delete_source", map[string]any{"source_id": "scratch", "idempotency_key": "mcp-del-2"})
+	if !missing.IsError || !strings.Contains(toolText(missing), "not_found") {
+		t.Fatalf("second delete: isError=%v text=%q, want not_found", missing.IsError, toolText(missing))
+	}
+
+	sources := mcpCall(t, cs, "sources", nil)
+	wantToolOK(t, "sources", sources)
+	var listEnv struct {
+		Sources []struct {
+			ID string `json:"id"`
+		} `json:"sources"`
+	}
+	scUnmarshal(t, "sources", sources, &listEnv)
+	if len(listEnv.Sources) != 0 {
+		t.Fatalf("sources after delete = %+v, want none", listEnv.Sources)
+	}
+}
+
+// TestMCPDeleteSourceHiddenByDefault pins the default: without the opt-in flag
+// delete_source is not served, a direct call does not run, and the source
+// survives.
+func TestMCPDeleteSourceHiddenByDefault(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "ztd.db")
+	run(t, db, initArgs...).wantOK(t, "init")
+	run(t, db, "source", "add",
+		"--id", "scratch", "--name", "Scratch",
+		"--scope", "personal", "--kind", "capture", "--connector", "manual",
+	).wantOK(t, "source add")
+
+	cs := mcpConnect(t, db)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "delete_source",
+		Arguments: map[string]any{"source_id": "scratch", "idempotency_key": "mcp-hidden-1"},
+	})
+	if err == nil && !res.IsError {
+		t.Fatalf("delete_source ran without the opt-in flag: %s", toolText(res))
+	}
+
+	list := decode[[]sourceData](t, run(t, db, "source", "list").wantOK(t, "source list"))
+	if len(list) != 1 || list[0].ID != "scratch" {
+		t.Fatalf("source list = %+v, want scratch to survive", list)
+	}
+}
+
+// TestMCPDeleteSourceAnswersMissingAndForeignAlike pins error privacy: a source
+// outside the bound scope and a source that does not exist return the same
+// not_found wire response, so deletion cannot probe other scopes.
+func TestMCPDeleteSourceAnswersMissingAndForeignAlike(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "ztd.db")
+	run(t, db, initArgs...).wantOK(t, "init")
+	run(t, db, "source", "add",
+		"--id", "vault", "--name", "Vault",
+		"--scope", "opensource", "--kind", "capture", "--connector", "manual",
+	).wantOK(t, "source add")
+
+	cs := mcpConnectArgs(t, db, "--allow-delete-source", "--scope", "personal")
+	foreign := mcpCall(t, cs, "delete_source", map[string]any{"source_id": "vault", "idempotency_key": "mcp-foreign-1"})
+	missing := mcpCall(t, cs, "delete_source", map[string]any{"source_id": "ghost", "idempotency_key": "mcp-missing-1"})
+	if !foreign.IsError || !missing.IsError {
+		t.Fatalf("foreign isError=%v missing isError=%v, want both refused", foreign.IsError, missing.IsError)
+	}
+	if !strings.Contains(toolText(missing), "not_found") {
+		t.Fatalf("missing source text = %q, want not_found", toolText(missing))
+	}
+	if toolText(foreign) != toolText(missing) {
+		t.Fatalf("foreign and missing differ: %q vs %q", toolText(foreign), toolText(missing))
+	}
+}
+
+// TestMCPCaptureSourceReferenceAnswersAlike pins the capture boundary: a source
+// registered in another scope and a source that does not exist produce the
+// same wire result, byte for byte, so capture cannot probe the registry.
+func TestMCPCaptureSourceReferenceAnswersAlike(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "ztd.db")
+	run(t, db, initArgs...).wantOK(t, "init")
+	run(t, db, "source", "add",
+		"--id", "vault", "--name", "Vault",
+		"--scope", "opensource", "--kind", "capture", "--connector", "manual",
+	).wantOK(t, "source add")
+
+	cs := mcpConnectArgs(t, db, "--scope", "personal")
+	foreign := mcpCall(t, cs, "capture", map[string]any{"idempotency_key": "cap-foreign", "text": "x", "source_id": "vault"})
+	missing := mcpCall(t, cs, "capture", map[string]any{"idempotency_key": "cap-missing", "text": "x", "source_id": "ghost"})
+	if !foreign.IsError || !missing.IsError {
+		t.Fatalf("foreign isError=%v missing isError=%v, want both refused", foreign.IsError, missing.IsError)
+	}
+	foreignWire, err := json.Marshal(foreign)
+	if err != nil {
+		t.Fatalf("marshal foreign result: %v", err)
+	}
+	missingWire, err := json.Marshal(missing)
+	if err != nil {
+		t.Fatalf("marshal missing result: %v", err)
+	}
+	if string(foreignWire) != string(missingWire) {
+		t.Fatalf("capture wire results differ:\nforeign: %s\nmissing: %s", foreignWire, missingWire)
+	}
+	if got := toolText(missing); got != "not_found: not found\n" {
+		t.Fatalf("capture missing source text = %q, want not_found: not found", got)
+	}
+}

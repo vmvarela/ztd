@@ -40,9 +40,6 @@ func (s *Service) Capture(ctx context.Context, cmd CaptureCmd) (domain.Capture, 
 	if strings.TrimSpace(cmd.Key) == "" {
 		return domain.Capture{}, domain.Invalid("idempotency key is required")
 	}
-	if cmd.SourceID == "" {
-		cmd.SourceID = "manual"
-	}
 	if len(cmd.Text) > 64*1024 {
 		return domain.Capture{}, domain.Invalid("capture text exceeds 64 KiB")
 	}
@@ -492,6 +489,18 @@ func validateSourceCmd(cmd SourceCmd) error {
 		return domain.NewError(domain.ScopeDenied, "scope %s is outside the active scopes", cmd.Scope)
 	}
 	return nil
+}
+
+// DeleteSource removes one source of the binding scopes that no capture or
+// review refers to. The store enforces the reference rule and the scope check.
+func (s *Service) DeleteSource(ctx context.Context, cmd SourceDeleteCmd) (domain.Source, error) {
+	if err := cmd.Binding.Validate(); err != nil {
+		return domain.Source{}, err
+	}
+	if !domain.ValidSourceID(cmd.ID) {
+		return domain.Source{}, domain.Invalid("source id must match [a-z][a-z0-9_-]{1,63}")
+	}
+	return s.Repo.DeleteSource(ctx, cmd, s.now())
 }
 
 // ListSources returns the sources of the binding scopes.

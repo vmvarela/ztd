@@ -92,6 +92,13 @@ func TestImportFixtureIntoEmptyStore(t *testing.T) {
 			t.Errorf("%s rows = %d, want %d", table, n, want)
 		}
 	}
+	var legacySourced int
+	if err := st.db.QueryRowContext(ctx, "SELECT count(*) FROM captures WHERE source_id = ?", domain.LegacySourceID).Scan(&legacySourced); err != nil {
+		t.Fatal(err)
+	}
+	if legacySourced != 2 {
+		t.Fatalf("captures with internal legacy provenance = %d, want 2", legacySourced)
+	}
 	personal := domain.ScopeBinding{Profile: "personal", Actor: "tester", Scopes: []domain.ScopeID{"personal", "opensource"}}
 	items, err := st.ListWorkItems(ctx, personal, "")
 	if err != nil {

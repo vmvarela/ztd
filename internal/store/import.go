@@ -586,8 +586,8 @@ func (im *importer) importInbox(t legacy.Task) error {
 		`INSERT INTO captures (id, scope_id, source_id, external_id, external_revision, original_text,
 		   content_hash, source_uri, occurred_at, captured_at, processing_state, processing_outcome,
 		   review_after, revision)
-		 VALUES (?, ?, 'legacy', NULL, NULL, ?, ?, ?, ?, ?, 'pending', NULL, NULL, 1)`,
-		id, scope, text, sha256hex(text), fmt.Sprintf("%s:%d", t.SourcePath, t.Line),
+		 VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, 'pending', NULL, NULL, 1)`,
+		id, scope, domain.LegacySourceID, text, sha256hex(text), fmt.Sprintf("%s:%d", t.SourcePath, t.Line),
 		fmtTime(captured), fmtTime(captured)); err != nil {
 		return err
 	}

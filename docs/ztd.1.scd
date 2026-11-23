@@ -18,7 +18,7 @@ SYNOPSIS
 	*ztd* _routines_ _due|done_ _ID_ | _add_ --id ID --cadence daily|weekly:<day> [--last YYYY-MM-DD]
 	*ztd* _status_ [--json]
 	*ztd* _check_ [--scope S] [--bindings]
-	*ztd* _mcp_ [--scope S]
+	*ztd* _mcp_ [--scope S] [--allow-delete-source]
 
 DESCRIPTION
 	*ztd* stores commitments, plans and continuity in one SQLite database
@@ -98,6 +98,7 @@ COMMANDS
 	*source add --id ID --name NAME --scope S --kind capture|calendar --connector manual|directory|host_mcp*
 	*source apply* [--file PATH] | *source list* [--all | --scope S...]
 	*source review --source ID --batch B --key K --file FILE*
+	*source delete --id ID*
 	*doc put --kind K --slug S* [--scope X] [--title T] [--body TEXT | --file PATH] [--status draft|verified|superseded] [--expected N]
 	*doc get|list|search|related|log|lint|archive*
 		Read and maintain the document layer (knowledge cards, plans,
@@ -119,8 +120,10 @@ COMMANDS
 	*migrate documents --source COPY* [--mapping FILE] [--workspace DIR] [--dry-run]
 	*version*
 		Print the version.
-	*mcp* [--scope S]
-		Run the local stdio MCP server for an agent.
+	*mcp* [--scope S] [--allow-delete-source]
+		Run the local stdio MCP server for an agent. delete_source is served only
+		with --allow-delete-source, and only where the host gates it with a real
+		approval prompt.
 
 ENVIRONMENT
 	*ZTD_DB*

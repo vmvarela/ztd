@@ -17,6 +17,15 @@ const (
 	MaxSourceConfigItems = 200
 )
 
+// Internal provenance of captures that have no registered source. Source ids
+// are lower case, so these upper-case values can never be registered and never
+// collide with a user source such as one named "manual" or "legacy". Rows
+// written before this split keep the lower-case values and stay ambiguous.
+const (
+	ImplicitSourceID = "MANUAL"
+	LegacySourceID   = "LEGACY"
+)
+
 type SourceKind string
 
 const (

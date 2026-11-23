@@ -52,6 +52,7 @@ type Repo interface {
 	AddSource(ctx context.Context, cmd SourceCmd, now time.Time) (domain.Source, error)
 	ApplySources(ctx context.Context, cmds []SourceCmd, now time.Time) ([]domain.Source, error)
 	ListSources(ctx context.Context, b domain.ScopeBinding) ([]domain.Source, error)
+	DeleteSource(ctx context.Context, cmd SourceDeleteCmd, now time.Time) (domain.Source, error)
 	RecordSourceReview(ctx context.Context, cmd SourceReviewCmd, now time.Time) (domain.SourceReview, []domain.Capture, error)
 
 	// Contexts, documents and projects: the document layer.
@@ -248,6 +249,14 @@ type SourceCmd struct {
 	ConnectionRef  string
 	NonSecretQuery string
 	Cadence        string
+}
+
+// SourceDeleteCmd removes one source. Key is optional: a retry with the same
+// key and id replays the stored result, and MCP always supplies one.
+type SourceDeleteCmd struct {
+	Binding domain.ScopeBinding
+	ID      string
+	Key     string
 }
 
 type SourceReviewCmd struct {

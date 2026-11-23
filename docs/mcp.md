@@ -58,6 +58,7 @@ key.
 | `read` | Expand up to 5 work items or captures by ID |
 | `sources` | List configured sources: identity, kind, connector, coverage and cursor; never provider contents |
 | `record_source_review` | Ingest one reported batch for a source as pending captures |
+| `delete_source` | Delete one source that no capture or review refers to; requires `idempotency_key`; served only with `--allow-delete-source` |
 | `doc_search` | Full-text search over the bound scopes' documents: document, rank and snippet, best match first |
 | `doc_get` | Read one document by kind and slug, body included; a foreign-scope document is `not_found` |
 | `doc_related` | Return a document's outlinks and backlinks, resolved inside its own scope |
@@ -102,6 +103,24 @@ Source registration stays an operator command (`ztd source add`); no tool
 creates sources, and no tool contacts a provider. See
 [Sources](sources.md) for the batch file shape and the cursor rule.
 
+`delete_source` is the one registry mutation a model can call, and it is off
+by default. The server registers it only when started with
+`--allow-delete-source`; without the flag the tool is not listed and a direct
+call does not run. It takes `source_id` and a required `idempotency_key`; a
+blank key is `invalid_input`. It removes the source only while no capture of
+its scope or review refers to it, and otherwise returns `conflict` with nothing
+written. A source outside the bound scope and a missing source both answer
+`not_found` with the same text. A retry with the same key within the same
+binding replays the stored result.
+
+Opt in only where the host gates MCP calls with a real approval prompt, and
+keep `ask` for `ztd_delete_source` as shown below. `opencode run --auto`
+approves it, so `--auto` is not a safe host for this flag:
+
+```sh
+opencode mcp add ztd -- /absolute/path/to/ztd mcp --allow-delete-source
+```
+
 ## Prompts
 
 `Collect`, `Process`, `Plan`, `Do`, `Review`, `Simplify`, `Routines` and
@@ -125,7 +144,9 @@ narrated confidently.
   service enforces the global one-focus and 1–3 MIT rules.
 - Every read and write is filtered by the fixed `ScopeBinding`. `scope_denied`
   is returned to the model as `not_found`, and the detail is scrubbed, so a
-  foreign entity's existence is not disclosed.
+  foreign entity's existence is not disclosed. A `capture` with an explicit
+  `source_id` that is missing or registered in another scope gets the same
+  `not_found` result, byte for byte.
 - `commit_plan` still requires an override when a day exceeds three MITs;
   that path returns `rules_acknowledgement_required`.
 
@@ -149,7 +170,8 @@ call with `Unknown tool`, `allow` must execute it. The current keys are:
   "ztd_process_capture": "ask",
   "ztd_commit_plan": "ask",
   "ztd_record_review": "ask",
-  "ztd_record_source_review": "ask"
+  "ztd_record_source_review": "ask",
+  "ztd_delete_source": "ask"
 }
 ```
 
@@ -158,7 +180,7 @@ the binding fixed at startup — the personal scopes by default — and the
 permission split above still applies to every tool call.
 
 `ask` is only a real gate in an interactive session. `opencode run --auto`
-approves it; do not use that flag for plan or review writes.
+approves it; do not use that flag for plan, review or source-deletion writes.
 
 ## Deferred
 
@@ -178,4 +200,7 @@ The integration test starts the real binary over stdio, runs the capture to
 review journey, checks a lost-response replay with the same idempotency key,
 and covers the source flow: register through the CLI, list with `sources`,
 record a reported batch, replay it without duplicating the capture, and prove
-`observed` is refused.
+`observed` is refused. `TestMCPDeleteSource` covers `delete_source` with the
+opt-in flag: delete, key replay, `not_found` on a repeat, and an empty registry
+afterwards. `TestMCPDeleteSourceHiddenByDefault` pins the default, and
+`TestMCPDeleteSourceAnswersMissingAndForeignAlike` pins the uniform `not_found`.

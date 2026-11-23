@@ -607,6 +607,9 @@ func TestHelp(t *testing.T) {
 		if !strings.Contains(out.String(), "ztd — local ZTD") {
 			t.Fatalf("Main(%q) output = %q, want the usage", arg, out.String())
 		}
+		if !strings.Contains(out.String(), "source delete --id ID") {
+			t.Fatalf("Main(%q) usage lacks source delete --id ID", arg)
+		}
 	}
 	var out, errOut bytes.Buffer
 	if code := Main(nil, &out, &errOut); code != 2 {

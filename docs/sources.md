@@ -36,6 +36,45 @@ Re-adding the same `id` with an identical configuration returns the existing
 source without writing; the same `id` with a different configuration fails
 with `conflict`.
 
+For a manual capture, omit `--source` (or MCP `source_id`); it uses the
+unregistered entry point, stored with the provenance `MANUAL`. Imported legacy
+records use `LEGACY`. Both are upper case, which no source ID can have, so a
+source named `manual` or `legacy` never collides with them. An explicit source
+ID must name a registered source in the capture's primary scope; a missing one
+is `not_found`.
+
+## Deleting a source
+
+```sh
+ztd source delete --id notes-dir
+```
+
+Deletion removes the registry row and records a `deleted` history event with
+the source's last state; earlier `created` and `updated` history stays. A
+source is deleted only while nothing refers to it: if a capture of its scope or
+any source review still names it, the command fails with `conflict` and writes
+nothing.
+Process or leave those captures alone rather than deleting around them.
+An unknown id is `not_found`.
+
+The operator command selects across every declared scope, like `source list
+--all`. The MCP tool `delete_source` is bound to the server's fixed scopes,
+requires an `idempotency_key`, and exists only when the server starts with
+`--allow-delete-source`; a source outside those scopes and a missing source
+both answer `not_found`. See [MCP](mcp.md). Deleting a source is never implied
+by `source apply`: a file that omits an id leaves that source in place.
+
+A deleted id is retired. `source add` and `source apply` refuse it with
+`conflict`, so its deleted history stays unambiguous.
+
+Captures written before this split stored the implicit entry point and legacy
+imports as the lower-case `manual` and `legacy`. Those rows are not rewritten
+automatically. A lower-case `manual` row remains ambiguous with a capture of a
+registered source, so it blocks deleting that source. An old `legacy` row is
+excluded from the delete guard only when its `capture/imported` history event
+proves the import in the same scope; an unproven row still blocks deletion.
+This change does not migrate ambiguous historical rows.
+
 ## User configuration
 
 Sources are user configuration, not product code. ZTD knows only the generic
