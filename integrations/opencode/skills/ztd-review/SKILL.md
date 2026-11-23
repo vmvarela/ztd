@@ -85,7 +85,7 @@ This is an optional habit. Do not assume career changes or a single passion.
 
 ## Journal
 
-With `/ztd/journal`, record the user's text or reflections with `ztd doc put
+Record the user's text or reflections with `ztd doc put
 --kind journal --slug YYYY-MM-DD --title T --body TEXT`. When content is missing, ask
 briefly for the day's outcome and learning. Do not attribute emotions or
 achievements that were not shared. It does not require checking every list nor

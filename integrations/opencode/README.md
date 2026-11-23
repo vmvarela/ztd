@@ -2,7 +2,7 @@
 
 This folder is only an adapter: the neutral method lives in
 [`../../method/README.md`](../../method/README.md). Here are the generic
-OpenCode assets —skills and commands— that apply
+OpenCode assets — the skills — that apply
 the method on the task store (store root `~/.ztd`).
 
 ## What is included
@@ -10,17 +10,17 @@ the method on the task store (store root `~/.ztd`).
 | Path | Contents |
 | --- | --- |
 | `skills/` | The 10 ZTD skills: `ztd` and its nine helpers (`ztd-collect`, `ztd-process`, `ztd-plan`, `ztd-do`, `ztd-review`, `ztd-trusted-system`, `ztd-simplify`, `ztd-knowledge`, `ztd-repo`) |
-| `commands/` | `/ztd` plus the nested `/ztd/collect`, `/ztd/inbox`, `/ztd/plan`, `/ztd/focus`, `/ztd/week`, `/ztd/goal`, `/ztd/journal`, `/ztd/routine`, `/ztd/simplify`, `/ztd/learn`, `/ztd/repo`, `/ztd/review` |
 
-The `ztd` agent is no longer part of the bundle: the skills carry the whole
-circuit and the host's native roles cover its permissions. An
-`agents/ztd.md` installed by an earlier checkout is left untouched and can be
-removed by hand.
+The bundle no longer ships Markdown commands: the skills carry the whole
+circuit and the host's native roles cover its permissions. `/ztd:*` prompts
+keep coming from the MCP server. An `agents/ztd.md` or a `commands/` tree
+installed by an earlier checkout is left untouched and can be removed by
+hand.
 
 ## Install globally
 
 With the binary on your `PATH`, publish the embedded assets to
-`$HOME/.config/opencode/{skills,commands}`:
+`$HOME/.config/opencode/skills`:
 
 ```bash
 ztd install opencode
@@ -30,7 +30,7 @@ It preflights the complete bundle before writing, and any differing file,
 symlink or unexpected file type aborts the whole run without overwriting
 anything. A hidden `.ztd-assets.json` manifest records every path it wrote, so
 later runs upgrade those files and refuse one you edited. There is no
-per-project mode: copy `skills/` and `commands/` into that project's
+per-project mode: copy `skills/` into that project's
 `.opencode/` tree by hand. It never initializes the store or modifies OpenCode
 configuration.
 
@@ -53,12 +53,9 @@ After upgrading the binary, `ztd install templates` refreshes the six templates
 in an existing store root; it never creates the store and refuses a template
 you edited.
 
-The commands are OpenCode prompts: `/ztd` is the entry point and the rest are
-nested as `/ztd/<name>` (for example `/ztd/plan`, `/ztd/review`), which OpenCode
-derives from `commands/ztd/<name>.md`. They run in sessions that discover
-`commands/`. `ztd install opencode` installs globally; for project-only
-discovery, copy the same `skills/` and `commands/` directories into that
-project's `.opencode/` tree. Never copy assets into a
+Slash commands are not part of this bundle: `ztd install opencode` installs
+the skills globally, and for project-only discovery copy the same `skills/`
+directory into that project's `.opencode/` tree. Never copy assets into a
 task-data directory: only the store lives there. Any legacy path that
 remains in the prose (`lists/…`, `goals/…`) refers to the read-only Markdown
 backup; the task store is the SQLite
@@ -80,7 +77,7 @@ Requirements: the `ztd` binary on the `PATH`, the database resolved
   The binding is a routing hint, not authorization; explicit user scope is
   authoritative. It contains no task, clone-path, or repository-URL data.
   Each clone's local path lives in its project card.
-- The paths cited by skills and commands are store-root paths (the legacy
+- The paths cited by the skills are store-root paths (the legacy
   backup), not this repository's.
 
 ## State contract

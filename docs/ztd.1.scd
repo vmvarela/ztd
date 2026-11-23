@@ -48,8 +48,8 @@ COMMANDS
 		Declare the database's scopes; interactive on a terminal,
 		flags in scripts. DECL is id=salud,kind=personal,name=Salud.
 	*install opencode* [--dry-run]
-		Publish the embedded skills and commands to
-		~/.config/opencode/{skills,commands}.
+		Publish the embedded skills to
+		~/.config/opencode/skills.
 	*install templates* [--dry-run]
 		Publish the method templates to <store>/templates/, where
 		<store> is the directory of --db. The store must exist.
@@ -144,7 +144,7 @@ FILES
 		directory, discovered up to the Git repository boundary;
 		never a source of authorization.
 	~/.config/opencode/
-		Target of install opencode (skills and commands).
+		Target of install opencode (skills).
 	~/.ztd/sources.json
 		Default source configuration (see ZTD_SOURCES).
 
