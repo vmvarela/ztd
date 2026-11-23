@@ -150,6 +150,9 @@ func (s *Store) ListContexts(ctx context.Context, b domain.ScopeBinding) ([]doma
 // existing document at another revision is stale_revision, otherwise the
 // document is inserted at revision 1 or advanced by one, with its history
 // event and the idempotency record. Nothing is written on failure.
+// DraftOnly adds two guards inside the same transaction: Expected 0 never
+// touches an existing document (stale_revision), and only a draft may be
+// updated (invalid_transition).
 func (s *Store) PutDocument(ctx context.Context, cmd app.DocumentCmd, now time.Time) (domain.Document, error) {
 	now = now.UTC().Truncate(time.Second)
 	if err := app.ValidateDocumentCmd(cmd); err != nil {
@@ -189,10 +192,20 @@ func (s *Store) PutDocument(ctx context.Context, cmd app.DocumentCmd, now time.T
 		case err != nil:
 			return err
 		default:
+			if cmd.DraftOnly && cmd.Expected == 0 {
+				return domain.NewError(domain.StaleRevision,
+					"document %s/%s already exists at revision %d in scope %s, so expected must be its current revision",
+					cmd.Kind, cmd.Slug, existing.Revision, scope)
+			}
 			if cmd.Expected != 0 && cmd.Expected != existing.Revision {
 				return domain.NewError(domain.StaleRevision,
 					"document %s/%s is at revision %d, expected %d",
 					cmd.Kind, cmd.Slug, existing.Revision, cmd.Expected)
+			}
+			if cmd.DraftOnly && existing.Status != domain.DocumentDraft {
+				return domain.NewError(domain.InvalidTransition,
+					"document %s/%s is %s, so a draft-only write cannot update it",
+					cmd.Kind, cmd.Slug, existing.Status)
 			}
 			next = existing.Revision.Next()
 		}

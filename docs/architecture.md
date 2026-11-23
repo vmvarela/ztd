@@ -51,7 +51,8 @@ The document layer follows the same direction: `domain.Document`,
 `AddProject` are the use cases — the service rejects unknown kinds, statuses,
 relative clone paths and credentialed repository URLs there; `store/documents.go`
 and `store/projects.go` persist them, with `PutDocument` idempotent by
-`(scope, kind, slug)` plus the expected revision. The CLI `context`, `doc` and
+`(scope, kind, slug)` plus the expected revision, and a draft-only guard on the
+MCP path that keeps writes at `status=draft` and Expected 0 create-only. The CLI `context`, `doc` and
 `project` commands and `check --bindings` are adapters over those methods, not
 a second implementation. The skill workflows themselves are not ported yet:
 this layer stores the records they will read.
@@ -119,15 +120,19 @@ recorded `DailyLimitOverride`. The planning view has at most one primary goal.
 The CLI is the current interface and the fallback for every operation. JSON
 output is stable enough for scripts and tests.
 
-The MCP server exposes a small typed set of sixteen tools over stdio:
+The MCP server exposes a small typed set of seventeen tools over stdio:
 `capture`, `inbox_next`, `process_capture`, `prepare`, `commit_plan`,
 `focus_start`, `checkpoint`, `focus_finish`, `record_review`,
-`find`, `read`, `sources`, `record_source_review`, `doc_search`, `doc_get`
-and `doc_related`. It does not expose raw SQL, arbitrary updates, scope
-overrides or provider tools.
+`find`, `read`, `sources`, `record_source_review`, `doc_search`, `doc_get`,
+`doc_related` and `doc_put`. It does not expose raw SQL, arbitrary updates,
+scope overrides or provider tools.
 `sources` returns registry state only; `record_source_review`
 ingests `reported` batches and rejects `observed`, which stays reserved for a
 trusted host adapter outside model-controlled arguments.
+`doc_put` is the only document write: it takes `slug`, `title`, `body` and
+`expected_revision`, hardcodes `kind=knowledge` and `status=draft` under the
+fixed binding, and the store refuses create-only overwrites and any promotion
+past draft.
 
 MCP prompts and resources are guidance, not scheduling. A disconnected server
 cannot remind anyone; reminders require the operating system scheduler.
@@ -168,7 +173,7 @@ external identities and the presence of history for mutable entities.
 - Knowledge wiki and optional vector search (Stage 5) — search and link
   relations are delivered: `doc search` (FTS5), `doc related`, `doc log`,
   `doc lint` and `doc archive` exist over the document layer, and MCP exposes
-  `doc_search`, `doc_get` and `doc_related`. The wiki skill itself, the
+  `doc_search`, `doc_get`, `doc_related` and the draft-only `doc_put`. The wiki skill itself, the
   vector search and the LLM Wiki tables remain deferred
 - Terminal UI
 

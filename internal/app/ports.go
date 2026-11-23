@@ -277,15 +277,19 @@ type ContextCmd struct {
 
 // DocumentCmd creates or updates the document identified by
 // (binding primary scope, Kind, Slug). Expected is 0 on create and the current
-// revision on update.
+// revision on update. DraftOnly is a store-side access policy, not payload: it
+// forbids promoting a document past draft and, at Expected 0, refuses to touch
+// an existing document. It is excluded from the idempotency hash so the same
+// content hashes identically through the CLI and the MCP path.
 type DocumentCmd struct {
-	Binding  domain.ScopeBinding
-	Kind     domain.DocumentKind
-	Slug     string
-	Title    string
-	Body     string
-	Status   domain.DocumentStatus
-	Expected domain.Revision
+	Binding   domain.ScopeBinding
+	Kind      domain.DocumentKind
+	Slug      string
+	Title     string
+	Body      string
+	Status    domain.DocumentStatus
+	Expected  domain.Revision
+	DraftOnly bool `json:"-"`
 }
 
 // DocumentLogEntry is one append-only history event of a document, carrying

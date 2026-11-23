@@ -599,6 +599,9 @@ func ValidateDocumentCmd(cmd DocumentCmd) error {
 	if cmd.Expected < 0 {
 		return domain.Invalid("expected revision cannot be negative")
 	}
+	if cmd.DraftOnly && cmd.Status != domain.DocumentDraft {
+		return domain.Invalid("draft-only write cannot set status %q (want draft)", cmd.Status)
+	}
 	return nil
 }
 

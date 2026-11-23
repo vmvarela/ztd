@@ -7,6 +7,7 @@ package mcpserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -150,6 +151,13 @@ type docRefIn struct {
 	Slug string `json:"slug"`
 }
 
+type docPutIn struct {
+	Slug             string `json:"slug"`
+	Title            string `json:"title"`
+	Body             string `json:"body"`
+	ExpectedRevision int64  `json:"expected_revision" jsonschema:"0 to create only when no document exists, otherwise the current revision to update"`
+}
+
 // sourcesOut carries registry state only: identities, coverage and cursors,
 // never provider contents.
 type sourcesOut struct {
@@ -180,6 +188,12 @@ type deleteSourceOut struct {
 }
 
 func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding) {
+	// The primary scope is where every write lands, so doc_put names it: the
+	// model needs it to compare against a capture's scope before writing.
+	primaryScope := "primary scope"
+	if len(b.Scopes) > 0 {
+		primaryScope = fmt.Sprintf("primary scope %q", b.Scopes[0])
+	}
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "capture",
 		Description: "Capture one item into the inbox. Never filters or classifies it.",
@@ -404,6 +418,18 @@ func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding) {
 		rel, err := svc.RelatedDocuments(ctx, b, domain.DocumentKind(in.Kind), in.Slug)
 		return nil, rel, toolError(err)
 	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "doc_put",
+		Description: fmt.Sprintf("Create or update one knowledge draft in the binding's %s (the first bound scope). Scope, kind and status are never arguments: every write is kind=knowledge, status=draft. expected_revision=0 creates only when no document exists; a positive value updates only the current draft at that revision. inbox_next can return captures from any bound scope, so compare the capture's scope with this primary scope before writing: if they differ, leave the capture pending and use a session whose primary scope matches the capture. Use it before process_capture with outcome reference, so a capture is only marked processed after the draft write succeeds.", primaryScope),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in docPutIn) (*mcp.CallToolResult, domain.Document, error) {
+		out, err := svc.PutDocument(ctx, app.DocumentCmd{
+			Binding: b, Kind: domain.DocumentKnowledge, Slug: in.Slug,
+			Title: in.Title, Body: in.Body, Status: domain.DocumentDraft,
+			Expected: domain.Revision(in.ExpectedRevision), DraftOnly: true,
+		})
+		return nil, out, toolError(err)
+	})
 }
 
 // addDeleteSourceTool registers the opt-in destructive tool. A missing source
@@ -481,7 +507,7 @@ func addPrompts(s *mcp.Server) {
 	addPrompt(s, "Collect", "Capture without filtering; empty the inbox later.",
 		"Capture every commitment, idea or interruption in one line, verbatim. Do not classify, prioritize or drop anything. Use capture. Return when the inbox holds what the user said.")
 	addPrompt(s, "Process", "Decide one inbox item at a time, top to bottom.",
-		"Take the oldest item with inbox_next. Offer exactly one decision: discard, delegate or wait, do it if it takes two minutes, defer with a review date, or turn it into one or more work items. Use process_capture. Do not batch decisions.")
+		"Take the oldest item with inbox_next. Offer exactly one decision: discard, delegate or wait, do it if it takes two minutes, defer with a review date, or turn it into one or more work items. For a knowledge reference, first compare the capture's scope with doc_put's primary scope (stated in its tool description): if they differ, leave the capture pending and use a session whose primary scope matches the capture. Then write the card first with doc_put as a draft and call process_capture with outcome reference only after that write succeeds, putting the doc_put result's document ID in reason: if doc_put fails, keep the capture pending; if process_capture's response is lost, retry the identical request with the same idempotency key and payload; if it fails, keep the draft and retry the reference later — there is no atomic combined operation. Use process_capture. Do not batch decisions.")
 	addPrompt(s, "Plan", "Choose one to three MITs from real state.",
 		"Call prepare. Propose one to three MITs for the person and day across scopes, using the committed plan, candidates and checkpoints. State why each one matters. Never claim a plan exists before commit_plan succeeds.")
 	addPrompt(s, "Do", "One focus, one next action.",

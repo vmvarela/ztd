@@ -54,6 +54,15 @@ func TestValidateDocumentCmd(t *testing.T) {
 		{"blank body", func(c *DocumentCmd) { c.Body = "" }, false},
 		{"negative expected", func(c *DocumentCmd) { c.Expected = -1 }, false},
 		{"empty binding", func(c *DocumentCmd) { c.Binding = domain.ScopeBinding{} }, false},
+		{"draft-only draft", func(c *DocumentCmd) { c.DraftOnly = true }, true},
+		{"draft-only verified", func(c *DocumentCmd) {
+			c.DraftOnly = true
+			c.Status = domain.DocumentVerified
+		}, false},
+		{"draft-only superseded", func(c *DocumentCmd) {
+			c.DraftOnly = true
+			c.Status = domain.DocumentSuperseded
+		}, false},
 	}
 	for _, tc := range cases {
 		cmd := base()

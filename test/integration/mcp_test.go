@@ -192,7 +192,7 @@ var mcpToolNames = []string{
 	"commit_plan", "focus_start", "checkpoint", "focus_finish",
 	"record_review", "find", "read",
 	"sources", "record_source_review",
-	"doc_search", "doc_get", "doc_related",
+	"doc_search", "doc_get", "doc_related", "doc_put",
 }
 
 // TestMCPStdioJourney drives the real binary as an MCP stdio server: the tool
@@ -785,5 +785,261 @@ func TestMCPCaptureSourceReferenceAnswersAlike(t *testing.T) {
 	}
 	if got := toolText(missing); got != "not_found: not found\n" {
 		t.Fatalf("capture missing source text = %q, want not_found: not found", got)
+	}
+}
+
+// TestMCPDocPut covers the draft-only document write over stdio: create and
+// update with the fixed knowledge/draft binding, idempotent retry versus
+// conflict, stale revisions refused without writes, schema rejection of
+// status/kind/scope arguments, scope isolation of the write, and the two-step
+// capture flow where a capture stays pending until reference processing after
+// the draft write succeeds.
+func TestMCPDocPut(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "ztd.db")
+	run(t, db, initArgs...).wantOK(t, "init")
+
+	cs := mcpConnect(t, db)
+	slug := "komorebi/mcp-draft"
+	putArgs := func(body string, expected int64) map[string]any {
+		return map[string]any{
+			"slug": slug, "title": "MCP draft",
+			"body": body, "expected_revision": expected,
+		}
+	}
+
+	// create: expected_revision 0 creates a knowledge draft in the primary
+	// scope; scope, kind and status are never arguments.
+	createRes := mcpCall(t, cs, "doc_put", putArgs("first body", 0))
+	wantToolOK(t, "doc_put", createRes)
+	var doc documentData
+	scUnmarshal(t, "doc_put", createRes, &doc)
+	if doc.Kind != "knowledge" || doc.Status != "draft" || doc.Scope != "personal" ||
+		doc.Revision != 1 || doc.Body != "first body" || doc.Slug != slug {
+		t.Fatalf("doc_put create = %+v, want personal knowledge draft at revision 1; %s",
+			doc, scJSON(t, createRes))
+	}
+
+	// Idempotent retry: the identical payload replays the stored document and
+	// the history keeps a single event.
+	retryRes := mcpCall(t, cs, "doc_put", putArgs("first body", 0))
+	wantToolOK(t, "doc_put", retryRes)
+	var retry documentData
+	scUnmarshal(t, "doc_put", retryRes, &retry)
+	if retry.Revision != 1 || retry.Body != "first body" {
+		t.Fatalf("retry = %+v, want the original revision 1 document", retry)
+	}
+	log := decode[[]logEntryData](t,
+		run(t, db, "doc", "log", "--slug", slug).wantOK(t, "doc log"))
+	if len(log) != 1 || log[0].Event != "created" {
+		t.Fatalf("doc log after retry = %+v, want a single created event", log)
+	}
+
+	// Same derived key (expected 0), different payload: idempotency_conflict,
+	// never an overwrite.
+	conflict := mcpCall(t, cs, "doc_put", putArgs("changed body", 0))
+	if !conflict.IsError || !strings.Contains(toolText(conflict), "idempotency_conflict") {
+		t.Fatalf("conflicting payload: want idempotency_conflict; content: %s", toolText(conflict))
+	}
+
+	// update: the current revision advances the draft.
+	updateRes := mcpCall(t, cs, "doc_put", putArgs("second body", 1))
+	wantToolOK(t, "doc_put", updateRes)
+	var updated documentData
+	scUnmarshal(t, "doc_put", updateRes, &updated)
+	if updated.Revision != 2 || updated.Body != "second body" || updated.Status != "draft" {
+		t.Fatalf("doc_put update = %+v, want revision 2 draft with the new body", updated)
+	}
+
+	// stale revision: a wrong expectation is refused without writing. The
+	// expected value is fresh, so this is stale_revision, not a key conflict.
+	stale := mcpCall(t, cs, "doc_put", putArgs("third body", 99))
+	if !stale.IsError || !strings.Contains(toolText(stale), "stale_revision") {
+		t.Fatalf("stale put: want stale_revision; content: %s", toolText(stale))
+	}
+	getRes := mcpCall(t, cs, "doc_get", map[string]any{"kind": "knowledge", "slug": slug})
+	wantToolOK(t, "doc_get", getRes)
+	var current documentData
+	scUnmarshal(t, "doc_get", getRes, &current)
+	if current.Body != "second body" || current.Revision != 2 {
+		t.Fatalf("after stale put = %+v, want the untouched revision 2 document", current)
+	}
+
+	// Prohibited schema: status, kind and scope are rejected at the protocol
+	// boundary, and expected_revision is required so create-vs-update intent
+	// is always explicit.
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"status", map[string]any{
+			"slug": "k/x.md", "title": "T", "body": "B",
+			"expected_revision": 0, "status": "verified",
+		}, "additional properties"},
+		{"kind", map[string]any{
+			"slug": "k/x.md", "title": "T", "body": "B",
+			"expected_revision": 0, "kind": "journal",
+		}, "additional properties"},
+		{"scope", map[string]any{
+			"slug": "k/x.md", "title": "T", "body": "B",
+			"expected_revision": 0, "scope": "work",
+		}, "additional properties"},
+		{"missing expected_revision", map[string]any{
+			"slug": "k/x.md", "title": "T", "body": "B",
+		}, "required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := mcpCall(t, cs, "doc_put", tc.args)
+			if !res.IsError {
+				t.Fatalf("isError=false, want rejection; content: %s", toolText(res))
+			}
+			if text := toolText(res); !strings.Contains(text, tc.want) {
+				t.Fatalf("error text = %q, want it to contain %q", text, tc.want)
+			}
+		})
+	}
+
+	// Fixed scope binding: a server bound to opensource writes only there, and
+	// the personal scope cannot see the document.
+	foreign := mcpConnectArgs(t, db, "--scope", "opensource")
+	osRes := mcpCall(t, foreign, "doc_put", map[string]any{
+		"slug": "komorebi/os-draft", "title": "OS draft",
+		"body": "opensource body", "expected_revision": 0,
+	})
+	wantToolOK(t, "doc_put", osRes)
+	var osDoc documentData
+	scUnmarshal(t, "doc_put", osRes, &osDoc)
+	if osDoc.Scope != "opensource" || osDoc.Status != "draft" || osDoc.Kind != "knowledge" {
+		t.Fatalf("foreign doc_put = %+v, want an opensource knowledge draft", osDoc)
+	}
+	run(t, db, "doc", "get", "--kind", "knowledge", "--slug", "komorebi/os-draft",
+		"--scope", "personal").wantErr(t, 1, "doc", "not_found")
+	osGot := decode[documentData](t,
+		run(t, db, "doc", "get", "--kind", "knowledge", "--slug", "komorebi/os-draft",
+			"--scope", "opensource").wantOK(t, "doc get"))
+	if osGot.Body != "opensource body" {
+		t.Fatalf("opensource doc get = %+v, want the written body", osGot)
+	}
+
+	// Draft-only write cannot change a non-draft document: seed verified and
+	// superseded cards through the CLI, attempt updates with their current
+	// revisions over MCP, and prove nothing changed.
+	for _, tc := range []struct {
+		slug, status, body string
+	}{
+		{"komorebi/verified-card", "verified", "verified body"},
+		{"komorebi/superseded-card", "superseded", "superseded body"},
+	} {
+		run(t, db, "doc", "put", "--kind", "knowledge", "--slug", tc.slug,
+			"--title", tc.slug, "--body", tc.body,
+			"--status", tc.status).wantOK(t, "doc put")
+		seeded := decode[documentData](t,
+			run(t, db, "doc", "get", "--kind", "knowledge", "--slug", tc.slug).
+				wantOK(t, "doc get"))
+		if seeded.Status != tc.status || seeded.Body != tc.body || seeded.Revision != 1 {
+			t.Fatalf("seeded %s = %+v, want %s revision 1", tc.slug, seeded, tc.status)
+		}
+		seedLog := decode[[]logEntryData](t,
+			run(t, db, "doc", "log", "--slug", tc.slug).wantOK(t, "doc log"))
+		if len(seedLog) != 1 {
+			t.Fatalf("seed history for %s = %+v, want one created event", tc.slug, seedLog)
+		}
+
+		res := mcpCall(t, cs, "doc_put", map[string]any{
+			"slug": tc.slug, "title": "overwritten",
+			"body": "mcp overwrite", "expected_revision": seeded.Revision,
+		})
+		if !res.IsError || !strings.Contains(toolText(res), "invalid_transition") {
+			t.Fatalf("doc_put over %s: want invalid_transition; content: %s", tc.slug, toolText(res))
+		}
+
+		after := decode[documentData](t,
+			run(t, db, "doc", "get", "--kind", "knowledge", "--slug", tc.slug).
+				wantOK(t, "doc get"))
+		if after.Status != tc.status || after.Body != tc.body || after.Revision != seeded.Revision {
+			t.Fatalf("after refused write %s = %+v, want unchanged %s revision %d body %q",
+				tc.slug, after, tc.status, seeded.Revision, tc.body)
+		}
+		afterLog := decode[[]logEntryData](t,
+			run(t, db, "doc", "log", "--slug", tc.slug).wantOK(t, "doc log"))
+		if len(afterLog) != 1 {
+			t.Fatalf("history for %s after refused write = %+v, want still one created event", tc.slug, afterLog)
+		}
+	}
+
+	// Two-step capture flow: a failed draft write leaves the capture pending,
+	// a successful write alone still leaves it pending (atomicity is deferred),
+	// and only reference processing after the write marks it processed.
+	capRes := mcpCall(t, cs, "capture", map[string]any{
+		"idempotency_key": "mcp-docput-capture",
+		"text":            "lesson: doc_put before reference",
+	})
+	lesson := scCapture(t, "capture", capRes)
+	failedWrite := mcpCall(t, cs, "doc_put", map[string]any{
+		"slug": "komorebi/lesson", "title": "Lesson",
+		"body": "body", "expected_revision": 7,
+	})
+	if !failedWrite.IsError || !strings.Contains(toolText(failedWrite), "stale_revision") {
+		t.Fatalf("failed write: want stale_revision; content: %s", toolText(failedWrite))
+	}
+	pendingRes := mcpCall(t, cs, "read", map[string]any{"ids": []string{lesson.ID}})
+	wantToolOK(t, "read", pendingRes)
+	var afterFail struct {
+		Captures []captureData `json:"captures"`
+	}
+	scUnmarshal(t, "read", pendingRes, &afterFail)
+	if len(afterFail.Captures) != 1 || afterFail.Captures[0].State != "pending" {
+		t.Fatalf("capture after failed write = %+v, want pending", afterFail.Captures)
+	}
+	okWrite := mcpCall(t, cs, "doc_put", map[string]any{
+		"slug": "komorebi/lesson", "title": "Lesson",
+		"body": "body", "expected_revision": 0,
+	})
+	wantToolOK(t, "doc_put", okWrite)
+	var lessonDoc documentData
+	scUnmarshal(t, "doc_put", okWrite, &lessonDoc)
+	if lessonDoc.ID == "" {
+		t.Fatalf("doc_put returned no document ID: %s", scJSON(t, okWrite))
+	}
+	stillPending := mcpCall(t, cs, "read", map[string]any{"ids": []string{lesson.ID}})
+	wantToolOK(t, "read", stillPending)
+	var afterWrite struct {
+		Captures []captureData `json:"captures"`
+	}
+	scUnmarshal(t, "read", stillPending, &afterWrite)
+	if len(afterWrite.Captures) != 1 || afterWrite.Captures[0].State != "pending" {
+		t.Fatalf("capture after successful write = %+v, want pending until reference", afterWrite.Captures)
+	}
+	refRes := mcpCall(t, cs, "process_capture", map[string]any{
+		"idempotency_key": "mcp-docput-reference",
+		"capture_id":      lesson.ID,
+		"outcome":         "reference",
+		"reason":          lessonDoc.ID,
+	})
+	pr := scDecodeProcess(t, refRes)
+	if pr.Capture.ID != lesson.ID || pr.Capture.State != "processed" {
+		t.Fatalf("reference processing = %+v, want %s processed", pr.Capture, lesson.ID)
+	}
+	if len(pr.WorkItems) != 0 {
+		t.Fatalf("reference outcome created %d work items, want 0", len(pr.WorkItems))
+	}
+	// The reference must retain the written document's ID in its reason.
+	var refEnv struct {
+		Capture struct {
+			ID      string `json:"id"`
+			Outcome *struct {
+				Kind   string `json:"kind"`
+				Reason string `json:"reason"`
+			} `json:"processing_outcome"`
+		} `json:"capture"`
+	}
+	scUnmarshal(t, "process_capture", refRes, &refEnv)
+	if refEnv.Capture.Outcome == nil {
+		t.Fatalf("process_capture response exposes no processing_outcome: %s", scJSON(t, refRes))
+	}
+	if refEnv.Capture.Outcome.Kind != "reference" ||
+		!strings.Contains(refEnv.Capture.Outcome.Reason, lessonDoc.ID) {
+		t.Fatalf("reference outcome = %+v, want kind reference with reason carrying %s",
+			refEnv.Capture.Outcome, lessonDoc.ID)
 	}
 }
