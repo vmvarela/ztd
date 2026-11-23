@@ -239,6 +239,140 @@ func TestPutDocumentLifecycle(t *testing.T) {
 	}
 }
 
+func TestDocumentScopeSelection(t *testing.T) {
+	e := newTestEnv(t)
+	for _, tc := range []struct {
+		scope domain.ScopeID
+		body  string
+	}{
+		{"personal", "personal body"},
+		{"opensource", "opensource body"},
+	} {
+		doc, err := e.s.PutDocument(e.ctx(), app.DocumentCmd{
+			Binding: e.binding, Scope: tc.scope, Kind: domain.DocumentKnowledge,
+			Slug: "shared/card", Title: "Shared card", Body: tc.body,
+			Status: domain.DocumentDraft,
+		}, e.now)
+		if err != nil {
+			t.Fatalf("PutDocument in %s: %v", tc.scope, err)
+		}
+		if doc.Scope != string(tc.scope) {
+			t.Fatalf("document scope = %q, want %q", doc.Scope, tc.scope)
+		}
+	}
+
+	if _, err := e.s.GetDocument(e.ctx(), e.binding, "knowledge", "shared/card"); !domain.Of(err, domain.Conflict) {
+		t.Fatalf("unscoped duplicate get = %v, want conflict", err)
+	}
+	for _, tc := range []struct {
+		scope domain.ScopeID
+		body  string
+	}{
+		{"personal", "personal body"},
+		{"opensource", "opensource body"},
+	} {
+		doc, err := e.s.GetDocument(e.ctx(), e.binding, "knowledge", "shared/card", tc.scope)
+		if err != nil || doc.Scope != string(tc.scope) || doc.Body != tc.body {
+			t.Fatalf("scoped get in %s = %+v (err %v)", tc.scope, doc, err)
+		}
+	}
+}
+
+// TestPutDocumentDraftOnly pins the MCP write path: expected 0 never touches
+// an existing document, only a draft may be updated, the CLI path keeps its
+// existing behavior, and DraftOnly stays out of the idempotency hash.
+func TestPutDocumentDraftOnly(t *testing.T) {
+	e := newTestEnv(t)
+	put := func(slug, body string, expected domain.Revision, draftOnly bool, status domain.DocumentStatus) (domain.Document, error) {
+		return e.s.PutDocument(e.ctx(), app.DocumentCmd{
+			Binding: e.binding, Kind: domain.DocumentKnowledge, Slug: slug,
+			Title: slug, Body: body, Status: status, Expected: expected,
+			DraftOnly: draftOnly,
+		}, e.now)
+	}
+
+	// Create through the draft-only path.
+	created, err := put("k/one", "first", 0, true, domain.DocumentDraft)
+	if err != nil {
+		t.Fatalf("draft-only create: %v", err)
+	}
+	if created.Revision != 1 || created.Status != domain.DocumentDraft {
+		t.Fatalf("created = %+v, want revision 1 draft", created)
+	}
+
+	// Hash exclusion: the same content under the same key replays even though
+	// the caller flipped DraftOnly, so pre-upgrade idempotency records stay
+	// valid across the CLI and MCP paths.
+	history := e.count(`SELECT count(*) FROM history_events`)
+	replay, err := put("k/one", "first", 0, false, domain.DocumentDraft)
+	if err != nil {
+		t.Fatalf("cross-path replay: %v", err)
+	}
+	if replay.Revision != 1 || replay.Body != "first" {
+		t.Fatalf("replay = %+v, want the original document", replay)
+	}
+	if n := e.count(`SELECT count(*) FROM history_events`); n != history {
+		t.Fatalf("history grew by %d on replay, want 0", n-history)
+	}
+
+	// Create-only guard: a document written outside this path has no idempotency
+	// record for expected 0, so the guard itself fires — and writes nothing.
+	e.mustExec(`INSERT INTO documents (id, scope_id, kind, slug, title, body, status,
+		revision, created_at, updated_at)
+		VALUES ('doc:personal:knowledge:k/two', 'personal', 'knowledge', 'k/two',
+			'k/two', 'sql body', 'draft', 1, ?, ?)`,
+		fmtTime(e.now), fmtTime(e.now))
+	if _, err := put("k/two", "cli body", 0, true, domain.DocumentDraft); !domain.Of(err, domain.StaleRevision) {
+		t.Fatalf("create-only guard = %v, want stale_revision", err)
+	}
+	if n := e.count(`SELECT count(*) FROM documents WHERE body = 'cli body'`); n != 0 {
+		t.Fatal("create-only guard wrote the body")
+	}
+	if n := e.count(`SELECT count(*) FROM history_events`); n != history {
+		t.Fatalf("history grew by %d on the refused create, want 0", n-history)
+	}
+
+	// Draft-only update on a current draft advances the revision.
+	updated, err := put("k/one", "second", 1, true, domain.DocumentDraft)
+	if err != nil {
+		t.Fatalf("draft-only update: %v", err)
+	}
+	if updated.Revision != 2 || updated.Body != "second" {
+		t.Fatalf("updated = %+v, want revision 2 with the new body", updated)
+	}
+
+	// The CLI path still promotes a draft to verified.
+	promoted, err := put("k/one", "second", 2, false, domain.DocumentVerified)
+	if err != nil {
+		t.Fatalf("cli promote: %v", err)
+	}
+	if promoted.Status != domain.DocumentVerified || promoted.Revision != 3 {
+		t.Fatalf("promoted = %+v, want revision 3 verified", promoted)
+	}
+
+	// Draft-only may not update a verified document, at the right revision or
+	// any other, and writes nothing.
+	before := e.count(`SELECT count(*) FROM history_events`)
+	if _, err := put("k/one", "third", 3, true, domain.DocumentDraft); !domain.Of(err, domain.InvalidTransition) {
+		t.Fatalf("draft-only over verified = %v, want invalid_transition", err)
+	}
+	if _, err := put("k/one", "third", 99, true, domain.DocumentDraft); !domain.Of(err, domain.StaleRevision) {
+		t.Fatalf("stale draft-only over verified = %v, want stale_revision", err)
+	}
+	if n := e.count(`SELECT count(*) FROM documents WHERE body = 'third'`); n != 0 {
+		t.Fatal("refused draft-only write changed the body")
+	}
+	if n := e.count(`SELECT count(*) FROM history_events`); n != before {
+		t.Fatalf("history grew by %d on refused writes, want 0", n-before)
+	}
+
+	// Validation refuses a draft-only command that asks for a non-draft status
+	// before any store code runs.
+	if _, err := put("k/new", "body", 0, true, domain.DocumentVerified); !domain.Of(err, domain.InvalidInput) {
+		t.Fatalf("draft-only verified status = %v, want invalid_input", err)
+	}
+}
+
 // TestListDocumentHistory covers the doc log query: newest first by seq,
 // kind and slug filters, the limit, and the binding — a foreign-scope
 // document never shows up.

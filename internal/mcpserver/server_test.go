@@ -2,6 +2,8 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
+	"sort"
 	"strings"
 	"testing"
 
@@ -39,8 +41,14 @@ func TestToolErrorPassesOtherFamilies(t *testing.T) {
 // every path exercised here rejects before reaching the service.
 func newTestSession(t *testing.T, allowDeleteSource bool) *mcp.ClientSession {
 	t.Helper()
+	return newTestSessionBinding(t, domain.ScopeBinding{
+		Profile: "personal", Actor: "test", Scopes: []domain.ScopeID{"personal"},
+	}, allowDeleteSource)
+}
+
+func newTestSessionBinding(t *testing.T, binding domain.ScopeBinding, allowDeleteSource bool) *mcp.ClientSession {
+	t.Helper()
 	ctx := context.Background()
-	binding := domain.ScopeBinding{Profile: "personal", Actor: "test", Scopes: []domain.ScopeID{"personal"}}
 	server := NewServer(nil, binding, "test", allowDeleteSource)
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	serverSession, err := server.Connect(ctx, serverTransport, nil)
@@ -57,9 +65,52 @@ func newTestSession(t *testing.T, allowDeleteSource bool) *mcp.ClientSession {
 	return clientSession
 }
 
-// TestToolCatalog pins the model-facing surface: sixteen tools, including the
-// source registry, the reported batch ingestion boundary and the read-only
-// document retrieval tools. delete_source is hidden unless opted in.
+// TestDocPutAdvertisesBoundScopes pins the dynamic description: the agent
+// chooses a destination scope from the fixed binding based on document content.
+func TestDocPutAdvertisesBoundScopes(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		scopes []domain.ScopeID
+		want   []string
+		absent string
+	}{
+		{[]domain.ScopeID{"personal"}, []string{"personal", "destination scope"}, "opensource"},
+		{[]domain.ScopeID{"opensource", "salud"}, []string{"opensource", "salud"}, "work"},
+	}
+	for _, tc := range cases {
+		cs := newTestSessionBinding(t, domain.ScopeBinding{
+			Profile: "personal", Actor: "test", Scopes: tc.scopes,
+		}, false)
+		res, err := cs.ListTools(ctx, nil)
+		if err != nil {
+			t.Fatalf("list tools: %v", err)
+		}
+		var desc string
+		for _, tool := range res.Tools {
+			if tool.Name == "doc_put" {
+				desc = tool.Description
+			}
+		}
+		if desc == "" {
+			t.Fatal("doc_put not listed")
+		}
+		for _, want := range tc.want {
+			if !strings.Contains(desc, want) {
+				t.Errorf("doc_put description missing %q: %s", want, desc)
+			}
+		}
+		if strings.Contains(desc, tc.absent) {
+			t.Errorf("doc_put description must not name non-primary %s: %s", tc.absent, desc)
+		}
+		if !strings.Contains(desc, "may differ from the capture's source scope") {
+			t.Errorf("doc_put description missing independent destination guidance: %s", desc)
+		}
+	}
+}
+
+// TestToolCatalog pins the model-facing surface: seventeen tools, including the
+// source registry, the reported batch ingestion boundary, the read-only
+// document retrieval tools and the draft-only document write.
 func TestToolCatalog(t *testing.T) {
 	cs := newTestSession(t, false)
 	ctx := context.Background()
@@ -72,7 +123,7 @@ func TestToolCatalog(t *testing.T) {
 		"commit_plan", "focus_start", "checkpoint", "focus_finish",
 		"record_review", "find", "read",
 		"sources", "record_source_review",
-		"doc_search", "doc_get", "doc_related",
+		"doc_search", "doc_get", "doc_related", "doc_put",
 	}
 	if len(res.Tools) != len(want) {
 		t.Errorf("listed %d tools, want %d", len(res.Tools), len(want))
@@ -115,8 +166,8 @@ func TestDeleteSourceListedWithOptIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list tools: %v", err)
 	}
-	if len(res.Tools) != 17 {
-		t.Errorf("listed %d tools with opt-in, want 17", len(res.Tools))
+	if len(res.Tools) != 18 {
+		t.Errorf("listed %d tools with opt-in, want 18", len(res.Tools))
 	}
 	for _, tool := range res.Tools {
 		if tool.Name == "delete_source" {
@@ -124,6 +175,112 @@ func TestDeleteSourceListedWithOptIn(t *testing.T) {
 		}
 	}
 	t.Error("delete_source not listed with the opt-in flag")
+}
+
+// TestDocPutSchemaPinsWritableFields pins doc_put's surface: only slug, title,
+// body, scope and expected_revision are accepted. Kind and status must not
+// appear, so the model cannot widen the write beyond a knowledge draft.
+func TestDocPutSchemaPinsWritableFields(t *testing.T) {
+	cs := newTestSession(t, false)
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	var tool *mcp.Tool
+	for _, t := range res.Tools {
+		if t.Name == "doc_put" {
+			tool = t
+		}
+	}
+	if tool == nil {
+		t.Fatal("doc_put not listed")
+	}
+	raw, err := json.Marshal(tool.InputSchema)
+	if err != nil {
+		t.Fatalf("marshal input schema: %v", err)
+	}
+	var schema struct {
+		Properties           map[string]json.RawMessage `json:"properties"`
+		Required             []string                   `json:"required"`
+		AdditionalProperties json.RawMessage            `json:"additionalProperties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("decode input schema: %v", err)
+	}
+	want := []string{"body", "expected_revision", "scope", "slug", "title"}
+	sort.Strings(want)
+	got := make([]string, 0, len(schema.Properties))
+	for name := range schema.Properties {
+		got = append(got, name)
+	}
+	sort.Strings(got)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("properties = %v, want exactly %v", got, want)
+	}
+	sort.Strings(schema.Required)
+	if strings.Join(schema.Required, ",") != strings.Join(want, ",") {
+		t.Errorf("required = %v, want %v", schema.Required, want)
+	}
+	// The SDK encodes "no extra properties" as {"not":{}}; anything permissive
+	// (omitted or true) would let the model pass status/kind/scope through.
+	if string(schema.AdditionalProperties) == "" || string(schema.AdditionalProperties) == "true" {
+		t.Errorf("additionalProperties = %s, want a rejecting schema", schema.AdditionalProperties)
+	}
+}
+
+// TestDocPutRejectsProhibitedArgs pins the guard at the protocol boundary:
+// extra status/kind arguments and missing scope fail schema validation before
+// the handler runs (svc is nil here), so no service or store code is reached.
+func TestDocPutRejectsProhibitedArgs(t *testing.T) {
+	cs := newTestSession(t, false)
+	ctx := context.Background()
+	cases := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"status", map[string]any{
+			"slug": "k/test.md", "title": "T", "body": "B", "scope": "personal",
+			"expected_revision": 0, "status": "verified",
+		}, "validating"},
+		{"kind", map[string]any{
+			"slug": "k/test.md", "title": "T", "body": "B", "scope": "personal",
+			"expected_revision": 0, "kind": "project_note",
+		}, "validating"},
+		{"missing expected_revision", map[string]any{
+			"slug": "k/test.md", "title": "T", "body": "B", "scope": "personal",
+		}, "validating"},
+		{"missing scope", map[string]any{
+			"slug": "k/test.md", "title": "T", "body": "B",
+			"expected_revision": 0,
+		}, "validating"},
+		{"blank scope", map[string]any{
+			"slug": "k/test.md", "title": "T", "body": "B", "scope": "  ",
+			"expected_revision": 0,
+		}, "invalid_input"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+				Name: "doc_put", Arguments: tc.args,
+			})
+			if err != nil {
+				t.Fatalf("call tool: %v", err)
+			}
+			if !res.IsError {
+				t.Fatalf("isError = false, want true; content: %v", res.Content)
+			}
+			var text strings.Builder
+			for _, item := range res.Content {
+				if txt, ok := item.(*mcp.TextContent); ok {
+					text.WriteString(txt.Text)
+				}
+			}
+			if !strings.Contains(text.String(), tc.want) {
+				t.Errorf("error text = %q, want %q", text.String(), tc.want)
+			}
+		})
+	}
 }
 
 // TestRecordSourceReviewRejectsObserved pins the trust boundary: observed

@@ -138,10 +138,10 @@ func (s *Store) ListContexts(ctx context.Context, b domain.ScopeBinding) ([]doma
 	return out, rows.Err()
 }
 
-// PutDocument creates or updates the document identified by (primary scope,
+// PutDocument creates or updates the document identified by (selected scope,
 // kind, slug).
 //
-// Pre: the command passes app.ValidateDocumentCmd; the primary scope is
+// Pre: the command passes app.ValidateDocumentCmd; the scope is
 // declared; Expected is 0 or the current revision of an existing document.
 // The idempotency key is derived from scope, kind, slug and Expected, so no
 // caller key is required. Post: one transaction — an identical retry replays
@@ -150,12 +150,18 @@ func (s *Store) ListContexts(ctx context.Context, b domain.ScopeBinding) ([]doma
 // existing document at another revision is stale_revision, otherwise the
 // document is inserted at revision 1 or advanced by one, with its history
 // event and the idempotency record. Nothing is written on failure.
+// DraftOnly adds two guards inside the same transaction: Expected 0 never
+// touches an existing document (stale_revision), and only a draft may be
+// updated (invalid_transition).
 func (s *Store) PutDocument(ctx context.Context, cmd app.DocumentCmd, now time.Time) (domain.Document, error) {
 	now = now.UTC().Truncate(time.Second)
 	if err := app.ValidateDocumentCmd(cmd); err != nil {
 		return domain.Document{}, err
 	}
-	scope := cmd.Binding.Scopes[0]
+	scope := cmd.Scope
+	if scope == "" {
+		scope = cmd.Binding.Scopes[0]
+	}
 	key := fmt.Sprintf("%s|%s|%s|%d", scope, cmd.Kind, cmd.Slug, int64(cmd.Expected))
 	// The binding is session context, not payload: the key already pins the
 	// scope, so an identical document under an equivalent binding replays.
@@ -189,10 +195,20 @@ func (s *Store) PutDocument(ctx context.Context, cmd app.DocumentCmd, now time.T
 		case err != nil:
 			return err
 		default:
+			if cmd.DraftOnly && cmd.Expected == 0 {
+				return domain.NewError(domain.StaleRevision,
+					"document %s/%s already exists at revision %d in scope %s, so expected must be its current revision",
+					cmd.Kind, cmd.Slug, existing.Revision, scope)
+			}
 			if cmd.Expected != 0 && cmd.Expected != existing.Revision {
 				return domain.NewError(domain.StaleRevision,
 					"document %s/%s is at revision %d, expected %d",
 					cmd.Kind, cmd.Slug, existing.Revision, cmd.Expected)
+			}
+			if cmd.DraftOnly && existing.Status != domain.DocumentDraft {
+				return domain.NewError(domain.InvalidTransition,
+					"document %s/%s is %s, so a draft-only write cannot update it",
+					cmd.Kind, cmd.Slug, existing.Status)
 			}
 			next = existing.Revision.Next()
 		}
@@ -245,27 +261,52 @@ func (s *Store) PutDocument(ctx context.Context, cmd app.DocumentCmd, now time.T
 	return out, nil
 }
 
-// GetDocument returns one document of the binding scopes. A document outside
-// the binding is not_found: documents never disclose their existence across
-// scopes.
-func (s *Store) GetDocument(ctx context.Context, b domain.ScopeBinding, kind domain.DocumentKind, slug string) (domain.Document, error) {
+// GetDocument returns a document in the selected scope, or in the binding
+// when no scope is supplied. Ambiguous slugs require an explicit scope.
+func (s *Store) GetDocument(ctx context.Context, b domain.ScopeBinding, kind domain.DocumentKind, slug string, scope ...domain.ScopeID) (domain.Document, error) {
 	if err := b.Validate(); err != nil {
 		return domain.Document{}, err
 	}
-	clause, args, err := scopeClause(b)
+	if len(scope) > 1 {
+		return domain.Document{}, domain.Invalid("at most one document scope may be selected")
+	}
+	query := "SELECT " + documentColumns + " FROM documents WHERE kind = ? AND slug = ?"
+	args := []any{string(kind), slug}
+	if len(scope) == 1 && scope[0] != "" {
+		if !b.Allows(scope[0]) {
+			return domain.Document{}, domain.NewError(domain.ScopeDenied, "document scope is outside this binding")
+		}
+		query += " AND scope_id = ?"
+		args = append(args, string(scope[0]))
+	} else {
+		clause, scopeArgs, err := scopeClause(b)
+		if err != nil {
+			return domain.Document{}, err
+		}
+		query += " AND scope_id IN (" + clause + ")"
+		args = append(args, scopeArgs...)
+	}
+	rows, err := s.db.QueryContext(ctx, query+" ORDER BY scope_id LIMIT 2", args...)
 	if err != nil {
 		return domain.Document{}, err
 	}
-	args = append([]any{string(kind), slug}, args...)
-	row := s.db.QueryRowContext(ctx,
-		"SELECT "+documentColumns+" FROM documents WHERE kind = ? AND slug = ? AND scope_id IN ("+clause+")",
-		args...)
-	d, err := scanDocument(row)
-	if errors.Is(err, sql.ErrNoRows) {
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return domain.Document{}, err
+		}
 		return domain.Document{}, domain.NewError(domain.NotFound,
 			"document %s/%s not found", kind, slug)
 	}
+	d, err := scanDocument(rows)
 	if err != nil {
+		return domain.Document{}, err
+	}
+	if rows.Next() {
+		return domain.Document{}, domain.NewError(domain.Conflict,
+			"document %s/%s exists in multiple bound scopes; specify scope", kind, slug)
+	}
+	if err := rows.Err(); err != nil {
 		return domain.Document{}, err
 	}
 	return d, nil

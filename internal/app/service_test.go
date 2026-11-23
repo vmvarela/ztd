@@ -54,6 +54,15 @@ func TestValidateDocumentCmd(t *testing.T) {
 		{"blank body", func(c *DocumentCmd) { c.Body = "" }, false},
 		{"negative expected", func(c *DocumentCmd) { c.Expected = -1 }, false},
 		{"empty binding", func(c *DocumentCmd) { c.Binding = domain.ScopeBinding{} }, false},
+		{"draft-only draft", func(c *DocumentCmd) { c.DraftOnly = true }, true},
+		{"draft-only verified", func(c *DocumentCmd) {
+			c.DraftOnly = true
+			c.Status = domain.DocumentVerified
+		}, false},
+		{"draft-only superseded", func(c *DocumentCmd) {
+			c.DraftOnly = true
+			c.Status = domain.DocumentSuperseded
+		}, false},
 	}
 	for _, tc := range cases {
 		cmd := base()
@@ -111,6 +120,9 @@ func TestServiceValidatesBeforeRepo(t *testing.T) {
 	}
 	if _, err := svc.PutDocument(ctx, DocumentCmd{Binding: b, Kind: "wiki", Slug: "s", Title: "t", Body: "b", Status: domain.DocumentDraft}); !domain.Of(err, domain.InvalidInput) {
 		t.Errorf("PutDocument bad kind = %v, want invalid_input", err)
+	}
+	if _, err := svc.PutDocument(ctx, DocumentCmd{Binding: b, Scope: "outside", Kind: domain.DocumentKnowledge, Slug: "s", Title: "t", Body: "b", Status: domain.DocumentDraft}); !domain.Of(err, domain.ScopeDenied) {
+		t.Errorf("PutDocument unbound scope = %v, want scope_denied", err)
 	}
 	if _, err := svc.AddProject(ctx, ProjectCmd{Binding: b, ID: "x", Status: "doing"}); !domain.Of(err, domain.InvalidInput) {
 		t.Errorf("AddProject bad status = %v, want invalid_input", err)

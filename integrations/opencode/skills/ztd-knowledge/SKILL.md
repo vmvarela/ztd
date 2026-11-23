@@ -36,9 +36,12 @@ only when context is missing or they changed.
 1. Determine the most specific scope. Ask when client/project is ambiguous.
 2. Look for existing cards on the topic to update instead of duplicating.
 3. Read the available material. Write the card with `ztd doc put --kind
-   knowledge --slug ... --title T --body TEXT`: summary, when to apply it,
-   steps/criteria, limits, source, date and status.
-   Keep the operational guide short; link extensive evidence inside the same
+    knowledge --slug ... --title T --body TEXT`: summary, when to apply it,
+    steps/criteria, limits, source, date and status.
+    Over MCP, choose the destination scope from the card's meaning and pass it
+    explicitly to `doc_put`; it may differ from the capture's source scope.
+    Use only a scope in the session's binding.
+    Keep the operational guide short; link extensive evidence inside the same
    scope instead of copying chronologies. Do not cut exceptions or delete the
    existing history. If the source is inaccessible, record only what was
    provided and mark the rest unverified.

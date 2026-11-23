@@ -192,7 +192,7 @@ var mcpToolNames = []string{
 	"commit_plan", "focus_start", "checkpoint", "focus_finish",
 	"record_review", "find", "read",
 	"sources", "record_source_review",
-	"doc_search", "doc_get", "doc_related",
+	"doc_search", "doc_get", "doc_related", "doc_put",
 }
 
 // TestMCPStdioJourney drives the real binary as an MCP stdio server: the tool
@@ -562,6 +562,11 @@ func TestMCPDocumentTools(t *testing.T) {
 		"--title", "Komorebi setup", "--body", "the clone lives under repos/").wantOK(t, "doc put")
 	run(t, db, "doc", "put", "--kind", "knowledge_index", "--slug", "index",
 		"--title", "Index", "--body", "[[komorebi/setup]]").wantOK(t, "doc put")
+	run(t, db, "doc", "put", "--kind", "knowledge", "--slug", "private-only",
+		"--title", "Personal only", "--body", "private repos/").wantOK(t, "doc put")
+	run(t, db, "doc", "put", "--kind", "knowledge", "--slug", "komorebi/setup",
+		"--title", "Other setup", "--body", "separate scope content",
+		"--scope", "opensource").wantOK(t, "doc put")
 
 	cs := mcpConnect(t, db)
 
@@ -580,8 +585,8 @@ func TestMCPDocumentTools(t *testing.T) {
 		} `json:"hits"`
 	}
 	scUnmarshal(t, "doc_search", searchRes, &searchEnv)
-	if len(searchEnv.Hits) != 2 {
-		t.Fatalf("doc_search hits = %d, want 2; %s", len(searchEnv.Hits), scJSON(t, searchRes))
+	if len(searchEnv.Hits) != 3 {
+		t.Fatalf("doc_search hits = %d, want 3; %s", len(searchEnv.Hits), scJSON(t, searchRes))
 	}
 	var found bool
 	for _, h := range searchEnv.Hits {
@@ -600,8 +605,36 @@ func TestMCPDocumentTools(t *testing.T) {
 		t.Fatalf("kind filter returned a knowledge card: %s", scJSON(t, kindRes))
 	}
 
-	// doc_get returns the body.
-	getRes := mcpCall(t, cs, "doc_get", map[string]any{"kind": "knowledge", "slug": "komorebi/setup"})
+	// Duplicate slugs across scopes require an explicit target for reads.
+	ambiguousGet := mcpCall(t, cs, "doc_get", map[string]any{"kind": "knowledge", "slug": "komorebi/setup"})
+	if !ambiguousGet.IsError || !strings.Contains(toolText(ambiguousGet), "conflict") {
+		t.Fatalf("doc_get without scope = %q, want ambiguity conflict", toolText(ambiguousGet))
+	}
+	ambiguousRelated := mcpCall(t, cs, "doc_related", map[string]any{"kind": "knowledge", "slug": "komorebi/setup"})
+	if !ambiguousRelated.IsError || !strings.Contains(toolText(ambiguousRelated), "conflict") {
+		t.Fatalf("doc_related without scope = %q, want ambiguity conflict", toolText(ambiguousRelated))
+	}
+	for _, call := range []struct {
+		tool  string
+		scope string
+	}{
+		{"doc_get", ""},
+		{"doc_get", "  "},
+		{"doc_related", ""},
+		{"doc_related", "  "},
+	} {
+		res := mcpCall(t, cs, call.tool, map[string]any{
+			"kind": "knowledge", "slug": "komorebi/setup", "scope": call.scope,
+		})
+		if !res.IsError || !strings.Contains(toolText(res), "invalid_input") {
+			t.Fatalf("%s blank scope %q = %q, want invalid_input", call.tool, call.scope, toolText(res))
+		}
+	}
+
+	// doc_get returns the requested document body.
+	getRes := mcpCall(t, cs, "doc_get", map[string]any{
+		"kind": "knowledge", "slug": "komorebi/setup", "scope": "personal",
+	})
 	wantToolOK(t, "doc_get", getRes)
 	var card struct {
 		Kind string `json:"kind"`
@@ -615,7 +648,9 @@ func TestMCPDocumentTools(t *testing.T) {
 	}
 
 	// doc_related returns the index as the card's backlink.
-	relRes := mcpCall(t, cs, "doc_related", map[string]any{"kind": "knowledge", "slug": "komorebi/setup"})
+	relRes := mcpCall(t, cs, "doc_related", map[string]any{
+		"kind": "knowledge", "slug": "komorebi/setup", "scope": "personal",
+	})
 	wantToolOK(t, "doc_related", relRes)
 	var rel struct {
 		Source    documentData   `json:"source"`
@@ -629,6 +664,17 @@ func TestMCPDocumentTools(t *testing.T) {
 	if len(rel.Backlinks) != 1 || rel.Backlinks[0].Slug != "index" {
 		t.Fatalf("backlinks = %+v, want the index; %s", rel.Backlinks, scJSON(t, relRes))
 	}
+	osRel := mcpCall(t, cs, "doc_related", map[string]any{
+		"kind": "knowledge", "slug": "komorebi/setup", "scope": "opensource",
+	})
+	wantToolOK(t, "doc_related opensource", osRel)
+	var osRelations struct {
+		Source documentData `json:"source"`
+	}
+	scUnmarshal(t, "doc_related opensource", osRel, &osRelations)
+	if osRelations.Source.Scope != "opensource" || osRelations.Source.Body != "separate scope content" {
+		t.Fatalf("doc_related opensource source = %+v, want opensource document", osRelations.Source)
+	}
 
 	// Scope boundary: a server bound to opensource must answer not_found for
 	// the personal card without naming the scope, and search must not leak it.
@@ -637,8 +683,8 @@ func TestMCPDocumentTools(t *testing.T) {
 		tool string
 		args map[string]any
 	}{
-		{"doc_get", map[string]any{"kind": "knowledge", "slug": "komorebi/setup"}},
-		{"doc_related", map[string]any{"kind": "knowledge", "slug": "komorebi/setup"}},
+		{"doc_get", map[string]any{"kind": "knowledge", "slug": "private-only"}},
+		{"doc_related", map[string]any{"kind": "knowledge", "slug": "private-only"}},
 	} {
 		hidden := mcpCall(t, foreign, call.tool, call.args)
 		if !hidden.IsError {
@@ -649,9 +695,9 @@ func TestMCPDocumentTools(t *testing.T) {
 			t.Fatalf("%s foreign leaked scope: %q", call.tool, text)
 		}
 	}
-	hiddenSearch := mcpCall(t, foreign, "doc_search", map[string]any{"query": "komorebi"})
+	hiddenSearch := mcpCall(t, foreign, "doc_search", map[string]any{"query": "private repos"})
 	wantToolOK(t, "doc_search", hiddenSearch)
-	if structuredHas(t, hiddenSearch, "komorebi/setup") {
+	if structuredHas(t, hiddenSearch, "private-only") {
 		t.Fatalf("foreign doc_search leaked the card: %s", scJSON(t, hiddenSearch))
 	}
 }
@@ -785,5 +831,326 @@ func TestMCPCaptureSourceReferenceAnswersAlike(t *testing.T) {
 	}
 	if got := toolText(missing); got != "not_found: not found\n" {
 		t.Fatalf("capture missing source text = %q, want not_found: not found", got)
+	}
+}
+
+// TestMCPDocPut covers draft writes over stdio: agent-selected scopes within
+// the binding, duplicate slugs across scopes, idempotency and revision guards,
+// schema restrictions, and the two-step capture reference flow.
+func TestMCPDocPut(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "ztd.db")
+	run(t, db, initArgs...).wantOK(t, "init")
+
+	cs := mcpConnect(t, db)
+	slug := "komorebi/mcp-draft"
+	oversized := mcpCall(t, cs, "doc_put", map[string]any{
+		"slug": "komorebi/oversized", "title": "Oversized", "body": strings.Repeat("x", (512<<10)+1),
+		"scope": "personal", "expected_revision": 0,
+	})
+	if !oversized.IsError || !strings.Contains(toolText(oversized), "invalid_input") {
+		t.Fatalf("oversized doc_put = %q, want invalid_input", toolText(oversized))
+	}
+	missingOversized := mcpCall(t, cs, "doc_get", map[string]any{
+		"kind": "knowledge", "slug": "komorebi/oversized", "scope": "personal",
+	})
+	if !missingOversized.IsError || !strings.Contains(toolText(missingOversized), "not_found") {
+		t.Fatalf("oversized document lookup = %q, want not_found", toolText(missingOversized))
+	}
+	putArgs := func(body string, expected int64) map[string]any {
+		return map[string]any{
+			"slug": slug, "title": "MCP draft",
+			"body": body, "scope": "personal", "expected_revision": expected,
+		}
+	}
+
+	// The destination scope is selected explicitly; kind and status are fixed.
+	createRes := mcpCall(t, cs, "doc_put", putArgs("first body", 0))
+	wantToolOK(t, "doc_put", createRes)
+	var doc documentData
+	scUnmarshal(t, "doc_put", createRes, &doc)
+	if doc.Kind != "knowledge" || doc.Status != "draft" || doc.Scope != "personal" ||
+		doc.Revision != 1 || doc.Body != "first body" || doc.Slug != slug {
+		t.Fatalf("doc_put create = %+v, want personal knowledge draft at revision 1; %s",
+			doc, scJSON(t, createRes))
+	}
+
+	// Same slug can exist in another bound scope. Reads with no scope are
+	// rejected as ambiguous; explicit scope selects the intended document.
+	osArgs := map[string]any{
+		"slug": slug, "title": "MCP draft", "body": "opensource body",
+		"scope": "opensource", "expected_revision": 0,
+	}
+	osCreate := mcpCall(t, cs, "doc_put", osArgs)
+	wantToolOK(t, "doc_put opensource", osCreate)
+	var osDoc documentData
+	scUnmarshal(t, "doc_put opensource", osCreate, &osDoc)
+	if osDoc.Scope != "opensource" || osDoc.Body != "opensource body" {
+		t.Fatalf("doc_put opensource = %+v, want independent opensource document", osDoc)
+	}
+	ambiguous := mcpCall(t, cs, "doc_get", map[string]any{"kind": "knowledge", "slug": slug})
+	if !ambiguous.IsError || !strings.Contains(toolText(ambiguous), "conflict") {
+		t.Fatalf("doc_get without scope = %q, want ambiguity conflict", toolText(ambiguous))
+	}
+	osGet := mcpCall(t, cs, "doc_get", map[string]any{
+		"kind": "knowledge", "slug": slug, "scope": "opensource",
+	})
+	wantToolOK(t, "doc_get opensource", osGet)
+	var osCurrent documentData
+	scUnmarshal(t, "doc_get opensource", osGet, &osCurrent)
+	if osCurrent.Body != "opensource body" {
+		t.Fatalf("doc_get opensource = %+v, want opensource body", osCurrent)
+	}
+
+	// Idempotent retry: the identical payload replays the stored document and
+	// the history keeps a single event.
+	retryRes := mcpCall(t, cs, "doc_put", putArgs("first body", 0))
+	wantToolOK(t, "doc_put", retryRes)
+	var retry documentData
+	scUnmarshal(t, "doc_put", retryRes, &retry)
+	if retry.Revision != 1 || retry.Body != "first body" {
+		t.Fatalf("retry = %+v, want the original revision 1 document", retry)
+	}
+	log := decode[[]logEntryData](t,
+		run(t, db, "doc", "log", "--slug", slug).wantOK(t, "doc log"))
+	var personalEvents []logEntryData
+	for _, entry := range log {
+		if entry.Scope == "personal" {
+			personalEvents = append(personalEvents, entry)
+		}
+	}
+	if len(personalEvents) != 1 || personalEvents[0].Event != "created" {
+		t.Fatalf("personal doc log after retry = %+v, want a single created event", personalEvents)
+	}
+
+	// Same derived key (expected 0), different payload: idempotency_conflict,
+	// never an overwrite.
+	conflict := mcpCall(t, cs, "doc_put", putArgs("changed body", 0))
+	if !conflict.IsError || !strings.Contains(toolText(conflict), "idempotency_conflict") {
+		t.Fatalf("conflicting payload: want idempotency_conflict; content: %s", toolText(conflict))
+	}
+
+	// update: the current revision advances the draft.
+	updateRes := mcpCall(t, cs, "doc_put", putArgs("second body", 1))
+	wantToolOK(t, "doc_put", updateRes)
+	var updated documentData
+	scUnmarshal(t, "doc_put", updateRes, &updated)
+	if updated.Revision != 2 || updated.Body != "second body" || updated.Status != "draft" {
+		t.Fatalf("doc_put update = %+v, want revision 2 draft with the new body", updated)
+	}
+
+	// stale revision: a wrong expectation is refused without writing. The
+	// expected value is fresh, so this is stale_revision, not a key conflict.
+	stale := mcpCall(t, cs, "doc_put", putArgs("third body", 99))
+	if !stale.IsError || !strings.Contains(toolText(stale), "stale_revision") {
+		t.Fatalf("stale put: want stale_revision; content: %s", toolText(stale))
+	}
+	getRes := mcpCall(t, cs, "doc_get", map[string]any{"kind": "knowledge", "slug": slug, "scope": "personal"})
+	wantToolOK(t, "doc_get", getRes)
+	var current documentData
+	scUnmarshal(t, "doc_get", getRes, &current)
+	if current.Body != "second body" || current.Revision != 2 {
+		t.Fatalf("after stale put = %+v, want the untouched revision 2 document", current)
+	}
+	// Updating personal did not mutate the same-slug opensource document.
+	osAgain := mcpCall(t, cs, "doc_get", map[string]any{
+		"kind": "knowledge", "slug": slug, "scope": "opensource",
+	})
+	wantToolOK(t, "doc_get opensource after personal update", osAgain)
+	scUnmarshal(t, "doc_get opensource", osAgain, &osCurrent)
+	if osCurrent.Body != "opensource body" || osCurrent.Revision != 1 {
+		t.Fatalf("opensource sibling changed after personal update: %+v", osCurrent)
+	}
+
+	// Prohibited schema: status and kind are rejected at the protocol boundary;
+	// scope and expected_revision are required so both intents are explicit.
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"status", map[string]any{
+			"slug": "k/x.md", "title": "T", "body": "B", "scope": "personal",
+			"expected_revision": 0, "status": "verified",
+		}, "additional properties"},
+		{"kind", map[string]any{
+			"slug": "k/x.md", "title": "T", "body": "B", "scope": "personal",
+			"expected_revision": 0, "kind": "journal",
+		}, "additional properties"},
+		{"missing expected_revision", map[string]any{
+			"slug": "k/x.md", "title": "T", "body": "B", "scope": "personal",
+		}, "required"},
+		{"missing scope", map[string]any{
+			"slug": "k/x.md", "title": "T", "body": "B", "expected_revision": 0,
+		}, "required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := mcpCall(t, cs, "doc_put", tc.args)
+			if !res.IsError {
+				t.Fatalf("isError=false, want rejection; content: %s", toolText(res))
+			}
+			if text := toolText(res); !strings.Contains(text, tc.want) {
+				t.Fatalf("error text = %q, want it to contain %q", text, tc.want)
+			}
+		})
+	}
+	unbound := mcpCall(t, cs, "doc_put", map[string]any{
+		"slug": "k/outside", "title": "Outside", "body": "not written",
+		"scope": "outside", "expected_revision": 0,
+	})
+	if !unbound.IsError || !strings.Contains(toolText(unbound), "not_found") {
+		t.Fatalf("doc_put unbound scope: want not_found; content: %s", toolText(unbound))
+	}
+
+	// Fixed scope binding: a server bound to opensource writes only there, and
+	// the personal scope cannot see the document.
+	foreign := mcpConnectArgs(t, db, "--scope", "opensource")
+	osRes := mcpCall(t, foreign, "doc_put", map[string]any{
+		"slug": "komorebi/os-draft", "title": "OS draft",
+		"body": "opensource body", "scope": "opensource", "expected_revision": 0,
+	})
+	wantToolOK(t, "doc_put", osRes)
+	var foreignOSDoc documentData
+	scUnmarshal(t, "doc_put", osRes, &foreignOSDoc)
+	if foreignOSDoc.Scope != "opensource" || foreignOSDoc.Status != "draft" || foreignOSDoc.Kind != "knowledge" {
+		t.Fatalf("foreign doc_put = %+v, want an opensource knowledge draft", foreignOSDoc)
+	}
+	run(t, db, "doc", "get", "--kind", "knowledge", "--slug", "komorebi/os-draft",
+		"--scope", "personal").wantErr(t, 1, "doc", "not_found")
+	osGot := decode[documentData](t,
+		run(t, db, "doc", "get", "--kind", "knowledge", "--slug", "komorebi/os-draft",
+			"--scope", "opensource").wantOK(t, "doc get"))
+	if osGot.Body != "opensource body" {
+		t.Fatalf("opensource doc get = %+v, want the written body", osGot)
+	}
+
+	// Draft-only write cannot change a non-draft document: seed verified and
+	// superseded cards through the CLI, attempt updates with their current
+	// revisions over MCP, and prove nothing changed.
+	for _, tc := range []struct {
+		slug, status, body string
+	}{
+		{"komorebi/verified-card", "verified", "verified body"},
+		{"komorebi/superseded-card", "superseded", "superseded body"},
+	} {
+		run(t, db, "doc", "put", "--kind", "knowledge", "--slug", tc.slug,
+			"--title", tc.slug, "--body", tc.body,
+			"--status", tc.status).wantOK(t, "doc put")
+		seeded := decode[documentData](t,
+			run(t, db, "doc", "get", "--kind", "knowledge", "--slug", tc.slug).
+				wantOK(t, "doc get"))
+		if seeded.Status != tc.status || seeded.Body != tc.body || seeded.Revision != 1 {
+			t.Fatalf("seeded %s = %+v, want %s revision 1", tc.slug, seeded, tc.status)
+		}
+		seedLog := decode[[]logEntryData](t,
+			run(t, db, "doc", "log", "--slug", tc.slug).wantOK(t, "doc log"))
+		if len(seedLog) != 1 {
+			t.Fatalf("seed history for %s = %+v, want one created event", tc.slug, seedLog)
+		}
+
+		res := mcpCall(t, cs, "doc_put", map[string]any{
+			"slug": tc.slug, "title": "overwritten",
+			"body": "mcp overwrite", "scope": "personal", "expected_revision": seeded.Revision,
+		})
+		if !res.IsError || !strings.Contains(toolText(res), "invalid_transition") {
+			t.Fatalf("doc_put over %s: want invalid_transition; content: %s", tc.slug, toolText(res))
+		}
+
+		after := decode[documentData](t,
+			run(t, db, "doc", "get", "--kind", "knowledge", "--slug", tc.slug).
+				wantOK(t, "doc get"))
+		if after.Status != tc.status || after.Body != tc.body || after.Revision != seeded.Revision {
+			t.Fatalf("after refused write %s = %+v, want unchanged %s revision %d body %q",
+				tc.slug, after, tc.status, seeded.Revision, tc.body)
+		}
+		afterLog := decode[[]logEntryData](t,
+			run(t, db, "doc", "log", "--slug", tc.slug).wantOK(t, "doc log"))
+		if len(afterLog) != 1 {
+			t.Fatalf("history for %s after refused write = %+v, want still one created event", tc.slug, afterLog)
+		}
+	}
+
+	// Two-step capture flow: a failed draft write leaves the capture pending,
+	// a successful write alone still leaves it pending (atomicity is deferred),
+	// and only reference processing after the write marks it processed.
+	capRes := mcpCall(t, cs, "capture", map[string]any{
+		"idempotency_key": "mcp-docput-capture",
+		"text":            "lesson: doc_put before reference",
+	})
+	lesson := scCapture(t, "capture", capRes)
+	if lesson.Scope != "personal" {
+		t.Fatalf("lesson capture scope = %q, want personal for cross-scope reference test", lesson.Scope)
+	}
+	failedWrite := mcpCall(t, cs, "doc_put", map[string]any{
+		"slug": "komorebi/lesson", "title": "Lesson",
+		"body": "body", "scope": "opensource", "expected_revision": 7,
+	})
+	if !failedWrite.IsError || !strings.Contains(toolText(failedWrite), "stale_revision") {
+		t.Fatalf("failed write: want stale_revision; content: %s", toolText(failedWrite))
+	}
+	pendingRes := mcpCall(t, cs, "read", map[string]any{"ids": []string{lesson.ID}})
+	wantToolOK(t, "read", pendingRes)
+	var afterFail struct {
+		Captures []captureData `json:"captures"`
+	}
+	scUnmarshal(t, "read", pendingRes, &afterFail)
+	if len(afterFail.Captures) != 1 || afterFail.Captures[0].State != "pending" {
+		t.Fatalf("capture after failed write = %+v, want pending", afterFail.Captures)
+	}
+	okWrite := mcpCall(t, cs, "doc_put", map[string]any{
+		"slug": "komorebi/lesson", "title": "Lesson",
+		"body": "body", "scope": "opensource", "expected_revision": 0,
+	})
+	wantToolOK(t, "doc_put", okWrite)
+	var lessonDoc documentData
+	scUnmarshal(t, "doc_put", okWrite, &lessonDoc)
+	if lessonDoc.ID == "" || lessonDoc.Scope != "opensource" {
+		t.Fatalf("doc_put returned %+v, want a document ID in opensource: %s", lessonDoc, scJSON(t, okWrite))
+	}
+	noPersonalLesson := mcpCall(t, cs, "doc_get", map[string]any{
+		"kind": "knowledge", "slug": "komorebi/lesson", "scope": "personal",
+	})
+	if !noPersonalLesson.IsError || !strings.Contains(toolText(noPersonalLesson), "not_found") {
+		t.Fatalf("personal lesson lookup = %q, want not_found", toolText(noPersonalLesson))
+	}
+	stillPending := mcpCall(t, cs, "read", map[string]any{"ids": []string{lesson.ID}})
+	wantToolOK(t, "read", stillPending)
+	var afterWrite struct {
+		Captures []captureData `json:"captures"`
+	}
+	scUnmarshal(t, "read", stillPending, &afterWrite)
+	if len(afterWrite.Captures) != 1 || afterWrite.Captures[0].State != "pending" {
+		t.Fatalf("capture after successful write = %+v, want pending until reference", afterWrite.Captures)
+	}
+	refRes := mcpCall(t, cs, "process_capture", map[string]any{
+		"idempotency_key": "mcp-docput-reference",
+		"capture_id":      lesson.ID,
+		"outcome":         "reference",
+		"reason":          lessonDoc.ID,
+	})
+	pr := scDecodeProcess(t, refRes)
+	if pr.Capture.ID != lesson.ID || pr.Capture.State != "processed" {
+		t.Fatalf("reference processing = %+v, want %s processed", pr.Capture, lesson.ID)
+	}
+	if len(pr.WorkItems) != 0 {
+		t.Fatalf("reference outcome created %d work items, want 0", len(pr.WorkItems))
+	}
+	// The reference must retain the written document's ID in its reason.
+	var refEnv struct {
+		Capture struct {
+			ID      string `json:"id"`
+			Outcome *struct {
+				Kind   string `json:"kind"`
+				Reason string `json:"reason"`
+			} `json:"processing_outcome"`
+		} `json:"capture"`
+	}
+	scUnmarshal(t, "process_capture", refRes, &refEnv)
+	if refEnv.Capture.Outcome == nil {
+		t.Fatalf("process_capture response exposes no processing_outcome: %s", scJSON(t, refRes))
+	}
+	if refEnv.Capture.Outcome.Kind != "reference" ||
+		!strings.Contains(refEnv.Capture.Outcome.Reason, lessonDoc.ID) {
+		t.Fatalf("reference outcome = %+v, want kind reference with reason carrying %s",
+			refEnv.Capture.Outcome, lessonDoc.ID)
 	}
 }

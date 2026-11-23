@@ -6,7 +6,7 @@ when the client disconnects. There is no daemon and no network listener.
 
 The server is the smallest typed surface that supports the ZTD habits. It is
 not a generic database API: there is no raw SQL, no arbitrary update, no
-scope override and no provider tool.
+unbound scope override and no provider tool.
 
 ## Start it
 
@@ -60,8 +60,9 @@ key.
 | `record_source_review` | Ingest one reported batch for a source as pending captures |
 | `delete_source` | Delete one source that no capture or review refers to; requires `idempotency_key`; served only with `--allow-delete-source` |
 | `doc_search` | Full-text search over the bound scopes' documents: document, rank and snippet, best match first |
-| `doc_get` | Read one document by kind and slug, body included; a foreign-scope document is `not_found` |
-| `doc_related` | Return a document's outlinks and backlinks, resolved inside its own scope |
+| `doc_get` | Read one document by kind and slug, body included; optionally select a bound scope; an ambiguous slug requires scope |
+| `doc_related` | Return a document's outlinks and backlinks, resolved inside its own scope; optionally select a bound scope |
+| `doc_put` | Create or update one knowledge draft in a selected bound scope: `slug`, `title`, `body`, `scope` and `expected_revision` only; combined content limit 512 KiB |
 
 `process_capture` accepts `expected_revision`; omitting it (or passing 0)
 skips the optimistic revision check, while the pending/deferred state guard
@@ -70,7 +71,68 @@ missing; ask for fewer IDs when partial results are preferable.
 
 Every mutation requires `idempotency_key`. The server hashes the canonical
 payload, so the same key and payload replay the stored result and the same key
-with different content fails with `idempotency_conflict`.
+with different content fails with `idempotency_conflict`. `doc_put` is the one
+exception: its key is derived from scope, kind, slug and `expected_revision`,
+so no caller key is asked for, and the same replay/conflict rules apply to
+that derived key.
+
+### Draft knowledge writes and the two-step reference flow
+
+`doc_put` writes only `kind=knowledge`, `status=draft`, in the explicitly
+selected scope. The agent chooses that scope by interpreting the document's
+content; it may differ from the capture's source scope, but must be one of the
+binding's scopes. Kind and status are not arguments — they are rejected as
+unexpected properties — so a model cannot create another kind or promote a
+document to `verified`/`superseded`.
+
+`expected_revision` makes the intent explicit: `0` creates only when no
+document exists; without an earlier idempotency record, an existing document
+returns `stale_revision` and is never overwritten. An identical replay is
+checked first and returns its stored result. A positive value updates only the
+current draft at that revision. Stale revisions and writes against a `verified`
+or `superseded` document fail without any write; updating a document past draft
+stays a CLI operation.
+
+`doc_put` requires a destination `scope`; the tool description lists the
+available bound scopes and the server rejects any other value. Choose the scope
+that fits the lesson, not automatically the capture's source scope. When
+updating an existing document, use `doc_get` with that same scope to obtain its
+current revision. If a slug exists in multiple bound scopes, `doc_get` and
+`doc_related` require an explicit scope instead of choosing an arbitrary match.
+An omitted scope is allowed when unambiguous; an explicitly blank scope is
+rejected. For `doc_put`, the combined UTF-8 byte length of `slug`, `title` and
+`body` must not exceed 512 KiB; the check runs before persistence to keep the
+duplicated MCP response within the transport frame limit.
+
+Promoting a captured lesson is a two-step flow, and the steps are not atomic —
+atomicity is deliberately deferred:
+
+1. `doc_put` the draft first. Only a successful write creates or advances the
+   document.
+2. Then `process_capture` with outcome `reference`, with the `doc_put`
+    result's document ID in `reason`. That ID is audit context: it is retained
+    in the immediate response and the capture's history event, but ordinary
+    `read`/`show` responses expose only `processing_outcome.kind`, not
+    `reason`. It is not a navigable link; retain the ID and the document's
+    `scope`, `kind` and `slug` from the successful response/request. To inspect
+    the card later, use `doc_get` by kind, slug and scope. The capture stays
+    `pending` across a failed write and across a successful write alone; only
+    the reference step marks it processed.
+
+A failed `doc_put` therefore never costs the capture, and a crash between the
+steps leaves a pending capture next to a written draft — retry the steps, not
+a combined operation. Its idempotency key is derived from scope, kind, slug and
+`expected_revision`; after an ambiguous response, retry the identical
+`scope`/`slug`/`title`/`body` with the same `expected_revision`. Do not refresh
+the revision from `doc_get`, because that creates a new key and can write again.
+An existing record is replayed before document-existence and revision checks:
+an identical payload returns its stored result, even if the document has since
+advanced, while a changed `title` or `body` under the same derived key returns
+`idempotency_conflict`. Changing `scope` or `slug` creates a different key.
+Without an existing record, a stale revision returns `stale_revision`. If the
+`process_capture` response is lost, retry the identical payload with the same
+`idempotency_key`; its replay is checked before the capture revision, so do not
+substitute a new key for an ambiguous result.
 
 ### Sources and the reported boundary
 
@@ -171,7 +233,8 @@ call with `Unknown tool`, `allow` must execute it. The current keys are:
   "ztd_commit_plan": "ask",
   "ztd_record_review": "ask",
   "ztd_record_source_review": "ask",
-  "ztd_delete_source": "ask"
+  "ztd_delete_source": "ask",
+  "ztd_doc_put": "ask"
 }
 ```
 
@@ -204,3 +267,5 @@ record a reported batch, replay it without duplicating the capture, and prove
 opt-in flag: delete, key replay, `not_found` on a repeat, and an empty registry
 afterwards. `TestMCPDeleteSourceHiddenByDefault` pins the default, and
 `TestMCPDeleteSourceAnswersMissingAndForeignAlike` pins the uniform `not_found`.
+`TestMCPDocPut` covers draft creation/update, idempotency, scope and status
+guards, and the two-step reference flow.

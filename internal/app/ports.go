@@ -59,7 +59,7 @@ type Repo interface {
 	AddContext(ctx context.Context, cmd ContextCmd) (domain.Context, error)
 	ListContexts(ctx context.Context, b domain.ScopeBinding) ([]domain.Context, error)
 	PutDocument(ctx context.Context, cmd DocumentCmd, now time.Time) (domain.Document, error)
-	GetDocument(ctx context.Context, b domain.ScopeBinding, kind domain.DocumentKind, slug string) (domain.Document, error)
+	GetDocument(ctx context.Context, b domain.ScopeBinding, kind domain.DocumentKind, slug string, scope ...domain.ScopeID) (domain.Document, error)
 	ListDocuments(ctx context.Context, b domain.ScopeBinding, kind domain.DocumentKind) ([]domain.Document, error)
 	SearchDocuments(ctx context.Context, b domain.ScopeBinding, query string, kind domain.DocumentKind, limit int) ([]DocumentSearchHit, error)
 	ListDocumentHistory(ctx context.Context, b domain.ScopeBinding, filter DocumentHistoryFilter) ([]DocumentLogEntry, error)
@@ -276,16 +276,21 @@ type ContextCmd struct {
 }
 
 // DocumentCmd creates or updates the document identified by
-// (binding primary scope, Kind, Slug). Expected is 0 on create and the current
-// revision on update.
+// (Scope or binding primary scope, Kind, Slug). Expected is 0 on create and the current
+// revision on update. DraftOnly is a store-side access policy, not payload: it
+// forbids promoting a document past draft and, at Expected 0, refuses to touch
+// an existing document. It is excluded from the idempotency hash so the same
+// content hashes identically through the CLI and the MCP path.
 type DocumentCmd struct {
-	Binding  domain.ScopeBinding
-	Kind     domain.DocumentKind
-	Slug     string
-	Title    string
-	Body     string
-	Status   domain.DocumentStatus
-	Expected domain.Revision
+	Binding   domain.ScopeBinding
+	Scope     domain.ScopeID `json:"-"`
+	Kind      domain.DocumentKind
+	Slug      string
+	Title     string
+	Body      string
+	Status    domain.DocumentStatus
+	Expected  domain.Revision
+	DraftOnly bool `json:"-"`
 }
 
 // DocumentLogEntry is one append-only history event of a document, carrying
