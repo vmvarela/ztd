@@ -139,8 +139,9 @@ type readIn struct {
 }
 
 type readOut struct {
-	Captures  []domain.Capture  `json:"captures,omitempty"`
-	WorkItems []domain.WorkItem `json:"work_items,omitempty"`
+	Captures    []domain.Capture              `json:"captures,omitempty"`
+	WorkItems   []domain.WorkItem             `json:"work_items,omitempty"`
+	Checkpoints map[string]*domain.Checkpoint `json:"checkpoints,omitempty"`
 }
 
 type docSearchIn struct {
@@ -362,7 +363,7 @@ func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding, boundScope
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "read",
-		Description: "Read up to five captures or work items by ID. Out-of-scope IDs are not found.",
+		Description: "Read up to five captures or work items by ID; work items include their latest checkpoint, if any. Out-of-scope IDs are not found.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in readIn) (*mcp.CallToolResult, readOut, error) {
 		if len(in.IDs) == 0 {
 			return nil, readOut{}, domain.Invalid("ids is required")
@@ -380,11 +381,15 @@ func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding, boundScope
 				}
 				out.Captures = append(out.Captures, c)
 			case strings.HasPrefix(id, "T-"):
-				w, err := svc.Repo.GetWorkItem(ctx, b, domain.WorkItemID(id))
+				w, checkpoint, err := svc.Repo.GetWorkItemWithCheckpoint(ctx, b, domain.WorkItemID(id))
 				if err != nil {
 					return nil, readOut{}, toolError(err)
 				}
 				out.WorkItems = append(out.WorkItems, w)
+				if out.Checkpoints == nil {
+					out.Checkpoints = make(map[string]*domain.Checkpoint)
+				}
+				out.Checkpoints[id] = checkpoint
 			default:
 				return nil, readOut{}, domain.Invalid("unknown id %q", id)
 			}

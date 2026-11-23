@@ -20,6 +20,7 @@ type Repo interface {
 
 	// Work and planning.
 	GetWorkItem(ctx context.Context, b domain.ScopeBinding, id domain.WorkItemID) (domain.WorkItem, error)
+	GetWorkItemWithCheckpoint(ctx context.Context, b domain.ScopeBinding, id domain.WorkItemID) (domain.WorkItem, *domain.Checkpoint, error)
 	ListWorkItems(ctx context.Context, b domain.ScopeBinding, lifecycle domain.Lifecycle) ([]domain.WorkItem, error)
 	ListWorkItemsFiltered(ctx context.Context, b domain.ScopeBinding, filter ListWorkItemsFilter) ([]domain.WorkItem, error)
 	MoveWorkItem(ctx context.Context, cmd MoveWorkItemCmd, now time.Time) (domain.WorkItem, error)

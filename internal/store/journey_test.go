@@ -54,6 +54,45 @@ func TestFocusLifecycleDoesNotBumpWorkItemRevision(t *testing.T) {
 	}
 }
 
+func TestGetWorkItemWithCheckpoint(t *testing.T) {
+	e := newTestEnv(t)
+	item := e.workItems(1, "checkpoint-read")[0]
+
+	got, checkpoint, err := e.s.GetWorkItemWithCheckpoint(e.ctx(), e.binding, item.ID)
+	if err != nil || got.ID != item.ID || checkpoint != nil {
+		t.Fatalf("without checkpoint = (%+v, %v, %v), want item and nil checkpoint", got, checkpoint, err)
+	}
+
+	focus, _, err := e.s.StartFocus(e.ctx(), app.FocusStartCmd{
+		Binding: e.binding, Key: "checkpoint-read-focus", Item: item.ID,
+	}, e.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, result := range []string{"earlier", "latest"} {
+		if _, err := e.s.Checkpoint(e.ctx(), app.CheckpointCmd{
+			Binding: e.binding, Key: "checkpoint-read-" + result, Item: item.ID,
+			Result: result, NextAction: "resume from here",
+		}, e.now.Add(time.Duration(i+1)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, checkpoint, err = e.s.GetWorkItemWithCheckpoint(e.ctx(), e.binding, item.ID)
+	if err != nil || got.ID != item.ID || checkpoint == nil || checkpoint.Result != "latest" || checkpoint.NextAction != "resume from here" {
+		t.Fatalf("latest checkpoint = (%+v, %+v, %v), want result and next action", got, checkpoint, err)
+	}
+	if _, _, err := e.s.GetWorkItemWithCheckpoint(e.ctx(),
+		domain.ScopeBinding{Profile: e.binding.Profile, Actor: e.binding.Actor, Scopes: []domain.ScopeID{"opensource"}},
+		item.ID); !domain.Of(err, domain.ScopeDenied) {
+		t.Fatalf("out-of-scope work item = %v, want scope_denied", err)
+	}
+	if _, err := e.s.FinishFocus(e.ctx(), app.FocusFinishCmd{
+		Binding: e.binding, Key: "checkpoint-read-finish", Focus: focus.ID, Outcome: "done",
+	}, e.now.Add(3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRecordReviewUpsertsOnePeriod(t *testing.T) {
 	e := newTestEnv(t)
 	first, err := e.s.RecordReview(e.ctx(), app.ReviewCmd{

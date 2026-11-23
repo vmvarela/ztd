@@ -262,15 +262,16 @@ func TestMCPStdioJourney(t *testing.T) {
 		"idempotency_key": "mcp-process-1",
 		"capture_id":      cap.ID,
 		"outcome":         "work_items",
-		"titles":          []string{title},
+		"titles":          []string{title, "Check report references"},
 	}))
 	if pr.Capture.ID != cap.ID || pr.Capture.State != "processed" {
 		t.Fatalf("processed capture = %+v, want %s processed", pr.Capture, cap.ID)
 	}
-	if len(pr.WorkItems) != 1 {
-		t.Fatalf("work items = %d, want 1", len(pr.WorkItems))
+	if len(pr.WorkItems) != 2 {
+		t.Fatalf("work items = %d, want 2", len(pr.WorkItems))
 	}
 	item := pr.WorkItems[0]
+	unplanned := pr.WorkItems[1]
 	if !workItemIDRe.MatchString(item.ID) || item.Title != title || item.OriginCaptureID != cap.ID {
 		t.Fatalf("work item = %+v, want a %s titled %q from %s", item, workItemIDRe, title, cap.ID)
 	}
@@ -337,6 +338,55 @@ func TestMCPStdioJourney(t *testing.T) {
 	scUnmarshal(t, "focus_finish", finRes, &fin)
 	if fin.ID != focus.ID || fin.EndedAt == nil {
 		t.Fatalf("focus finish = %+v, want %s with ended_at", fin, focus.ID)
+	}
+
+	unplannedFocusRes := mcpCall(t, cs, "focus_start", map[string]any{
+		"idempotency_key": "mcp-focus-unplanned",
+		"work_item_id":    unplanned.ID,
+	})
+	wantToolOK(t, "focus_start", unplannedFocusRes)
+	unplannedFocus := scFocus(t, unplannedFocusRes)
+	checkpointReadRes := mcpCall(t, cs, "read", map[string]any{"ids": []string{item.ID, unplanned.ID}})
+	wantToolOK(t, "read", checkpointReadRes)
+	var checkpointRead struct {
+		Checkpoints map[string]*checkpointData `json:"checkpoints"`
+	}
+	scUnmarshal(t, "read", checkpointReadRes, &checkpointRead)
+	if checkpointRead.Checkpoints[item.ID] == nil ||
+		checkpointRead.Checkpoints[item.ID].Result != cp.Result ||
+		checkpointRead.Checkpoints[unplanned.ID] != nil {
+		t.Fatalf("read checkpoints before unplanned checkpoint = %+v, want saved and null entries", checkpointRead.Checkpoints)
+	}
+	for key, checkpoint := range map[string]struct{ result, nextAction string }{
+		"mcp-checkpoint-unplanned-1": {result: "references checked"},
+		"mcp-checkpoint-unplanned-2": {result: "report ready", nextAction: "send draft"},
+	} {
+		checkpointRes := mcpCall(t, cs, "checkpoint", map[string]any{
+			"idempotency_key": key,
+			"work_item_id":    unplanned.ID,
+			"result":          checkpoint.result,
+			"next_action":     checkpoint.nextAction,
+		})
+		wantToolOK(t, "checkpoint", checkpointRes)
+	}
+	checkpointReadRes = mcpCall(t, cs, "read", map[string]any{"ids": []string{unplanned.ID}})
+	wantToolOK(t, "read", checkpointReadRes)
+	scUnmarshal(t, "read", checkpointReadRes, &checkpointRead)
+	if checkpointRead.Checkpoints[unplanned.ID] == nil ||
+		checkpointRead.Checkpoints[unplanned.ID].Result != "report ready" ||
+		checkpointRead.Checkpoints[unplanned.ID].NextAction != "send draft" {
+		t.Fatalf("read unplanned checkpoint = %+v, want latest result and next action", checkpointRead.Checkpoints[unplanned.ID])
+	}
+	unplannedFinishRes := mcpCall(t, cs, "focus_finish", map[string]any{
+		"idempotency_key": "mcp-finish-unplanned",
+		"focus_id":        unplannedFocus.ID,
+		"outcome":         "done for now",
+	})
+	wantToolOK(t, "focus_finish", unplannedFinishRes)
+	var unplannedFinish focusData
+	scUnmarshal(t, "focus_finish", unplannedFinishRes, &unplannedFinish)
+	if unplannedFinish.ID != unplannedFocus.ID || unplannedFinish.EndedAt == nil {
+		t.Fatalf("read changed active focus: finish = %+v, focus = %+v", unplannedFinish, unplannedFocus)
 	}
 
 	// review: complete daily review for today.
@@ -415,6 +465,11 @@ func TestMCPStdioJourney(t *testing.T) {
 	text := toolText(hidden)
 	if !strings.Contains(text, "not_found") || strings.Contains(text, "personal") {
 		t.Fatalf("read foreign id leaked scope: %q", text)
+	}
+	hidden = mcpCall(t, foreign, "read", map[string]any{"ids": []string{item.ID}})
+	text = toolText(hidden)
+	if !hidden.IsError || !strings.Contains(text, "not_found") || strings.Contains(text, "personal") {
+		t.Fatalf("read foreign work item leaked data: %q", text)
 	}
 }
 

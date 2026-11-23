@@ -218,6 +218,9 @@ There is one open focus per actor across all scopes. A checkpoint records
 progress without changing the work item's revision. Starting a second focus
 fails with `focus_conflict`; it never closes the first one silently.
 
+`show WORK_ITEM_ID` includes the latest checkpoint, if one exists. Reading it
+does not start or change focus, so it also works for work outside today's plan.
+
 ## 5. Review
 
 ```sh

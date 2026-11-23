@@ -1491,11 +1491,14 @@ func (c *CLI) show(ctx context.Context, args []string) error {
 		c.succeed("show", cap)
 		return nil
 	}
-	item, err := svc.Repo.GetWorkItem(ctx, b, domain.WorkItemID(id))
+	item, checkpoint, err := svc.Repo.GetWorkItemWithCheckpoint(ctx, b, domain.WorkItemID(id))
 	if err != nil {
 		return err
 	}
-	c.succeed("show", item)
+	c.succeed("show", struct {
+		domain.WorkItem
+		Checkpoint *domain.Checkpoint `json:"checkpoint"`
+	}{item, checkpoint})
 	return nil
 }
 

@@ -40,6 +40,25 @@ func scanCheckpoint(sc scanner) (domain.Checkpoint, error) {
 	return cp, nil
 }
 
+// GetWorkItemWithCheckpoint returns an authorized work item and its latest checkpoint.
+func (s *Store) GetWorkItemWithCheckpoint(ctx context.Context, b domain.ScopeBinding, id domain.WorkItemID) (domain.WorkItem, *domain.Checkpoint, error) {
+	item, err := s.GetWorkItem(ctx, b, id)
+	if err != nil {
+		return domain.WorkItem{}, nil, err
+	}
+	row := s.db.QueryRowContext(ctx,
+		"SELECT "+checkpointColumns+" FROM checkpoints WHERE work_item_id = ? AND scope_id = ? ORDER BY revision DESC LIMIT 1",
+		string(item.ID), string(item.Scope))
+	cp, err := scanCheckpoint(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return item, nil, nil
+	}
+	if err != nil {
+		return domain.WorkItem{}, nil, err
+	}
+	return item, &cp, nil
+}
+
 func loadWorkItemTx(ctx context.Context, tx *sql.Tx, b domain.ScopeBinding, id domain.WorkItemID) (domain.WorkItem, error) {
 	clause, args, err := scopeClause(b)
 	if err != nil {
