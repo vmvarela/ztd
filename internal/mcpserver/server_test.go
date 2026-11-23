@@ -57,9 +57,9 @@ func newTestSession(t *testing.T) *mcp.ClientSession {
 	return clientSession
 }
 
-// TestToolCatalog pins the model-facing surface: sixteen tools, including the
-// source registry, the reported batch ingestion boundary and the read-only
-// document retrieval tools.
+// TestToolCatalog pins the model-facing surface: seventeen tools, including the
+// source registry, the reported batch ingestion boundary, source deletion and
+// the read-only document retrieval tools.
 func TestToolCatalog(t *testing.T) {
 	cs := newTestSession(t)
 	ctx := context.Background()
@@ -71,7 +71,7 @@ func TestToolCatalog(t *testing.T) {
 		"capture", "inbox_next", "process_capture", "prepare",
 		"commit_plan", "focus_start", "checkpoint", "focus_finish",
 		"record_review", "find", "read",
-		"sources", "record_source_review",
+		"sources", "record_source_review", "delete_source",
 		"doc_search", "doc_get", "doc_related",
 	}
 	if len(res.Tools) != len(want) {
@@ -109,6 +109,33 @@ func TestRecordSourceReviewRejectsObserved(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Fatalf("observed batch: isError=false, want true; content: %v", res.Content)
+	}
+	var text strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			text.WriteString(tc.Text)
+		}
+	}
+	if !strings.Contains(text.String(), "invalid_input") {
+		t.Fatalf("error text = %q, want invalid_input", text.String())
+	}
+}
+
+// TestDeleteSourceRequiresIdempotencyKey pins the mutation rule: a blank key
+// fails with invalid_input before any service or store code runs. A missing
+// key is refused earlier by the schema, since the field is required.
+func TestDeleteSourceRequiresIdempotencyKey(t *testing.T) {
+	cs := newTestSession(t)
+	ctx := context.Background()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "delete_source",
+		Arguments: map[string]any{"source_id": "notes", "idempotency_key": "  "},
+	})
+	if err != nil {
+		t.Fatalf("call tool: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("delete without key: isError=false, want true; content: %v", res.Content)
 	}
 	var text strings.Builder
 	for _, c := range res.Content {

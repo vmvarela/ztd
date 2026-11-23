@@ -334,6 +334,69 @@ func (s *Store) ListSources(ctx context.Context, b domain.ScopeBinding) ([]domai
 	return out, rows.Err()
 }
 
+// DeleteSource removes one registered source in the binding scopes.
+//
+// Pre: binding validates; id matches the source id pattern; the source exists
+// in the binding scopes. A source that any capture or source review still
+// refers to is not deleted, because those rows would dangle. Key is optional.
+// Post: one transaction deletes the source row and records a "deleted" history
+// event carrying its last state. With a key, the same key and payload replay
+// the stored source without a write; the same key with another payload is
+// idempotency_conflict. Any refusal or error writes nothing.
+func (s *Store) DeleteSource(ctx context.Context, cmd app.SourceDeleteCmd, now time.Time) (domain.Source, error) {
+	now = now.UTC().Truncate(time.Second)
+	if err := cmd.Binding.Validate(); err != nil {
+		return domain.Source{}, err
+	}
+	if !domain.ValidSourceID(cmd.ID) {
+		return domain.Source{}, domain.Invalid("source id must match [a-z][a-z0-9_-]{1,63}")
+	}
+	hash, err := hashPayload(cmd)
+	if err != nil {
+		return domain.Source{}, err
+	}
+	var out domain.Source
+	err = s.withTx(ctx, func(tx *sql.Tx) error {
+		if cmd.Key != "" {
+			done, err := lookupIdem(ctx, tx, "source_delete", cmd.Key, hash, &out)
+			if err != nil || done {
+				return err
+			}
+		}
+		src, err := loadSourceScope(ctx, tx, cmd.Binding, cmd.ID)
+		if err != nil {
+			return err
+		}
+		var captures, reviews int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT (SELECT count(*) FROM captures WHERE source_id = ?),
+			        (SELECT count(*) FROM source_reviews WHERE source_id = ?)`,
+			src.ID, src.ID).Scan(&captures, &reviews); err != nil {
+			return err
+		}
+		if captures > 0 || reviews > 0 {
+			return domain.NewError(domain.Conflict,
+				"source %s is referenced by %d captures and %d reviews; it cannot be deleted",
+				src.ID, captures, reviews)
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM sources WHERE id = ?", src.ID); err != nil {
+			return err
+		}
+		if err := insertHistory(ctx, tx, "source", src.ID, "deleted", string(src.Scope), "", 1, src, now); err != nil {
+			return err
+		}
+		out = src
+		if cmd.Key != "" {
+			return writeIdem(ctx, tx, "source_delete", cmd.Key, hash, out, now)
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.Source{}, err
+	}
+	return out, nil
+}
+
 // sourceReviewResult is the idempotent result of RecordSourceReview.
 type sourceReviewResult struct {
 	Review   domain.SourceReview `json:"review"`

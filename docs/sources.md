@@ -36,6 +36,25 @@ Re-adding the same `id` with an identical configuration returns the existing
 source without writing; the same `id` with a different configuration fails
 with `conflict`.
 
+## Deleting a source
+
+```sh
+ztd source delete --id notes-dir
+```
+
+Deletion removes the registry row and records a `deleted` history event with
+the source's last state; earlier `created` and `updated` history stays. A
+source is deleted only while nothing refers to it: if any capture or source
+review still names it, the command fails with `conflict` and writes nothing.
+Process or leave those captures alone rather than deleting around them.
+An unknown id is `not_found`.
+
+The operator command selects across every declared scope, like `source list
+--all`; the MCP tool is bound to the server's fixed scopes and answers a
+source outside them as `not_found`. Over MCP the same rule applies through `delete_source`, which requires
+an `idempotency_key`; see [MCP](mcp.md). Deleting a source is never
+implied by `source apply`: a file that omits an id leaves that source in place.
+
 ## User configuration
 
 Sources are user configuration, not product code. ZTD knows only the generic

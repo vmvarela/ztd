@@ -58,6 +58,7 @@ key.
 | `read` | Expand up to 5 work items or captures by ID |
 | `sources` | List configured sources: identity, kind, connector, coverage and cursor; never provider contents |
 | `record_source_review` | Ingest one reported batch for a source as pending captures |
+| `delete_source` | Delete one source that no capture or review refers to; requires `idempotency_key` |
 | `doc_search` | Full-text search over the bound scopes' documents: document, rank and snippet, best match first |
 | `doc_get` | Read one document by kind and slug, body included; a foreign-scope document is `not_found` |
 | `doc_related` | Return a document's outlinks and backlinks, resolved inside its own scope |
@@ -101,6 +102,13 @@ exist, their coverage (`unknown`, `unverified`, `partial`, `complete`,
 Source registration stays an operator command (`ztd source add`); no tool
 creates sources, and no tool contacts a provider. See
 [Sources](sources.md) for the batch file shape and the cursor rule.
+
+`delete_source` is the one registry mutation a model can call. It takes
+`source_id` and a required `idempotency_key`; a blank key is `invalid_input`.
+It removes the source only while no capture or review refers to it, and
+otherwise returns `conflict` with nothing written. Treat it as a destructive
+action: gate it with `ask`, as shown below. A retry with the same key replays
+the stored result.
 
 ## Prompts
 
@@ -149,7 +157,8 @@ call with `Unknown tool`, `allow` must execute it. The current keys are:
   "ztd_process_capture": "ask",
   "ztd_commit_plan": "ask",
   "ztd_record_review": "ask",
-  "ztd_record_source_review": "ask"
+  "ztd_record_source_review": "ask",
+  "ztd_delete_source": "ask"
 }
 ```
 
@@ -178,4 +187,5 @@ The integration test starts the real binary over stdio, runs the capture to
 review journey, checks a lost-response replay with the same idempotency key,
 and covers the source flow: register through the CLI, list with `sources`,
 record a reported batch, replay it without duplicating the capture, and prove
-`observed` is refused.
+`observed` is refused. `TestMCPDeleteSource` covers `delete_source`: delete,
+key replay, `not_found` on a repeat, and an empty registry afterwards.

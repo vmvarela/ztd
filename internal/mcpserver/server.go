@@ -165,6 +165,15 @@ type recordSourceReviewOut struct {
 	Captures []domain.Capture    `json:"captures"`
 }
 
+type deleteSourceIn struct {
+	SourceID       string `json:"source_id"`
+	IdempotencyKey string `json:"idempotency_key" jsonschema:"required; a retry with the same key replays the deletion"`
+}
+
+type deleteSourceOut struct {
+	Source domain.Source `json:"source"`
+}
+
 func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "capture",
@@ -313,6 +322,17 @@ func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding) {
 			captures = []domain.Capture{}
 		}
 		return nil, recordSourceReviewOut{Review: review, Captures: captures}, toolError(err)
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "delete_source",
+		Description: "Delete one registered source of this binding. Refused with conflict while any capture or review still refers to it; registration itself stays an operator command. idempotency_key is required.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in deleteSourceIn) (*mcp.CallToolResult, deleteSourceOut, error) {
+		if strings.TrimSpace(in.IdempotencyKey) == "" {
+			return nil, deleteSourceOut{}, domain.Invalid("idempotency key is required")
+		}
+		src, err := svc.DeleteSource(ctx, app.SourceDeleteCmd{Binding: b, ID: in.SourceID, Key: in.IdempotencyKey})
+		return nil, deleteSourceOut{Source: src}, toolError(err)
 	})
 
 	mcp.AddTool(s, &mcp.Tool{

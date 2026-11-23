@@ -98,6 +98,7 @@ COMMANDS
 	*source add --id ID --name NAME --scope S --kind capture|calendar --connector manual|directory|host_mcp*
 	*source apply* [--file PATH] | *source list* [--all | --scope S...]
 	*source review --source ID --batch B --key K --file FILE*
+	*source delete --id ID*
 	*doc put --kind K --slug S* [--scope X] [--title T] [--body TEXT | --file PATH] [--status draft|verified|superseded] [--expected N]
 	*doc get|list|search|related|log|lint|archive*
 		Read and maintain the document layer (knowledge cards, plans,

@@ -494,6 +494,18 @@ func validateSourceCmd(cmd SourceCmd) error {
 	return nil
 }
 
+// DeleteSource removes one source of the binding scopes that no capture or
+// review refers to. The store enforces the reference rule and the scope check.
+func (s *Service) DeleteSource(ctx context.Context, cmd SourceDeleteCmd) (domain.Source, error) {
+	if err := cmd.Binding.Validate(); err != nil {
+		return domain.Source{}, err
+	}
+	if !domain.ValidSourceID(cmd.ID) {
+		return domain.Source{}, domain.Invalid("source id must match [a-z][a-z0-9_-]{1,63}")
+	}
+	return s.Repo.DeleteSource(ctx, cmd, s.now())
+}
+
 // ListSources returns the sources of the binding scopes.
 func (s *Service) ListSources(ctx context.Context, b domain.ScopeBinding) ([]domain.Source, error) {
 	if err := b.Validate(); err != nil {

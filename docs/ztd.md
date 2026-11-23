@@ -337,6 +337,7 @@ configuration, not part of the daily loop:
   --scope personal --kind capture --connector directory --cadence daily
 ./ztd --db "$DB" source apply   # defaults to ~/.ztd/sources.json
 ./ztd --db "$DB" source list --all
+./ztd --db "$DB" source delete --id notes-dir   # only if nothing refers to it
 ```
 
 `source apply` synchronizes a user-owned JSON configuration (generic fields
@@ -347,6 +348,11 @@ and `source list` selects with exactly one of `--all` (the default) or a
 repeatable `--scope`. It shows each source's coverage (`unknown`, `unverified`,
 `partial`, `complete`, `failed`) and cursor for the selected scopes. It shows
 registry state only — no provider is contacted and no connector runs.
+
+`source delete --id ID` removes one registered source from the registry. It
+is refused with `conflict` while any capture or source review still refers to
+the source, so no captured item is left pointing at nothing; its history
+remains. An unknown id is `not_found`.
 
 Feed a reported batch from a JSON file:
 

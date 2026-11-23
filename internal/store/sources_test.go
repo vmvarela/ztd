@@ -727,3 +727,111 @@ func TestPrepareSurfacesSourceCoverage(t *testing.T) {
 		t.Fatalf("prepare sources = %+v, want gh unverified", brief.Sources)
 	}
 }
+
+func TestDeleteSourceRemovesUnreferencedSource(t *testing.T) {
+	e := newTestEnv(t)
+	svc := app.New(e.s)
+	src := e.mustAddSource("gh", "personal")
+	e.mustAddSource("mail", "personal")
+
+	got, err := svc.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "gh"})
+	if err != nil {
+		t.Fatalf("DeleteSource: %v", err)
+	}
+	if got.ID != src.ID || got.Scope != "personal" || got.Name != src.Name {
+		t.Fatalf("deleted source = %+v, want the registered row %+v", got, src)
+	}
+	if n := e.count(`SELECT count(*) FROM sources WHERE id = 'gh'`); n != 0 {
+		t.Fatalf("source row survived delete: %d", n)
+	}
+	if n := e.count(`SELECT count(*) FROM history_events WHERE entity_type = 'source' AND entity_id = 'gh' AND event = 'deleted'`); n != 1 {
+		t.Fatalf("deleted history events = %d, want 1 (created history must stay)", n)
+	}
+	if n := e.count(`SELECT count(*) FROM history_events WHERE entity_type = 'source' AND entity_id = 'gh' AND event = 'created'`); n != 1 {
+		t.Fatalf("created history events = %d, want 1 kept", n)
+	}
+	listed, err := e.s.ListSources(e.ctx(), e.binding)
+	if err != nil || len(listed) != 1 || listed[0].ID != "mail" {
+		t.Fatalf("after delete ListSources = %+v (err %v), want only mail", listed, err)
+	}
+}
+
+func TestDeleteSourceRefusesReferencedSource(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("gh", "personal")
+	cmd := reportedBatch("rev-1", "batch-1", domain.SourceItem{OriginalText: "a report"})
+	cmd.Binding = e.binding
+	cmd.SourceID = "gh"
+	if _, _, err := e.s.RecordSourceReview(e.ctx(), cmd, e.now); err != nil {
+		t.Fatalf("seed review: %v", err)
+	}
+	before := e.counts()
+
+	_, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "gh"}, e.now)
+	wantFamily(t, err, domain.Conflict)
+	if after := e.counts(); after != before {
+		t.Fatalf("refused delete wrote state: before %v after %v", before, after)
+	}
+	if n := e.count(`SELECT count(*) FROM sources WHERE id = 'gh'`); n != 1 {
+		t.Fatalf("referenced source was removed")
+	}
+}
+
+func TestDeleteSourceRefusesCapturesFromSource(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("gh", "personal")
+	if _, err := e.s.db.ExecContext(e.ctx(),
+		`INSERT INTO captures (id, scope_id, source_id, original_text, content_hash, captured_at,
+		   processing_state, revision)
+		 VALUES ('C-x', 'personal', 'gh', 'plain', 'h', ?, 'pending', 1)`, fmtTime(e.now)); err != nil {
+		t.Fatalf("seed capture: %v", err)
+	}
+	_, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "gh"}, e.now)
+	wantFamily(t, err, domain.Conflict)
+}
+
+func TestDeleteSourceScopeAndNotFound(t *testing.T) {
+	e := newTestEnv(t)
+	e.mustAddSource("personal-src", "personal")
+	onlyOS := domain.ScopeBinding{Profile: "personal", Actor: "tester", Scopes: []domain.ScopeID{"opensource"}}
+	before := e.counts()
+
+	_, err := e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: onlyOS, ID: "personal-src"}, e.now)
+	wantFamily(t, err, domain.ScopeDenied)
+	_, err = e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "missing"}, e.now)
+	wantFamily(t, err, domain.NotFound)
+	_, err = e.s.DeleteSource(e.ctx(), app.SourceDeleteCmd{Binding: e.binding, ID: "Bad Id"}, e.now)
+	wantFamily(t, err, domain.InvalidInput)
+	if after := e.counts(); after != before {
+		t.Fatalf("rejected deletes wrote state: before %v after %v", before, after)
+	}
+}
+
+func TestDeleteSourceIdempotentReplay(t *testing.T) {
+	e := newTestEnv(t)
+	first := e.mustAddSource("gh", "personal")
+	cmd := app.SourceDeleteCmd{Binding: e.binding, ID: "gh", Key: "del-1"}
+	if _, err := e.s.DeleteSource(e.ctx(), cmd, e.now); err != nil {
+		t.Fatalf("first delete: %v", err)
+	}
+	before := e.counts()
+
+	// The same key replays the stored source without writing, even though the
+	// row is gone now.
+	replay, err := e.s.DeleteSource(e.ctx(), cmd, e.now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if replay.ID != first.ID || replay.Name != first.Name {
+		t.Fatalf("replay = %+v, want stored source %+v", replay, first)
+	}
+	if after := e.counts(); after != before {
+		t.Fatalf("replay wrote state: before %v after %v", before, after)
+	}
+
+	// The same key for another id is an idempotency conflict.
+	e.mustAddSource("mail", "personal")
+	other := app.SourceDeleteCmd{Binding: e.binding, ID: "mail", Key: "del-1"}
+	_, err = e.s.DeleteSource(e.ctx(), other, e.now)
+	wantFamily(t, err, domain.IdempotencyConflict)
+}

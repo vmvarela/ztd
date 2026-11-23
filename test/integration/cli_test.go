@@ -1065,3 +1065,33 @@ func TestListMoveStatusAndAliases(t *testing.T) {
 	}
 	run(t, db, "routine", "done", "nope").wantErr(t, 1, "routine", "not_found")
 }
+
+// TestSourceDeleteFlow pins the operator delete: an unreferenced source is
+// removed, a second delete is not_found, and a source that a capture still
+// refers to is refused with conflict and stays registered.
+func TestSourceDeleteFlow(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "ztd.db")
+	initDB(t, db)
+	for _, id := range []string{"notes-dir", "scratch"} {
+		run(t, db, "source", "add", "--id", id, "--name", id,
+			"--scope", "personal", "--kind", "capture", "--connector", "manual").wantOK(t, "source add")
+	}
+
+	run(t, db, "source", "delete", "--id", "scratch", "unexpected").wantErr(t, 1, "source", "invalid_input")
+	gone := decode[sourceData](t, run(t, db, "source", "delete", "--id", "scratch").wantOK(t, "source delete"))
+	if gone.ID != "scratch" || gone.Scope != "personal" {
+		t.Fatalf("deleted = %+v, want scratch in personal", gone)
+	}
+	list := decode[[]sourceData](t, run(t, db, "source", "list").wantOK(t, "source list"))
+	if len(list) != 1 || list[0].ID != "notes-dir" {
+		t.Fatalf("list after delete = %+v, want [notes-dir]", list)
+	}
+	run(t, db, "source", "delete", "--id", "scratch").wantErr(t, 1, "source", "not_found")
+
+	run(t, db, "capture", "--source", "notes-dir", "a note from the directory").wantOK(t, "capture")
+	run(t, db, "source", "delete", "--id", "notes-dir").wantErr(t, 1, "source", "conflict")
+	list = decode[[]sourceData](t, run(t, db, "source", "list").wantOK(t, "source list"))
+	if len(list) != 1 || list[0].ID != "notes-dir" {
+		t.Fatalf("refused delete changed the registry: %+v", list)
+	}
+}

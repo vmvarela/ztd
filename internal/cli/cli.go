@@ -2106,7 +2106,7 @@ func (c *CLI) review(ctx context.Context, args []string) error {
 
 func (c *CLI) source(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return domain.Invalid("usage: source add|apply|list|review [flags]")
+		return domain.Invalid("usage: source add|apply|list|review|delete [flags]")
 	}
 	switch args[0] {
 	case "add":
@@ -2117,8 +2117,10 @@ func (c *CLI) source(ctx context.Context, args []string) error {
 		return c.sourceList(ctx, args[1:])
 	case "review":
 		return c.sourceReview(ctx, args[1:])
+	case "delete":
+		return c.sourceDelete(ctx, args[1:])
 	default:
-		return domain.Invalid("usage: source add|apply|list|review [flags]")
+		return domain.Invalid("usage: source add|apply|list|review|delete [flags]")
 	}
 }
 
@@ -2243,6 +2245,44 @@ func (c *CLI) sourceAdd(ctx context.Context, args []string) error {
 		return err
 	}
 	c.succeed("source add", src)
+	return nil
+}
+
+// sourceDelete removes one registered source. The binding is every declared
+// scope, as in source list --all, so a source outside them is not_found. A
+// source that captures or reviews still refer to is refused with conflict.
+func (c *CLI) sourceDelete(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("source delete", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	id := fs.String("id", "", "source id")
+	if err := fs.Parse(args); err != nil {
+		return domain.Invalid("%v", err)
+	}
+	if fs.NArg() != 0 {
+		return domain.Invalid("usage: source delete --id ID")
+	}
+	if *id == "" {
+		return domain.Invalid("--id is required")
+	}
+	st, svc, err := c.open()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	declared, err := svc.Repo.ListScopes(ctx)
+	if err != nil {
+		return err
+	}
+	ids := make([]domain.ScopeID, 0, len(declared))
+	for _, sc := range declared {
+		ids = append(ids, sc.ID)
+	}
+	b := domain.ScopeBinding{Profile: operatorProfile, Actor: domain.ActorID(c.Actor), Scopes: ids}
+	src, err := svc.DeleteSource(ctx, app.SourceDeleteCmd{Binding: b, ID: *id})
+	if err != nil {
+		return err
+	}
+	c.succeed("source delete", src)
 	return nil
 }
 
