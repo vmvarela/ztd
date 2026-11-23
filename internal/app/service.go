@@ -40,9 +40,6 @@ func (s *Service) Capture(ctx context.Context, cmd CaptureCmd) (domain.Capture, 
 	if strings.TrimSpace(cmd.Key) == "" {
 		return domain.Capture{}, domain.Invalid("idempotency key is required")
 	}
-	if cmd.SourceID == "" {
-		cmd.SourceID = "manual"
-	}
 	if len(cmd.Text) > 64*1024 {
 		return domain.Capture{}, domain.Invalid("capture text exceeds 64 KiB")
 	}

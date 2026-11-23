@@ -37,11 +37,11 @@ func TestToolErrorPassesOtherFamilies(t *testing.T) {
 
 // newTestSession serves the catalog over in-memory transports. svc stays nil:
 // every path exercised here rejects before reaching the service.
-func newTestSession(t *testing.T) *mcp.ClientSession {
+func newTestSession(t *testing.T, allowDeleteSource bool) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	binding := domain.ScopeBinding{Profile: "personal", Actor: "test", Scopes: []domain.ScopeID{"personal"}}
-	server := NewServer(nil, binding, "test")
+	server := NewServer(nil, binding, "test", allowDeleteSource)
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	serverSession, err := server.Connect(ctx, serverTransport, nil)
 	if err != nil {
@@ -57,11 +57,11 @@ func newTestSession(t *testing.T) *mcp.ClientSession {
 	return clientSession
 }
 
-// TestToolCatalog pins the model-facing surface: seventeen tools, including the
-// source registry, the reported batch ingestion boundary, source deletion and
-// the read-only document retrieval tools.
+// TestToolCatalog pins the model-facing surface: sixteen tools, including the
+// source registry, the reported batch ingestion boundary and the read-only
+// document retrieval tools. delete_source is hidden unless opted in.
 func TestToolCatalog(t *testing.T) {
-	cs := newTestSession(t)
+	cs := newTestSession(t, false)
 	ctx := context.Background()
 	res, err := cs.ListTools(ctx, nil)
 	if err != nil {
@@ -71,7 +71,7 @@ func TestToolCatalog(t *testing.T) {
 		"capture", "inbox_next", "process_capture", "prepare",
 		"commit_plan", "focus_start", "checkpoint", "focus_finish",
 		"record_review", "find", "read",
-		"sources", "record_source_review", "delete_source",
+		"sources", "record_source_review",
 		"doc_search", "doc_get", "doc_related",
 	}
 	if len(res.Tools) != len(want) {
@@ -86,13 +86,51 @@ func TestToolCatalog(t *testing.T) {
 			t.Errorf("tool %q not listed", name)
 		}
 	}
+	if have["delete_source"] {
+		t.Error("delete_source listed without the opt-in flag")
+	}
+}
+
+// TestDeleteSourceHiddenWithoutOptIn pins the default: without the startup
+// opt-in the tool is absent from the catalog and a direct call is refused by
+// the protocol, so nothing runs.
+func TestDeleteSourceHiddenWithoutOptIn(t *testing.T) {
+	cs := newTestSession(t, false)
+	ctx := context.Background()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "delete_source",
+		Arguments: map[string]any{"source_id": "notes", "idempotency_key": "k-1"},
+	})
+	if err == nil && (res == nil || !res.IsError) {
+		t.Fatalf("delete_source without opt-in succeeded: %v", res)
+	}
+}
+
+// TestDeleteSourceListedWithOptIn pins the explicit opt-in: the flag adds
+// exactly one tool to the default catalog.
+func TestDeleteSourceListedWithOptIn(t *testing.T) {
+	cs := newTestSession(t, true)
+	ctx := context.Background()
+	res, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	if len(res.Tools) != 17 {
+		t.Errorf("listed %d tools with opt-in, want 17", len(res.Tools))
+	}
+	for _, tool := range res.Tools {
+		if tool.Name == "delete_source" {
+			return
+		}
+	}
+	t.Error("delete_source not listed with the opt-in flag")
 }
 
 // TestRecordSourceReviewRejectsObserved pins the trust boundary: observed
 // coverage fails at the tool with invalid_input before any service or store
 // code runs, so a model cannot attest a provider exchange it never made.
 func TestRecordSourceReviewRejectsObserved(t *testing.T) {
-	cs := newTestSession(t)
+	cs := newTestSession(t, false)
 	ctx := context.Background()
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
 		Name: "record_source_review",
@@ -125,7 +163,7 @@ func TestRecordSourceReviewRejectsObserved(t *testing.T) {
 // fails with invalid_input before any service or store code runs. A missing
 // key is refused earlier by the schema, since the field is required.
 func TestDeleteSourceRequiresIdempotencyKey(t *testing.T) {
-	cs := newTestSession(t)
+	cs := newTestSession(t, true)
 	ctx := context.Background()
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "delete_source",

@@ -252,7 +252,9 @@ func (s *Store) Capture(ctx context.Context, cmd app.CaptureCmd, now time.Time) 
 	if source == "" {
 		source = "manual"
 	}
-	hash, err := hashPayload(cmd)
+	hashCmd := cmd
+	hashCmd.SourceID = source
+	hash, err := hashPayload(hashCmd)
 	if err != nil {
 		return domain.Capture{}, err
 	}
@@ -264,6 +266,13 @@ func (s *Store) Capture(ctx context.Context, cmd app.CaptureCmd, now time.Time) 
 		done, err := lookupIdem(ctx, tx, "capture", cmd.Key, hash, &cap)
 		if err != nil || done {
 			return err
+		}
+		// An implicit source (empty SourceID) stays the unregistered manual
+		// entry point; an explicit one must be registered in the primary scope.
+		if cmd.SourceID != "" {
+			if err := checkSameScope(ctx, tx, "sources", "source", source, scope); err != nil {
+				return err
+			}
 		}
 		if cmd.ExternalID != nil {
 			var one int

@@ -369,6 +369,15 @@ func TestCaptureIdempotencyConflictsAndExternalIdentity(t *testing.T) {
 	if string(a) != string(b) {
 		t.Fatalf("replay differs:\n%s\n%s", a, b)
 	}
+	legacyReplay, err := e.s.Capture(ctx, app.CaptureCmd{
+		Binding: e.binding, Key: "k1", Text: "hola", SourceID: "manual",
+	}, later)
+	if err != nil {
+		t.Fatalf("replay with the pre-upgrade manual source default: %v", err)
+	}
+	if legacyReplay.ID != c1.ID {
+		t.Fatalf("pre-upgrade replay ID = %s, want %s", legacyReplay.ID, c1.ID)
+	}
 	if n := e.count(`SELECT count(*) FROM captures`); n != 1 {
 		t.Fatalf("captures after replay = %d, want 1", n)
 	}
@@ -393,6 +402,7 @@ func TestCaptureIdempotencyConflictsAndExternalIdentity(t *testing.T) {
 	}
 
 	// External identity: first insert wins, exact duplicate triple conflicts.
+	e.mustAddSource("github", "personal")
 	eid, erev := "gh-42", "3"
 	ext, err := e.s.Capture(ctx, app.CaptureCmd{
 		Binding: e.binding, Key: "k3", Text: "issue triage",

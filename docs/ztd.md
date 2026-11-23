@@ -350,9 +350,10 @@ repeatable `--scope`. It shows each source's coverage (`unknown`, `unverified`,
 registry state only — no provider is contacted and no connector runs.
 
 `source delete --id ID` removes one registered source from the registry. It
-is refused with `conflict` while any capture or source review still refers to
-the source, so no captured item is left pointing at nothing; its history
-remains. An unknown id is `not_found`.
+is refused with `conflict` while a capture of its scope or any source review
+still refers to the source, so no captured item is left pointing at nothing;
+its history remains. An unknown id is `not_found`. A deleted id cannot be
+registered again: `source add` and `source apply` refuse it with `conflict`.
 
 Feed a reported batch from a JSON file:
 

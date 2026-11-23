@@ -1351,7 +1351,7 @@ func (c *CLI) capture(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("capture", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	scope := fs.String("scope", "", "scope")
-	source := fs.String("source", "manual", "source id")
+	source := fs.String("source", "", "registered source id; default is the manual entry point")
 	key := fs.String("key", "", "idempotency key")
 	stdin := fs.Bool("stdin", false, "read text from stdin")
 	if err := fs.Parse(args); err != nil {
@@ -2865,11 +2865,13 @@ func (c *CLI) checkBindings(ctx context.Context) error {
 // protocol stream and failures go back through the CLI's stderr path.
 // Without --scope (or ZTD_SCOPES) the server starts with the default
 // personal binding, so a client session must select its scope explicitly:
-// `ztd mcp --scope client:<name>`.
+// `ztd mcp --scope client:<name>`. --allow-delete-source registers the
+// destructive delete_source tool; without it the tool does not exist.
 func (c *CLI) mcp(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	scope := fs.String("scope", "", "scope")
+	allowDelete := fs.Bool("allow-delete-source", false, "register delete_source; only where the host gates MCP calls with a real approval prompt (not --auto)")
 	if err := fs.Parse(args); err != nil {
 		return domain.Invalid("%v", err)
 	}
@@ -2878,7 +2880,7 @@ func (c *CLI) mcp(ctx context.Context, args []string) error {
 		return err
 	}
 	defer st.Close()
-	return mcpserver.Serve(ctx, svc, b, Version)
+	return mcpserver.Serve(ctx, svc, b, Version, *allowDelete)
 }
 
 func newKey(prefix string) string {
@@ -2937,7 +2939,7 @@ const usage = `ztd — local ZTD
   export --out FILE | restore --from FILE | snapshot --out FILE
   check [--scope S] [--bindings]  (--bindings validates the .ztd.json hint)
   recover                            (compatibility no-op; no Markdown journal)
-  mcp [--scope S]
+  mcp [--scope S] [--allow-delete-source]
 
   Scope binding (one store, one set of tasks; the binding only narrows the view):
   --scope, then ZTD_SCOPES, then .ztd.json, else the profile scopes

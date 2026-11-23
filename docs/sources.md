@@ -36,6 +36,10 @@ Re-adding the same `id` with an identical configuration returns the existing
 source without writing; the same `id` with a different configuration fails
 with `conflict`.
 
+For a manual capture, omit `--source` (or MCP `source_id`); it uses the
+unregistered `manual` entry point. An explicit source ID must name a registered
+source in the capture's primary scope.
+
 ## Deleting a source
 
 ```sh
@@ -44,16 +48,21 @@ ztd source delete --id notes-dir
 
 Deletion removes the registry row and records a `deleted` history event with
 the source's last state; earlier `created` and `updated` history stays. A
-source is deleted only while nothing refers to it: if any capture or source
-review still names it, the command fails with `conflict` and writes nothing.
+source is deleted only while nothing refers to it: if a capture of its scope or
+any source review still names it, the command fails with `conflict` and writes
+nothing.
 Process or leave those captures alone rather than deleting around them.
 An unknown id is `not_found`.
 
 The operator command selects across every declared scope, like `source list
---all`; the MCP tool is bound to the server's fixed scopes and answers a
-source outside them as `not_found`. Over MCP the same rule applies through `delete_source`, which requires
-an `idempotency_key`; see [MCP](mcp.md). Deleting a source is never
-implied by `source apply`: a file that omits an id leaves that source in place.
+--all`. The MCP tool `delete_source` is bound to the server's fixed scopes,
+requires an `idempotency_key`, and exists only when the server starts with
+`--allow-delete-source`; a source outside those scopes and a missing source
+both answer `not_found`. See [MCP](mcp.md). Deleting a source is never implied
+by `source apply`: a file that omits an id leaves that source in place.
+
+A deleted id is retired. `source add` and `source apply` refuse it with
+`conflict`, so its deleted history stays unambiguous.
 
 ## User configuration
 

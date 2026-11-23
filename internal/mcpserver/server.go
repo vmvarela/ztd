@@ -23,22 +23,27 @@ const (
 )
 
 // NewServer builds the typed tool and prompt catalog for one fixed binding.
-func NewServer(svc *app.Service, binding domain.ScopeBinding, version string) *mcp.Server {
+// delete_source is registered only when allowDeleteSource is set: it is the one
+// destructive tool, so the host must opt in at startup.
+func NewServer(svc *app.Service, binding domain.ScopeBinding, version string, allowDeleteSource bool) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "ztd", Version: version}, nil)
 	addTools(s, svc, binding)
+	if allowDeleteSource {
+		addDeleteSourceTool(s, svc, binding)
+	}
 	addPrompts(s)
 	return s
 }
 
 // Serve runs the server on stdin/stdout until the context ends.
-func Serve(ctx context.Context, svc *app.Service, binding domain.ScopeBinding, version string) error {
-	return NewServer(svc, binding, version).Run(ctx, &mcp.StdioTransport{})
+func Serve(ctx context.Context, svc *app.Service, binding domain.ScopeBinding, version string, allowDeleteSource bool) error {
+	return NewServer(svc, binding, version, allowDeleteSource).Run(ctx, &mcp.StdioTransport{})
 }
 
 type captureIn struct {
 	IdempotencyKey string `json:"idempotency_key" jsonschema:"caller-supplied key; reuse it when retrying the same capture"`
 	Text           string `json:"text" jsonschema:"captured text, preserved verbatim"`
-	SourceID       string `json:"source_id,omitempty" jsonschema:"source identifier, defaults to manual"`
+	SourceID       string `json:"source_id,omitempty" jsonschema:"registered source identifier of this scope; empty means the manual entry point"`
 }
 
 type processIn struct {
@@ -179,12 +184,8 @@ func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding) {
 		Name:        "capture",
 		Description: "Capture one item into the inbox. Never filters or classifies it.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in captureIn) (*mcp.CallToolResult, domain.Capture, error) {
-		source := in.SourceID
-		if source == "" {
-			source = "manual"
-		}
 		out, err := svc.Capture(ctx, app.CaptureCmd{
-			Binding: b, Key: in.IdempotencyKey, Text: in.Text, SourceID: source,
+			Binding: b, Key: in.IdempotencyKey, Text: in.Text, SourceID: in.SourceID,
 		})
 		return nil, out, toolError(err)
 	})
@@ -325,17 +326,6 @@ func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "delete_source",
-		Description: "Delete one registered source of this binding. Refused with conflict while any capture or review still refers to it; registration itself stays an operator command. idempotency_key is required.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in deleteSourceIn) (*mcp.CallToolResult, deleteSourceOut, error) {
-		if strings.TrimSpace(in.IdempotencyKey) == "" {
-			return nil, deleteSourceOut{}, domain.Invalid("idempotency key is required")
-		}
-		src, err := svc.DeleteSource(ctx, app.SourceDeleteCmd{Binding: b, ID: in.SourceID, Key: in.IdempotencyKey})
-		return nil, deleteSourceOut{Source: src}, toolError(err)
-	})
-
-	mcp.AddTool(s, &mcp.Tool{
 		Name:        "find",
 		Description: "Find a few work items by title. Returns at most 20, default 8.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in findIn) (*mcp.CallToolResult, findOut, error) {
@@ -410,6 +400,25 @@ func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in docRefIn) (*mcp.CallToolResult, app.DocumentRelations, error) {
 		rel, err := svc.RelatedDocuments(ctx, b, domain.DocumentKind(in.Kind), in.Slug)
 		return nil, rel, toolError(err)
+	})
+}
+
+// addDeleteSourceTool registers the opt-in destructive tool. A missing source
+// and a source outside the binding both answer the same not_found, so a
+// model cannot probe other scopes through deletion.
+func addDeleteSourceTool(s *mcp.Server, svc *app.Service, b domain.ScopeBinding) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "delete_source",
+		Description: "Delete one registered source of this binding. Refused with conflict while a capture of its scope or any review still refers to it; registration itself stays an operator command. idempotency_key is required.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in deleteSourceIn) (*mcp.CallToolResult, deleteSourceOut, error) {
+		if strings.TrimSpace(in.IdempotencyKey) == "" {
+			return nil, deleteSourceOut{}, domain.Invalid("idempotency key is required")
+		}
+		src, err := svc.DeleteSource(ctx, app.SourceDeleteCmd{Binding: b, ID: in.SourceID, Key: in.IdempotencyKey})
+		if family := domain.FamilyOf(err); family == domain.NotFound || family == domain.ScopeDenied {
+			err = domain.NewError(domain.NotFound, "not found")
+		}
+		return nil, deleteSourceOut{Source: src}, toolError(err)
 	})
 }
 
