@@ -26,8 +26,7 @@ Without a URL, ask; do not invent remotes or per-scope defaults.
 1. The scope is `<context>` or `<context>/<client>`; if the scope requires a
    client and it is missing, or the URL is missing, ask. Register a new context
    with `ztd context add NAME --scope S` or a client with `ztd scope add --id
-   client:NAME --kind client`, and create its knowledge index (`ztd doc put
-   --kind knowledge_index`) linked from its context's index.
+   client:NAME --kind client`. Knowledge pages need no manual index.
 2. Create the project record with `ztd project add <id> --scope S
    [--desired-outcome TEXT] [--repo-url URL] [--clone-path PATH]`; a project
    note, when needed, is `ztd doc put --kind project_note`. Ask for the
@@ -46,9 +45,8 @@ Without a URL, ask; do not invent remotes or per-scope defaults.
 6. After success, check the Git root and remote against the project record
    (`ztd project show ID`); there is no project-update command, so the agreed
    `--clone-path` is registered before cloning and a different configuration
-   on re-add is `conflict`. Create the project knowledge index (`ztd doc put
-   --kind knowledge_index`) and link it from the
-   parent and the note.
+   on re-add is `conflict`. Save useful project knowledge with
+   `ztd knowledge save --scope S --project ID ...`; search discovers it.
 7. Read the clone's instructions and development guide before running code.
 
 ## bind — explicit repo binding/setup only

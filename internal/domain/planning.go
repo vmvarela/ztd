@@ -48,37 +48,20 @@ type PlanItem struct {
 }
 
 type Plan struct {
-	ID        PlanID     `json:"id"`
-	Profile   ProfileID  `json:"profile"`
-	Kind      PlanKind   `json:"kind"`
-	Period    string     `json:"period"`
-	Status    PlanStatus `json:"status"`
-	Revision  Revision   `json:"revision"`
-	Items     []PlanItem `json:"items,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
-}
-
-type DailyLimitOverride struct {
-	ID        string    `json:"id"`
-	Actor     ActorID   `json:"actor_id"`
-	LocalDate string    `json:"local_date"`
-	Rule      string    `json:"rule"`
-	Reason    string    `json:"reason"`
-	CreatedBy string    `json:"created_by"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-type CalendarReviewAssertion struct {
-	ID        string    `json:"id"`
-	Profile   ProfileID `json:"profile_id"`
-	Actor     ActorID   `json:"actor_id"`
-	LocalDate string    `json:"local_date"`
-	Statement string    `json:"statement"`
-	CreatedAt time.Time `json:"created_at"`
+	ExceptionReason string     `json:"exception_reason,omitempty"`
+	ID              PlanID     `json:"id"`
+	Profile         ProfileID  `json:"profile"`
+	Kind            PlanKind   `json:"kind"`
+	Period          string     `json:"period"`
+	Status          PlanStatus `json:"status"`
+	Revision        Revision   `json:"revision"`
+	Items           []PlanItem `json:"items,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 type Goal struct {
+	Scope     ScopeID   `json:"scope"`
 	ID        string    `json:"id"`
 	Profile   ProfileID `json:"profile_id"`
 	Kind      string    `json:"kind"`
@@ -86,4 +69,9 @@ type Goal struct {
 	EndOn     string    `json:"end_on,omitempty"`
 	Statement string    `json:"statement"`
 	Status    string    `json:"status"`
+}
+
+type Settings struct {
+	Owner    string `json:"owner"`
+	Timezone string `json:"timezone"`
 }

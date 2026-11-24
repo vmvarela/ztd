@@ -184,15 +184,19 @@ func (s *Service) SetGoal(ctx context.Context, cmd GoalCmd) (domain.Goal, error)
 		return domain.Goal{}, domain.Invalid("idempotency key is required")
 	}
 	switch cmd.Kind {
-	case "primary", "subgoal":
+	case "primary":
 	default:
-		return domain.Goal{}, domain.Invalid("goal kind must be primary or subgoal")
+		return domain.Goal{}, domain.Invalid("ZTD supports one active goal; use projects for its next steps")
 	}
 	if strings.TrimSpace(cmd.Statement) == "" {
 		return domain.Goal{}, domain.Invalid("goal statement is required")
 	}
 	if cmd.StartOn == "" {
-		cmd.StartOn = domain.FormatDate(s.now())
+		var err error
+		cmd.StartOn, err = s.Today(ctx)
+		if err != nil {
+			return domain.Goal{}, err
+		}
 	}
 	if _, err := time.Parse("2006-01-02", cmd.StartOn); err != nil {
 		return domain.Goal{}, domain.Invalid("start_on must be YYYY-MM-DD")
@@ -228,7 +232,11 @@ func (s *Service) Prepare(ctx context.Context, b domain.ScopeBinding, date strin
 		return PlanBrief{}, err
 	}
 	if date == "" {
-		date = domain.FormatDate(s.now())
+		var err error
+		date, err = s.Today(ctx)
+		if err != nil {
+			return PlanBrief{}, err
+		}
 	}
 	return s.Repo.Prepare(ctx, b, date)
 }
@@ -245,7 +253,14 @@ func (s *Service) CommitPlan(ctx context.Context, cmd CommitPlanCmd) (domain.Pla
 	}
 	seen := make(map[domain.WorkItemID]bool)
 	mits := 0
-	for _, item := range cmd.Items {
+	for i := range cmd.Items {
+		if cmd.Items[i].Role == "" {
+			cmd.Items[i].Role = domain.MITRole
+			if cmd.Kind == domain.WeeklyPlan {
+				cmd.Items[i].Role = domain.BigRockRole
+			}
+		}
+		item := cmd.Items[i]
 		if seen[item.WorkItemID] {
 			return domain.Plan{}, domain.Invalid("duplicate plan item %s", item.WorkItemID)
 		}
@@ -257,7 +272,7 @@ func (s *Service) CommitPlan(ctx context.Context, cmd CommitPlanCmd) (domain.Pla
 			mits++
 		}
 	}
-	if mits > 3 && cmd.OverrideID == "" {
+	if mits > 3 && cmd.OverrideID == "" && strings.TrimSpace(cmd.ExceptionReason) == "" {
 		return domain.Plan{}, domain.NewError(domain.RulesAcknowledgement, "daily plan has %d MITs; an override is required", mits)
 	}
 	return s.Repo.CommitPlan(ctx, cmd, s.now())
@@ -599,6 +614,17 @@ func ValidateDocumentCmd(cmd DocumentCmd) error {
 	if strings.TrimSpace(cmd.Body) == "" {
 		return domain.Invalid("document body is required")
 	}
+	if len(cmd.Body)+len(cmd.Title)+len(cmd.Slug) > 512*1024 {
+		return domain.Invalid("document exceeds 512 KiB")
+	}
+	if len(cmd.Sources) > 100 {
+		return domain.Invalid("at most 100 sources are allowed")
+	}
+	for _, source := range cmd.Sources {
+		if strings.TrimSpace(source) == "" || len(source) > 2048 {
+			return domain.Invalid("source must be non-empty and at most 2048 bytes")
+		}
+	}
 	if cmd.Expected < 0 {
 		return domain.Invalid("expected revision cannot be negative")
 	}
@@ -849,4 +875,16 @@ func (s *Service) ImportDocuments(ctx context.Context, cmd ImportDocumentsCmd) (
 		return DocumentsImportReport{}, domain.Invalid("source copy is required")
 	}
 	return s.Repo.ImportDocuments(ctx, cmd, s.now())
+}
+
+func (s *Service) Today(ctx context.Context) (string, error) {
+	settings, err := s.Repo.Settings(ctx)
+	if err != nil {
+		return "", err
+	}
+	loc, err := time.LoadLocation(settings.Timezone)
+	if err != nil {
+		return "", domain.Invalid("invalid configured timezone")
+	}
+	return s.now().In(loc).Format("2006-01-02"), nil
 }

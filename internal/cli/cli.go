@@ -440,6 +440,10 @@ func (c *CLI) run(ctx context.Context, command string, args []string) error {
 		return c.find(ctx, args)
 	case "list":
 		return c.list(ctx, args)
+	case "task":
+		return c.task(ctx, args)
+	case "checkpoint":
+		return c.focus(ctx, append([]string{"checkpoint"}, args...))
 	case "move":
 		return c.move(ctx, args)
 	case "status":
@@ -468,6 +472,10 @@ func (c *CLI) run(ctx context.Context, command string, args []string) error {
 		return c.source(ctx, args)
 	case "context":
 		return c.context(ctx, args)
+	case "settings":
+		return c.settings(ctx, args)
+	case "knowledge":
+		return c.knowledge(ctx, args)
 	case "doc":
 		return c.doc(ctx, args)
 	case "project":
@@ -1421,6 +1429,13 @@ func (c *CLI) process(ctx context.Context, args []string) error {
 	reviewAfter := fs.String("review-after", "", "YYYY-MM-DD")
 	reason := fs.String("reason", "", "reason")
 	evidence := fs.String("evidence", "", "result evidence")
+	docSlug := fs.String("document-slug", "", "knowledge page slug")
+	docTitle := fs.String("document-title", "", "knowledge page title")
+	docBody := fs.String("document-body", "", "knowledge page body")
+	docExpected := fs.Int64("document-expected", 0, "page revision")
+	docID := fs.String("document-id", "", "existing reference page ID")
+	var sources stringList
+	fs.Var(&sources, "source", "knowledge source reference")
 	var titles stringList
 	fs.Var(&titles, "title", "work item title (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -1459,7 +1474,12 @@ func (c *CLI) process(ctx context.Context, args []string) error {
 		t = t.UTC()
 		o.ReviewAfter = &t
 	}
-	res, err := svc.Process(ctx, app.ProcessCmd{Binding: b, Key: *key, ID: domain.CaptureID(fs.Arg(0)), Expected: domain.Revision(*expected), Outcome: o})
+	var document *app.DocumentCmd
+	if *docSlug != "" {
+		document = &app.DocumentCmd{Kind: domain.DocumentKnowledge, Slug: *docSlug, Title: *docTitle, Body: *docBody, Sources: sources, Status: domain.DocumentDraft, Expected: domain.Revision(*docExpected)}
+	}
+	o.DocumentID = *docID
+	res, err := svc.Process(ctx, app.ProcessCmd{Binding: b, Key: *key, ID: domain.CaptureID(fs.Arg(0)), Expected: domain.Revision(*expected), Outcome: o, Document: document})
 	if err != nil {
 		return err
 	}
@@ -1926,7 +1946,10 @@ func (c *CLI) goalShow(ctx context.Context, args []string) error {
 }
 
 func (c *CLI) plan(ctx context.Context, args []string) error {
-	if len(args) == 0 || args[0] != "commit" {
+	if len(args) > 0 && args[0] == "show" {
+		return c.planShow(ctx, args[1:])
+	}
+	if len(args) == 0 || (args[0] != "commit" && args[0] != "set") {
 		return c.planRead(ctx, args)
 	}
 	fs := flag.NewFlagSet("plan commit", flag.ContinueOnError)
@@ -1935,7 +1958,8 @@ func (c *CLI) plan(ctx context.Context, args []string) error {
 	kind := fs.String("kind", "daily", "daily|weekly")
 	period := fs.String("period", "", "YYYY-MM-DD or YYYY-Www")
 	expected := fs.Int64("expected", 0, "expected plan revision")
-	override := fs.String("override", "", "daily limit override id")
+	override := fs.String("override", "", "legacy override id")
+	exception := fs.String("exception-reason", "", "reason for more than three daily priorities")
 	key := fs.String("key", "", "idempotency key")
 	var items stringList
 	fs.Var(&items, "item", "ID:role (repeatable; role mit|big_rock|batch)")
@@ -1954,14 +1978,18 @@ func (c *CLI) plan(ctx context.Context, args []string) error {
 	for i, raw := range items {
 		parts := strings.SplitN(raw, ":", 2)
 		if len(parts) != 2 {
-			return domain.Invalid("item %q must be ID:role", raw)
+			role := "mit"
+			if *kind == "weekly" {
+				role = "big_rock"
+			}
+			parts = []string{raw, role}
 		}
 		parsed = append(parsed, domain.PlanItem{WorkItemID: domain.WorkItemID(parts[0]), Role: domain.PlanRole(parts[1]), Position: i})
 	}
 	if *key == "" {
 		*key = newKey("plan")
 	}
-	plan, err := svc.CommitPlan(ctx, app.CommitPlanCmd{Binding: b, Key: *key, Kind: domain.PlanKind(*kind), Period: *period, Expected: domain.Revision(*expected), Items: parsed, OverrideID: *override})
+	plan, err := svc.CommitPlan(ctx, app.CommitPlanCmd{Binding: b, Key: *key, Kind: domain.PlanKind(*kind), Period: *period, Expected: domain.Revision(*expected), Items: parsed, OverrideID: *override, ExceptionReason: *exception})
 	if err != nil {
 		return err
 	}
@@ -2077,6 +2105,9 @@ func (c *CLI) focus(ctx context.Context, args []string) error {
 }
 
 func (c *CLI) review(ctx context.Context, args []string) error {
+	if len(args) > 0 && (args[0] == "show" || args[0] == "save") {
+		return c.reviewPage(ctx, args)
+	}
 	if len(args) == 0 {
 		return domain.Invalid("usage: review daily|weekly|monthly|yearly [flags]")
 	}
@@ -2902,6 +2933,11 @@ const usage = `ztd — local ZTD
   capture TEXT... [--scope S] [--source ID] [--key K]
   inbox next [--scope S]
   process --outcome K [--title T] [--expected N] ID
+  task list|show|update|done|cancel [--id ID] [--scope S] [--expected REV]
+  knowledge search --query Q [--scope S] [--project P] [--limit N]
+  knowledge read|related --slug S [--scope X]
+  knowledge save --scope X --slug S --title T --body TEXT --expected REV [--source URL]...
+  settings [--timezone IANA_ZONE]
   show ID
   find QUERY
   list [--list inbox|next|waiting|someday|archive] [--context C] [--project P] [--scope S]
@@ -2916,8 +2952,12 @@ const usage = `ztd — local ZTD
   prepare [--scope S] [--date YYYY-MM-DD]
   goal set --statement S | goal show | goal complete|cancel [--scope S]
   plan [--context C] [--date D] [--scope S]   (read-only prepare brief)
+  plan show --kind daily|weekly --period P [--scope S]
+  plan set --kind daily|weekly --period P [--item ID]... [--expected REV] [--exception-reason TEXT]
   plan commit --period P --item ID:role
   focus start ID | focus checkpoint ID | focus finish FOCUS
+  checkpoint [--result TEXT] [--next TEXT] ID
+  review show|save --scope S --kind K --period P [--outcomes TEXT --coverage TEXT]
   review daily|weekly|monthly|yearly
   source add --id ID --name NAME --scope S --kind capture|calendar --connector manual|directory|host_mcp
   source apply [--file PATH]        (default ~/.ztd/sources.json, or ZTD_SOURCES)

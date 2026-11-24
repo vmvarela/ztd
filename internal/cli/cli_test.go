@@ -235,8 +235,8 @@ func TestBindingResolvesImplicitProfile(t *testing.T) {
 		t.Fatalf("narrowed scopes = %v, want [salud]", narrow.Scopes)
 	}
 
-	// A scope the profile does not cover is refused, even though it exists.
-	if _, err := c.binding(ctx, svc, []string{"trabajo"}); !domain.Of(err, domain.ScopeDenied) {
+	// Unknown scopes are refused; every declared scope can be explicitly selected.
+	if _, err := c.binding(ctx, svc, []string{"undeclared"}); !domain.Of(err, domain.ScopeDenied) {
 		t.Fatalf("foreign scope: got %v, want scope_denied", err)
 	}
 }
@@ -302,13 +302,9 @@ func TestBindingDefaultView(t *testing.T) {
 	}
 	wantScopes(t, b.Scopes, defaultViewWant...)
 
-	// A profile that only covers a client scope falls back to it.
-	if _, err := svc.SetProfileScopes(ctx, implicitProfile, []domain.ScopeID{"client:prisamedia"}); err != nil {
-		t.Fatalf("SetProfileScopes: %v", err)
-	}
-	clientOnly, err := c.binding(ctx, svc, nil)
+	clientOnly, err := c.binding(ctx, svc, []string{"client:prisamedia"})
 	if err != nil {
-		t.Fatalf("client-only binding: %v", err)
+		t.Fatal(err)
 	}
 	wantScopes(t, clientOnly.Scopes, "client:prisamedia")
 }

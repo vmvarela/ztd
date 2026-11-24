@@ -39,6 +39,7 @@ type Capture struct {
 }
 
 type Outcome struct {
+	DocumentID     string      `json:"document_id,omitempty"`
 	Kind           OutcomeKind `json:"kind"`
 	Titles         []string    `json:"titles,omitempty"`
 	ProjectID      *ProjectID  `json:"project_id,omitempty"`

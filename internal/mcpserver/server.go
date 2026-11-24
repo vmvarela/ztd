@@ -36,6 +36,8 @@ func NewServer(svc *app.Service, binding domain.ScopeBinding, version string, al
 	}
 	boundScopes := strings.Join(scopeNames, ", ")
 	addTools(s, svc, binding, boundScopes)
+	addKnowledgeTools(s, svc, binding)
+	addPlanningTools(s, svc, binding)
 	if allowDeleteSource {
 		addDeleteSourceTool(s, svc, binding)
 	}
@@ -55,18 +57,20 @@ type captureIn struct {
 }
 
 type processIn struct {
-	IdempotencyKey string   `json:"idempotency_key"`
-	CaptureID      string   `json:"capture_id"`
-	Outcome        string   `json:"outcome" jsonschema:"work_items, reference, immediate, discard or defer"`
-	Titles         []string `json:"titles,omitempty" jsonschema:"one title per work item; required for work_items"`
-	ProjectID      string   `json:"project_id,omitempty"`
-	AreaID         string   `json:"area_id,omitempty"`
-	ContextID      string   `json:"context_id,omitempty"`
-	WaitingOn      string   `json:"waiting_on,omitempty"`
-	ReviewAfter    string   `json:"review_after,omitempty" jsonschema:"YYYY-MM-DD; required for defer"`
-	Reason         string   `json:"reason,omitempty"`
-	ResultEvidence string   `json:"result_evidence,omitempty"`
-	Expected       int64    `json:"expected_revision,omitempty" jsonschema:"0 means no revision check"`
+	Document       *knowledgeSave `json:"document,omitempty" jsonschema:"knowledge page to save atomically with a reference outcome; same scope as capture"`
+	DocumentID     string         `json:"document_id,omitempty"`
+	IdempotencyKey string         `json:"idempotency_key"`
+	CaptureID      string         `json:"capture_id"`
+	Outcome        string         `json:"outcome" jsonschema:"work_items, reference, immediate, discard or defer"`
+	Titles         []string       `json:"titles,omitempty" jsonschema:"one title per work item; required for work_items"`
+	ProjectID      string         `json:"project_id,omitempty"`
+	AreaID         string         `json:"area_id,omitempty"`
+	ContextID      string         `json:"context_id,omitempty"`
+	WaitingOn      string         `json:"waiting_on,omitempty"`
+	ReviewAfter    string         `json:"review_after,omitempty" jsonschema:"YYYY-MM-DD; required for defer"`
+	Reason         string         `json:"reason,omitempty"`
+	ResultEvidence string         `json:"result_evidence,omitempty"`
+	Expected       int64          `json:"expected_revision,omitempty" jsonschema:"0 means no revision check"`
 }
 
 type prepareIn struct {
@@ -75,16 +79,17 @@ type prepareIn struct {
 
 type planItemIn struct {
 	WorkItemID string `json:"work_item_id"`
-	Role       string `json:"role" jsonschema:"mit, big_rock or batch"`
+	Role       string `json:"role,omitempty" jsonschema:"optional legacy role; defaults to mit for daily and big_rock for weekly"`
 }
 
 type commitPlanIn struct {
-	IdempotencyKey string       `json:"idempotency_key"`
-	Kind           string       `json:"kind" jsonschema:"daily or weekly"`
-	Period         string       `json:"period" jsonschema:"YYYY-MM-DD or YYYY-Www"`
-	Expected       int64        `json:"expected_revision,omitempty"`
-	OverrideID     string       `json:"override_id,omitempty" jsonschema:"recorded daily limit override"`
-	Items          []planItemIn `json:"items"`
+	IdempotencyKey  string       `json:"idempotency_key"`
+	Kind            string       `json:"kind" jsonschema:"daily or weekly"`
+	Period          string       `json:"period" jsonschema:"YYYY-MM-DD or YYYY-Www"`
+	Expected        int64        `json:"expected_revision,omitempty"`
+	ExceptionReason string       `json:"exception_reason,omitempty"`
+	OverrideID      string       `json:"override_id,omitempty" jsonschema:"recorded daily limit override"`
+	Items           []planItemIn `json:"items"`
 }
 
 type focusStartIn struct {
@@ -113,6 +118,7 @@ type focusFinishIn struct {
 }
 
 type reviewIn struct {
+	Scope          string `json:"scope,omitempty"`
 	IdempotencyKey string `json:"idempotency_key"`
 	Kind           string `json:"kind" jsonschema:"daily, weekly, monthly or yearly"`
 	Period         string `json:"period"`
@@ -231,9 +237,15 @@ func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding, boundScope
 		if err != nil {
 			return nil, app.ProcessResult{}, err
 		}
+		var document *app.DocumentCmd
+		if in.Document != nil {
+			d := in.Document.command(b)
+			document = &d
+		}
+		outcome.DocumentID = in.DocumentID
 		out, err := svc.Process(ctx, app.ProcessCmd{
 			Binding: b, Key: in.IdempotencyKey, ID: domain.CaptureID(in.CaptureID),
-			Expected: domain.Revision(in.Expected), Outcome: outcome,
+			Expected: domain.Revision(in.Expected), Outcome: outcome, Document: document,
 		})
 		return nil, out, toolError(err)
 	})
@@ -261,7 +273,7 @@ func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding, boundScope
 		out, err := svc.CommitPlan(ctx, app.CommitPlanCmd{
 			Binding: b, Key: in.IdempotencyKey, Kind: domain.PlanKind(in.Kind),
 			Period: in.Period, Expected: domain.Revision(in.Expected),
-			Items: items, OverrideID: in.OverrideID,
+			Items: items, OverrideID: in.OverrideID, ExceptionReason: in.ExceptionReason,
 		})
 		return nil, out, toolError(err)
 	})
@@ -305,8 +317,12 @@ func addTools(s *mcp.Server, svc *app.Service, b domain.ScopeBinding, boundScope
 		if in.Complete != nil {
 			complete = *in.Complete
 		}
+		selected, err := selectScope(b, in.Scope)
+		if err != nil {
+			return nil, domain.Review{}, err
+		}
 		out, err := svc.Repo.RecordReview(ctx, app.ReviewCmd{
-			Binding: b, Key: in.IdempotencyKey, Kind: in.Kind, Period: in.Period,
+			Binding: selected, Key: in.IdempotencyKey, Kind: in.Kind, Period: in.Period,
 			Outcomes: in.Outcomes, Coverage: in.Coverage, Complete: complete,
 		}, svc.Now())
 		return nil, out, toolError(err)

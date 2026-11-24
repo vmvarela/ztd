@@ -1,5 +1,9 @@
 # MCP
 
+> The [current model](current-model.md) supersedes the profile graph, separate
+> knowledge/review stores and manual-index workflows described in this historical
+> reference. Existing APIs remain compatibility adapters.
+
 ZTD exposes a local stdio MCP server over the same application layer as the
 CLI. It is one process per host session, started by the client, and it closes
 when the client disconnects. There is no daemon and no network listener.

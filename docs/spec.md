@@ -1,5 +1,9 @@
 # ZTD v2 System Specification
 
+> The [current model](current-model.md) supersedes the profile graph, separate
+> knowledge/review stores and manual-index workflows described in this historical
+> reference. Existing APIs remain compatibility adapters.
+
 **Date:** 2026-11-19
 **Status:** Proposed for implementation planning after independent review; review corrections applied. No implementation has been approved or performed.
 **Authors:** Product requirements supplied by Victor; architecture and verification contract drafted with OpenCode.

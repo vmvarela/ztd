@@ -24,7 +24,7 @@ func TestCommitPlanMITLimit(t *testing.T) {
 		{name: "one mit needs no override", mitCount: 1},
 		{name: "three mits need no override", mitCount: 3},
 		{name: "four mits without override are rejected", mitCount: 4, wantFamily: domain.RulesAcknowledgement},
-		{name: "zero mits without override are rejected", mitCount: 0, wantFamily: domain.RulesAcknowledgement},
+		{name: "empty plan is a valid day off", mitCount: 0},
 		{name: "four mits with a matching override row", mitCount: 4, row: &overrideRow{id: "ovr-a", date: period}},
 		{name: "zero mits with a matching override id", mitCount: 0, overrideID: "ovr-b", row: &overrideRow{id: "ovr-b", date: period}},
 		{name: "override for another local date does not apply", mitCount: 4, overrideID: "ovr-c",
@@ -36,9 +36,8 @@ func TestCommitPlanMITLimit(t *testing.T) {
 			e := newTestEnv(t)
 			items := e.workItems(4, "mit")
 			if tc.row != nil {
-				e.mustExec(`INSERT INTO daily_limit_overrides (id, actor_id, local_date, rule, reason, created_by, created_at)
-					VALUES (?, 'tester', ?, 'mit', 'test override', 'test', ?)`,
-					tc.row.id, tc.row.date, fmtTime(e.now))
+				e.mustExec(`INSERT INTO legacy_records(source,entity_type,entity_id,payload_json,disposition,reason)
+ VALUES('test','limit_override',?,json_object('rule','mit','actor_id','tester','local_date',?),'imported','legacy fixture')`, tc.row.id, tc.row.date)
 			}
 			planItems := make([]domain.PlanItem, 0, tc.mitCount)
 			for i := 0; i < tc.mitCount; i++ {

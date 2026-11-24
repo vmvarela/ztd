@@ -90,6 +90,10 @@ func runCheck(ctx context.Context, q queryer, b *domain.ScopeBinding) (app.Check
 		query  string
 		args   []any
 	}{
+		{"document %s links a project in another scope",
+			"SELECT id FROM documents WHERE project_id IS NOT NULL AND scope_id <> (SELECT scope_id FROM projects WHERE projects.id = documents.project_id)" + scopeSQL, sargs},
+		{"capture %s references a document in another scope",
+			"SELECT id FROM captures WHERE document_id IS NOT NULL AND scope_id <> (SELECT scope_id FROM documents WHERE documents.id = captures.document_id)" + scopeSQL, sargs},
 		// Required fields.
 		{"work item %s has no title",
 			"SELECT id FROM work_items WHERE title IS NULL OR trim(title) = ''" + scopeSQL, sargs},
@@ -227,7 +231,7 @@ func runCheck(ctx context.Context, q queryer, b *domain.ScopeBinding) (app.Check
 		{"checkpoint %s has a scope that differs from its work item",
 			"SELECT c.id FROM checkpoints c JOIN work_items w ON w.id = c.work_item_id WHERE c.scope_id <> w.scope_id"},
 		{"review %s duplicates a profile/kind/period",
-			"SELECT profile_id || '/' || kind || '/' || period FROM reviews GROUP BY profile_id, kind, period HAVING count(*) > 1"},
+			"SELECT id FROM documents WHERE kind = 'review' AND json_valid(metadata_json) = 0"},
 	}
 	for _, c := range journeyChecks {
 		ids, err := idRows(ctx, q, c.query)
@@ -236,6 +240,23 @@ func runCheck(ctx context.Context, q queryer, b *domain.ScopeBinding) (app.Check
 		}
 		for _, id := range ids {
 			fail(c.format, id)
+		}
+	}
+	// Only an unbound maintenance check reports unassigned legacy material.
+	// Scoped agents must not learn about records outside their binding.
+	if b == nil {
+		var count int
+		if err := q.QueryRowContext(ctx, "SELECT count(*) FROM legacy_records WHERE disposition = 'quarantined'").Scan(&count); err != nil {
+			return app.CheckReport{}, err
+		}
+		if count > 0 {
+			rep.Warnings = append(rep.Warnings, fmt.Sprintf("%d legacy records require explicit reconciliation; originals remain in legacy_records and exports", count))
+		}
+		if err := q.QueryRowContext(ctx, "SELECT count(*) FROM goals WHERE scope_id IS NULL").Scan(&count); err != nil {
+			return app.CheckReport{}, err
+		}
+		if count > 0 {
+			rep.Warnings = append(rep.Warnings, fmt.Sprintf("%d legacy goals have no unambiguous scope and are hidden from scoped reads", count))
 		}
 	}
 	return rep, nil

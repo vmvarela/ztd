@@ -8,6 +8,18 @@ visible instead of turning into a generic issue tracker.
 This repository is the Go implementation: a clean rewrite of the earlier Zig
 tool. The Markdown store remains supported only as a read-only import source.
 
+## Simple model
+
+One owner, one timezone and explicit scopes. Captures become tasks or references.
+Tasks have direct states (`next`, `waiting`, `someday`, `completed`, `cancelled`),
+with optional project, context and due date. Daily and weekly plans contain ordered
+task IDs. Checkpoints work without a focus session. Knowledge and reviews are
+scoped documents in the same database; agents use search, read, save and related.
+
+Start with [the current model and agent workflow](docs/current-model.md).
+The [implementation plan](docs/implementation-plan.md) records the migration and
+verification work. Older commands remain compatibility adapters.
+
 ## Attribution
 
 ZTD is an independent implementation inspired by [Zen To Done](https://zenhabits.net/zen-to-done/)
@@ -22,8 +34,9 @@ batch ingestion, legacy import, export/restore, snapshots, integrity checks,
 knowledge search, lint and archive over the document layer, a local stdio MCP
 server and a `status` report of the environment.
 
-Not built yet: provider connectors, calendars, external focus blocks and the
-LLM Wiki. Nothing contacts a network service; those are separate stages, not
+Not built yet: provider connectors, external calendars, external focus blocks and
+automatic LLM ingestion. The local knowledge wiki uses Markdown pages, FTS5 search,
+source references and links. Nothing contacts a network service; those are separate stages, not
 implicit features of the CLI.
 
 ## Backup
@@ -136,7 +149,11 @@ one of them and is rejected when it is outside that view.
 | `prepare` | Read-only daily brief: active goal, committed MITs, candidates, checkpoints |
 | `plan commit` | Commit a daily or weekly plan |
 | `focus start\|checkpoint\|finish` | Run one open focus session |
-| `review` | Record a daily or weekly review |
+| `task list\|show\|update\|done\|cancel` | Read and patch tasks with direct statuses and revision checks |
+| `knowledge search\|read\|save\|related` | Find and maintain sourced knowledge pages |
+| `plan show\|set` | Read or replace daily/weekly ordered priorities |
+| `review show\|save` | Read and record a review in one scope |
+| `settings` | Read owner/timezone or set the timezone |
 | `source add\|apply\|list\|review` | Register sources in an explicit scope, sync user configuration over the file's scopes, list coverage with `--all`/`--scope`, feed a reported batch |
 | `routines due\|done\|add` | Track recurring routines; `add` registers one |
 | `context add\|list` | Declare and read GTD context names inside a scope |

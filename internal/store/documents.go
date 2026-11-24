@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,7 +15,7 @@ import (
 
 const contextColumns = `id, scope_id, name, revision`
 const documentColumns = `id, scope_id, kind, slug, title, body, status, revision,
-	created_at, updated_at`
+	created_at, updated_at, sources_json, project_id`
 
 func scanContext(sc scanner) (domain.Context, error) {
 	var (
@@ -30,14 +31,19 @@ func scanContext(sc scanner) (domain.Context, error) {
 
 func scanDocument(sc scanner) (domain.Document, error) {
 	var (
-		d                   domain.Document
-		scope, kind, status string
-		created, updated    string
+		d                         domain.Document
+		scope, kind, status       string
+		created, updated, sources string
+		project                   sql.NullString
 	)
 	if err := sc.Scan(&d.ID, &scope, &kind, &d.Slug, &d.Title, &d.Body,
-		&status, &d.Revision, &created, &updated); err != nil {
+		&status, &d.Revision, &created, &updated, &sources, &project); err != nil {
 		return domain.Document{}, err
 	}
+	if err := json.Unmarshal([]byte(sources), &d.Sources); err != nil {
+		return domain.Document{}, err
+	}
+	d.ProjectID = ptrID[domain.ProjectID](project)
 	d.Scope = scope
 	d.Kind = kind
 	d.Status = domain.DocumentStatus(status)
@@ -158,6 +164,19 @@ func (s *Store) PutDocument(ctx context.Context, cmd app.DocumentCmd, now time.T
 	if err := app.ValidateDocumentCmd(cmd); err != nil {
 		return domain.Document{}, err
 	}
+	var out domain.Document
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		out, err = putDocumentTx(ctx, tx, cmd, now)
+		return err
+	})
+	return out, err
+}
+
+func putDocumentTx(ctx context.Context, tx *sql.Tx, cmd app.DocumentCmd, now time.Time) (domain.Document, error) {
+	if err := app.ValidateDocumentCmd(cmd); err != nil {
+		return domain.Document{}, err
+	}
 	scope := cmd.Scope
 	if scope == "" {
 		scope = cmd.Binding.Scopes[0]
@@ -172,7 +191,7 @@ func (s *Store) PutDocument(ctx context.Context, cmd app.DocumentCmd, now time.T
 		return domain.Document{}, err
 	}
 	var out domain.Document
-	err = s.withTx(ctx, func(tx *sql.Tx) error {
+	err = func() error {
 		done, err := lookupIdem(ctx, tx, "doc put", key, hash, &out)
 		if err != nil || done {
 			return err
@@ -180,9 +199,14 @@ func (s *Store) PutDocument(ctx context.Context, cmd app.DocumentCmd, now time.T
 		if err := requireScopeDeclared(ctx, tx, scope); err != nil {
 			return err
 		}
+		if cmd.ProjectID != nil {
+			if err := checkSameScope(ctx, tx, "projects", "project", string(*cmd.ProjectID), scope); err != nil {
+				return err
+			}
+		}
 		existing, err := scanDocument(tx.QueryRowContext(ctx,
-			"SELECT "+documentColumns+" FROM documents WHERE scope_id = ? AND kind = ? AND slug = ?",
-			string(scope), string(cmd.Kind), cmd.Slug))
+			"SELECT "+documentColumns+" FROM documents WHERE scope_id = ? AND slug = ?",
+			string(scope), cmd.Slug))
 		var next domain.Revision
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -195,7 +219,7 @@ func (s *Store) PutDocument(ctx context.Context, cmd app.DocumentCmd, now time.T
 		case err != nil:
 			return err
 		default:
-			if cmd.DraftOnly && cmd.Expected == 0 {
+			if cmd.Expected == 0 {
 				return domain.NewError(domain.StaleRevision,
 					"document %s/%s already exists at revision %d in scope %s, so expected must be its current revision",
 					cmd.Kind, cmd.Slug, existing.Revision, scope)
@@ -238,6 +262,9 @@ func (s *Store) PutDocument(ctx context.Context, cmd app.DocumentCmd, now time.T
 		} else {
 			out = existing
 			out.Title, out.Body, out.Status = cmd.Title, cmd.Body, cmd.Status
+			if existing.Kind != string(cmd.Kind) {
+				return domain.NewError(domain.Conflict, "slug already belongs to a document with another purpose")
+			}
 			out.Revision = next
 			out.UpdatedAt = now
 			if _, err := tx.ExecContext(ctx,
@@ -249,12 +276,24 @@ func (s *Store) PutDocument(ctx context.Context, cmd app.DocumentCmd, now time.T
 			}
 			event = "updated"
 		}
+		out.Sources, out.ProjectID = cmd.Sources, cmd.ProjectID
+		sources := cmd.Sources
+		if sources == nil {
+			sources = []string{}
+		}
+		encoded, err := json.Marshal(sources)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE documents SET sources_json = ?, project_id = ? WHERE id = ?", string(encoded), argID(cmd.ProjectID), out.ID); err != nil {
+			return err
+		}
 		if err := insertHistory(ctx, tx, "document", out.ID, event,
 			string(scope), "", out.Revision, out, now); err != nil {
 			return err
 		}
 		return writeIdem(ctx, tx, "doc put", key, hash, out, now)
-	})
+	}()
 	if err != nil {
 		return domain.Document{}, err
 	}
@@ -270,8 +309,8 @@ func (s *Store) GetDocument(ctx context.Context, b domain.ScopeBinding, kind dom
 	if len(scope) > 1 {
 		return domain.Document{}, domain.Invalid("at most one document scope may be selected")
 	}
-	query := "SELECT " + documentColumns + " FROM documents WHERE kind = ? AND slug = ?"
-	args := []any{string(kind), slug}
+	query := "SELECT " + documentColumns + " FROM documents WHERE (kind = ? AND slug = ? OR id IN (SELECT document_id FROM document_aliases WHERE kind = ? AND slug = ?))"
+	args := []any{string(kind), slug, string(kind), slug}
 	if len(scope) == 1 && scope[0] != "" {
 		if !b.Allows(scope[0]) {
 			return domain.Document{}, domain.NewError(domain.ScopeDenied, "document scope is outside this binding")
@@ -362,7 +401,7 @@ const (
 // FTS5 join never hits an ambiguous name shared with documents_fts.
 const joinedDocumentColumns = `documents.id, documents.scope_id, documents.kind,
 	documents.slug, documents.title, documents.body, documents.status,
-	documents.revision, documents.created_at, documents.updated_at`
+	documents.revision, documents.created_at, documents.updated_at, documents.sources_json, documents.project_id`
 
 // ftsQuery renders user input as a safe FTS5 MATCH expression: every
 // whitespace-separated token is wrapped in double quotes with embedded quotes
@@ -382,7 +421,7 @@ func ftsQuery(query string) string {
 // 10; any limit above 50 is capped at 50. Hits are ordered by bm25 ascending
 // (the smaller the better), then kind and slug for a deterministic tie-break.
 // An empty result is a list, not an error.
-func (s *Store) SearchDocuments(ctx context.Context, b domain.ScopeBinding, query string, kind domain.DocumentKind, limit int) ([]app.DocumentSearchHit, error) {
+func (s *Store) SearchDocuments(ctx context.Context, b domain.ScopeBinding, query string, kind domain.DocumentKind, limit int, project ...domain.ProjectID) ([]app.DocumentSearchHit, error) {
 	if err := b.Validate(); err != nil {
 		return nil, err
 	}
@@ -414,6 +453,10 @@ func (s *Store) SearchDocuments(ctx context.Context, b domain.ScopeBinding, quer
 		stmt += " AND documents_fts.kind = ?"
 		args = append(args, string(kind))
 	}
+	if len(project) > 0 && project[0] != "" {
+		stmt += " AND documents.project_id = ?"
+		args = append(args, string(project[0]))
+	}
 	stmt += " ORDER BY bm25(documents_fts) ASC, documents.kind, documents.slug LIMIT ?"
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, stmt, args...)
@@ -430,12 +473,18 @@ func (s *Store) SearchDocuments(ctx context.Context, b domain.ScopeBinding, quer
 			status  string
 			created string
 			updated string
+			sources string
+			project sql.NullString
 		)
 		if err := rows.Scan(&hit.Document.ID, &scope, &kindCol, &hit.Document.Slug,
 			&hit.Document.Title, &hit.Document.Body, &status, &hit.Document.Revision,
-			&created, &updated, &hit.Rank, &hit.Snippet); err != nil {
+			&created, &updated, &sources, &project, &hit.Rank, &hit.Snippet); err != nil {
 			return nil, err
 		}
+		if err := json.Unmarshal([]byte(sources), &hit.Document.Sources); err != nil {
+			return nil, err
+		}
+		hit.Document.ProjectID = ptrID[domain.ProjectID](project)
 		hit.Document.Scope = scope
 		hit.Document.Kind = kindCol
 		hit.Document.Status = domain.DocumentStatus(status)

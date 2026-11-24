@@ -66,8 +66,8 @@ func TestMigration0006Documents(t *testing.T) {
 	if err := e.s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("read user_version: %v", err)
 	}
-	if version != 7 {
-		t.Fatalf("user_version = %d, want 7", version)
+	if version != 13 {
+		t.Fatalf("user_version = %d, want 13", version)
 	}
 	var cols int
 	if err := e.s.db.QueryRow(

@@ -135,12 +135,12 @@ func TestOpenAppliesMigrationsIdempotently(t *testing.T) {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("read user_version: %v", err)
 	}
-	if version != 7 {
-		t.Fatalf("user_version = %d, want 7", version)
+	if version != 13 {
+		t.Fatalf("user_version = %d, want 13", version)
 	}
 	var tables int
 	if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table'
-		AND name IN ('scopes','profiles','captures','work_items','plans','plan_items','focus_sessions','checkpoints','reviews','goals','history_events','idempotency_records','sources','source_reviews')`).
+		AND name IN ('scopes','settings','captures','work_items','plans','plan_items','focus_sessions','checkpoints','documents','goals','history_events','idempotency_records','sources','source_reviews')`).
 		Scan(&tables); err != nil {
 		t.Fatalf("count tables: %v", err)
 	}
@@ -154,8 +154,8 @@ func TestOpenAppliesMigrationsIdempotently(t *testing.T) {
 	// Reopening runs the migration loop again and must be a no-op.
 	s.Close()
 	s2 := openTestStore(t, path)
-	if err := s2.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 7 {
-		t.Fatalf("after reopen user_version = %d (err %v), want 7", version, err)
+	if err := s2.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 13 {
+		t.Fatalf("after reopen user_version = %d (err %v), want 13", version, err)
 	}
 	if n := countRows(t, s2, "scopes"); n != 2 {
 		t.Fatalf("after reopen scopes = %d, want 2", n)
@@ -200,8 +200,8 @@ func TestMigration0005UpgradesExistingRows(t *testing.T) {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("read user_version: %v", err)
 	}
-	if version != 7 {
-		t.Fatalf("user_version = %d, want 7 after 0005 through 0007", version)
+	if version != 13 {
+		t.Fatalf("user_version = %d, want 13 after 0005 through 0013", version)
 	}
 	var fields string
 	if err := s.db.QueryRow(`SELECT custom_fields FROM work_items WHERE id = 'T-20261119-001'`).
@@ -287,8 +287,8 @@ func TestOpenRejectsUnknownDatabases(t *testing.T) {
 		}
 		defer s.Close()
 		var version int
-		if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 7 {
-			t.Fatalf("memory user_version = %d (err %v), want 7", version, err)
+		if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 13 {
+			t.Fatalf("memory user_version = %d (err %v), want 13", version, err)
 		}
 		if err := s.SeedDefaults(context.Background(), "tester"); err != nil {
 			t.Fatalf("SeedDefaults on memory: %v", err)

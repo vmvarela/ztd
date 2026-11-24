@@ -77,7 +77,7 @@ func loadWorkItemTx(ctx context.Context, tx *sql.Tx, b domain.ScopeBinding, id d
 func openFocus(ctx context.Context, q queryer, actor domain.ActorID) (domain.FocusID, error) {
 	var id string
 	err := q.QueryRowContext(ctx,
-		"SELECT id FROM focus_sessions WHERE actor_id = ? AND ended_at IS NULL", actor).Scan(&id)
+		"SELECT id FROM focus_sessions WHERE ended_at IS NULL").Scan(&id)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return "", nil
@@ -131,7 +131,7 @@ func (s *Store) StartFocus(ctx context.Context, cmd app.FocusStartCmd, now time.
 		}
 		if id != "" {
 			return domain.NewError(domain.FocusConflict,
-				"actor %s already has open focus %s", cmd.Binding.Actor, id)
+				"a focus session is already open")
 		}
 		date := idDate(now)
 		seq, err := nextDailySeq(ctx, tx, "focus_sessions", "F-"+date+"-")
@@ -351,107 +351,4 @@ func mustParse(s string) time.Time {
 		return time.Time{}
 	}
 	return t
-}
-
-// RecordReview stores a guided review. A review is one per Profile, kind and
-// period; a repeated recording updates it and keeps history.
-func (s *Store) RecordReview(ctx context.Context, cmd app.ReviewCmd, now time.Time) (domain.Review, error) {
-	now = now.UTC().Truncate(time.Second)
-	if err := cmd.Binding.Validate(); err != nil {
-		return domain.Review{}, err
-	}
-	if err := requireKey(cmd.Key); err != nil {
-		return domain.Review{}, err
-	}
-	switch cmd.Kind {
-	case "daily", "weekly", "monthly", "yearly":
-	default:
-		return domain.Review{}, domain.Invalid("unknown review kind %q", cmd.Kind)
-	}
-	if strings.TrimSpace(cmd.Period) == "" {
-		return domain.Review{}, domain.Invalid("review period is required")
-	}
-	if strings.TrimSpace(cmd.Outcomes) == "" || strings.TrimSpace(cmd.Coverage) == "" {
-		return domain.Review{}, domain.Invalid("review outcomes and coverage are required")
-	}
-	hash, err := hashPayload(cmd)
-	if err != nil {
-		return domain.Review{}, err
-	}
-	var out domain.Review
-	err = s.withTx(ctx, func(tx *sql.Tx) error {
-		done, err := lookupIdem(ctx, tx, "review", cmd.Key, hash, &out)
-		if err != nil || done {
-			return err
-		}
-		scopes, err := profileScopes(ctx, tx, cmd.Binding.Profile)
-		if err != nil {
-			return err
-		}
-		if len(scopes) == 0 {
-			return domain.NewError(domain.NotFound, "profile %s does not exist", cmd.Binding.Profile)
-		}
-		for _, scope := range cmd.Binding.Scopes {
-			if !scopes[scope] {
-				return domain.NewError(domain.ScopeDenied,
-					"scope %s is not part of profile %s", scope, cmd.Binding.Profile)
-			}
-		}
-		state := "partial"
-		if cmd.Complete {
-			state = "complete"
-		}
-		var id string
-		var rev int64
-		var created string
-		err = tx.QueryRowContext(ctx,
-			"SELECT id, revision, created_at FROM reviews WHERE profile_id = ? AND kind = ? AND period = ?",
-			string(cmd.Binding.Profile), cmd.Kind, cmd.Period).Scan(&id, &rev, &created)
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			date := idDate(now)
-			seq, err := nextDailySeq(ctx, tx, "reviews", "R-"+date+"-")
-			if err != nil {
-				return err
-			}
-			id = fmt.Sprintf("R-%s-%03d", date, seq)
-			rev = 1
-			created = fmtTime(now)
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO reviews (id, profile_id, kind, period, outcomes, coverage,
-					completion_state, created_at, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-				id, string(cmd.Binding.Profile), cmd.Kind, cmd.Period, cmd.Outcomes,
-				cmd.Coverage, state, created); err != nil {
-				return err
-			}
-		case err != nil:
-			return err
-		default:
-			rev++
-			if _, err := tx.ExecContext(ctx,
-				"UPDATE reviews SET outcomes = ?, coverage = ?, completion_state = ?, revision = ? WHERE id = ?",
-				cmd.Outcomes, cmd.Coverage, state, rev, id); err != nil {
-				return err
-			}
-		}
-		out = domain.Review{
-			ID:              domain.ReviewID(id),
-			Profile:         cmd.Binding.Profile,
-			Kind:            cmd.Kind,
-			Period:          cmd.Period,
-			Outcomes:        cmd.Outcomes,
-			Coverage:        cmd.Coverage,
-			CompletionState: state,
-			CreatedAt:       mustParse(created),
-		}
-		if err := insertHistory(ctx, tx, "review", id, "recorded",
-			"", string(cmd.Binding.Profile), domain.Revision(rev), out, now); err != nil {
-			return err
-		}
-		return writeIdem(ctx, tx, "review", cmd.Key, hash, out, now)
-	})
-	if err != nil {
-		return domain.Review{}, err
-	}
-	return out, nil
 }

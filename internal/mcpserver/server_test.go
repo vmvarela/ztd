@@ -145,6 +145,7 @@ func TestToolCatalog(t *testing.T) {
 		"record_review", "find", "read",
 		"sources", "record_source_review",
 		"doc_search", "doc_get", "doc_related", "doc_put",
+		"knowledge_search", "knowledge_read", "knowledge_save", "knowledge_related", "task_update", "plan_show", "review_show",
 	}
 	if len(res.Tools) != len(want) {
 		t.Errorf("listed %d tools, want %d", len(res.Tools), len(want))
@@ -187,8 +188,8 @@ func TestDeleteSourceListedWithOptIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list tools: %v", err)
 	}
-	if len(res.Tools) != 18 {
-		t.Errorf("listed %d tools with opt-in, want 18", len(res.Tools))
+	if len(res.Tools) != 25 {
+		t.Errorf("listed %d tools with opt-in, want 25", len(res.Tools))
 	}
 	for _, tool := range res.Tools {
 		if tool.Name == "delete_source" {

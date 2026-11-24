@@ -193,6 +193,7 @@ var mcpToolNames = []string{
 	"record_review", "find", "read",
 	"sources", "record_source_review",
 	"doc_search", "doc_get", "doc_related", "doc_put",
+	"knowledge_search", "knowledge_read", "knowledge_save", "knowledge_related", "plan_show", "review_show", "task_update",
 }
 
 // TestMCPStdioJourney drives the real binary as an MCP stdio server: the tool
@@ -392,6 +393,7 @@ func TestMCPStdioJourney(t *testing.T) {
 	// review: complete daily review for today.
 	revRes := mcpCall(t, cs, "record_review", map[string]any{
 		"idempotency_key": "mcp-review-1",
+		"scope":           "personal",
 		"kind":            "daily",
 		"period":          period,
 		"outcomes":        "captured and planned",

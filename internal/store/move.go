@@ -52,12 +52,20 @@ func (s *Store) MoveWorkItem(ctx context.Context, cmd app.MoveWorkItemCmd, now t
 	if err := app.ValidateMoveCmd(cmd); err != nil {
 		return domain.WorkItem{}, err
 	}
+	var out domain.WorkItem
+	err := s.withTx(ctx, func(tx *sql.Tx) error { var err error; out, err = moveWorkItemTx(ctx, tx, cmd, now); return err })
+	return out, err
+}
+func moveWorkItemTx(ctx context.Context, tx *sql.Tx, cmd app.MoveWorkItemCmd, now time.Time) (domain.WorkItem, error) {
+	if err := app.ValidateMoveCmd(cmd); err != nil {
+		return domain.WorkItem{}, err
+	}
 	hash, err := hashPayload(cmd)
 	if err != nil {
 		return domain.WorkItem{}, err
 	}
 	var out domain.WorkItem
-	err = s.withTx(ctx, func(tx *sql.Tx) error {
+	err = func() error {
 		done, err := lookupIdem(ctx, tx, "move", cmd.Key, hash, &out)
 		if err != nil || done {
 			return err
@@ -69,6 +77,34 @@ func (s *Store) MoveWorkItem(ctx context.Context, cmd app.MoveWorkItemCmd, now t
 		if cmd.Expected != 0 && cmd.Expected != item.Revision {
 			return domain.NewError(domain.StaleRevision,
 				"work item %s is at revision %d, expected %d", item.ID, item.Revision, cmd.Expected)
+		}
+		if cmd.ProjectID != nil {
+			item.ProjectID = nil
+			if *cmd.ProjectID != "" {
+				if err := checkSameScope(ctx, tx, "projects", "project", string(*cmd.ProjectID), item.Scope); err != nil {
+					return err
+				}
+				item.ProjectID = cmd.ProjectID
+			}
+		}
+		if cmd.ContextID != nil {
+			item.ContextID = nil
+			if *cmd.ContextID != "" {
+				if err := checkSameScope(ctx, tx, "contexts", "context", string(*cmd.ContextID), item.Scope); err != nil {
+					return err
+				}
+				item.ContextID = cmd.ContextID
+			}
+		}
+		if cmd.DueAt != nil {
+			item.DueAt = nil
+			if *cmd.DueAt != "" {
+				t, err := time.Parse(time.RFC3339, *cmd.DueAt)
+				if err != nil {
+					return domain.Invalid("due_at must be RFC3339 or empty to clear")
+				}
+				item.DueAt = &t
+			}
 		}
 		if cmd.Text != nil {
 			item.Title = *cmd.Text
@@ -83,8 +119,9 @@ func (s *Store) MoveWorkItem(ctx context.Context, cmd app.MoveWorkItemCmd, now t
 		}
 		// Closure state belongs to the archived lifecycle only; waiting_on
 		// belongs to waiting only, so every move starts from a clean slate.
+		previousClosure, previousClosedAt := item.ClosureKind, item.ClosedAt
 		item.WaitingOn, item.ClosureKind, item.ClosedAt, item.Resolution = "", "", nil, ""
-		var waiting, closure, closed, resolution any
+		var waiting, closed, resolution any
 		switch cmd.Target {
 		case domain.Waiting:
 			item.WaitingOn = *cmd.WaitingOn
@@ -98,7 +135,10 @@ func (s *Store) MoveWorkItem(ctx context.Context, cmd app.MoveWorkItemCmd, now t
 			item.ClosureKind = kind
 			item.Resolution = *cmd.Resolution
 			item.ClosedAt = &now
-			closure, closed, resolution = string(kind), fmtTime(now), item.Resolution
+			if previousClosure == kind && previousClosedAt != nil {
+				item.ClosedAt = previousClosedAt
+			}
+			closed, resolution = fmtTime(*item.ClosedAt), item.Resolution
 		}
 		item.Lifecycle = cmd.Target
 		item.Revision = item.Revision.Next()
@@ -109,11 +149,11 @@ func (s *Store) MoveWorkItem(ctx context.Context, cmd app.MoveWorkItemCmd, now t
 			return domain.Invalid("custom fields for work item %s are not serializable: %v", item.ID, err)
 		}
 		res, err := tx.ExecContext(ctx,
-			`UPDATE work_items SET title = ?, lifecycle = ?, waiting_on = ?, closure_kind = ?,
-			   closed_at = ?, resolution = ?, custom_fields = ?, revision = ?, updated_at = ?
+			`UPDATE work_items SET title = ?, status = ?, waiting_on = ?,
+			   closed_at = ?, resolution = ?, custom_fields = ?, revision = ?, updated_at = ?, project_id = ?, context_id = ?, due_at = ?
 			     WHERE id = ? AND scope_id = ? AND revision = ?`,
-			item.Title, string(item.Lifecycle), waiting, closure, closed, resolution,
-			string(fields), int64(item.Revision), fmtTime(item.UpdatedAt),
+			item.Title, item.Task().Status, waiting, closed, resolution,
+			string(fields), int64(item.Revision), fmtTime(item.UpdatedAt), argID(item.ProjectID), argID(item.ContextID), argTime(item.DueAt),
 			string(item.ID), string(item.Scope), int64(item.Revision-1))
 		if err != nil {
 			return err
@@ -128,7 +168,7 @@ func (s *Store) MoveWorkItem(ctx context.Context, cmd app.MoveWorkItemCmd, now t
 		}
 		out = item
 		return writeIdem(ctx, tx, "move", cmd.Key, hash, out, now)
-	})
+	}()
 	if err != nil {
 		return domain.WorkItem{}, err
 	}
@@ -170,4 +210,60 @@ func moveChangedFields(cmd app.MoveWorkItemCmd) map[string]any {
 		changed["custom_fields"] = cmd.Fields
 	}
 	return changed
+}
+
+// Task patches use their original payload for retries, not a payload re-derived
+// from the task's newer state. The entire read/modify/write is one transaction.
+func (s *Store) UpdateTask(ctx context.Context, b domain.ScopeBinding, in app.TaskUpdate, now time.Time) (domain.Task, error) {
+	if err := b.Validate(); err != nil {
+		return domain.Task{}, err
+	}
+	if in.Expected <= 0 {
+		return domain.Task{}, domain.Invalid("expected_revision must be positive")
+	}
+	if err := requireKey(in.Key); err != nil {
+		return domain.Task{}, err
+	}
+	hash, err := hashPayload(struct {
+		Binding domain.ScopeBinding
+		Patch   app.TaskUpdate
+	}{b, in})
+	if err != nil {
+		return domain.Task{}, err
+	}
+	var out domain.Task
+	err = s.withTx(ctx, func(tx *sql.Tx) error {
+		done, err := lookupIdem(ctx, tx, "task update", in.Key, hash, &out)
+		if done || err != nil {
+			return err
+		}
+		w, err := loadMoveItem(ctx, tx, b, in.ID)
+		if err != nil {
+			return err
+		}
+		cmd := app.MoveWorkItemCmd{Binding: b, Key: "task:" + in.Key, ID: in.ID, Expected: in.Expected, Target: w.Lifecycle, ClosureKind: w.ClosureKind, Text: in.Title, WaitingOn: &w.WaitingOn, Resolution: &w.Resolution, ProjectID: in.ProjectID, ContextID: in.ContextID, DueAt: in.DueAt}
+		switch in.Status {
+		case "":
+		case "next", "waiting", "someday":
+			cmd.Target = domain.Lifecycle(in.Status)
+		case "completed", "cancelled":
+			cmd.Target = domain.Archived
+			cmd.ClosureKind = domain.ClosureKind(in.Status)
+		default:
+			return domain.Invalid("unknown task status")
+		}
+		if in.WaitingOn != nil {
+			cmd.WaitingOn = in.WaitingOn
+		}
+		if in.Resolution != nil {
+			cmd.Resolution = in.Resolution
+		}
+		updated, err := moveWorkItemTx(ctx, tx, cmd, now)
+		if err != nil {
+			return err
+		}
+		out = updated.Task()
+		return writeIdem(ctx, tx, "task update", in.Key, hash, out, now)
+	})
+	return out, err
 }

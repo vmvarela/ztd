@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"embed"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -67,7 +69,7 @@ func Open(path string) (*Store, error) {
 		// A second pooled connection would open a different, empty memory DB.
 		db.SetMaxOpenConns(1)
 	}
-	s := &Store{db: db}
+	s := &Store{db: db, path: dsnPath}
 	if err := s.bootstrap(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -109,6 +111,12 @@ func (s *Store) bootstrap(ctx context.Context) error {
 				"existing SQLite file has tables but no ZTD schema version; refusing to initialize it")
 		}
 	}
+	if version > 0 && version < migrations[len(migrations)-1].version && s.path != "" && s.path != ":memory:" {
+		backup := fmt.Sprintf("%s.before-v%d-%d.db", s.path, migrations[len(migrations)-1].version, time.Now().UnixNano())
+		if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", backup); err != nil {
+			return domain.NewError(domain.IOError, "cannot snapshot before migration: %v", err)
+		}
+	}
 	for _, m := range migrations {
 		if m.version <= version {
 			continue
@@ -131,6 +139,19 @@ func (s *Store) applyMigration(ctx context.Context, m migration) error {
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, m.body); err != nil {
 		return domain.NewError(domain.DBIncompatible, "migration %s failed: %v", m.name, err)
+	}
+	rows, err := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return err
+	}
+	broken := rows.Next()
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if broken {
+		return domain.NewError(domain.DBIncompatible, "migration %s left invalid references", m.name)
 	}
 	if _, err := tx.ExecContext(ctx, "PRAGMA user_version = "+strconv.Itoa(m.version)); err != nil {
 		return domain.NewError(domain.DBIncompatible, "migration %s failed to record its version: %v", m.name, err)

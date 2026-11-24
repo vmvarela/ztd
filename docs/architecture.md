@@ -1,5 +1,9 @@
 # Architecture
 
+> The [current model](current-model.md) supersedes the profile graph, separate
+> knowledge/review stores and manual-index workflows described in this historical
+> reference. Existing APIs remain compatibility adapters.
+
 ZTD is one local binary around one SQLite database. An agent can drive it
 through the CLI today; MCP will be a second interface over the same application
 layer, not a second implementation.

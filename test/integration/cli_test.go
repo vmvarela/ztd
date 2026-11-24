@@ -424,7 +424,7 @@ func TestPass2Journey(t *testing.T) {
 		t.Fatalf("show changed active focus: finish = %+v, focus = %+v", unplannedFinish, unplannedFocus.Focus)
 	}
 
-	rev := decode[reviewData](t, run(t, db, "review", "daily",
+	rev := decode[reviewData](t, run(t, db, "review", "daily", "--scope", "personal",
 		"--period", period, "--outcomes", "captured and planned", "--coverage", "inbox+next").wantOK(t, "review"))
 	if rev.Kind != "daily" || rev.CompletionState != "complete" {
 		t.Fatalf("review = %+v, want a complete daily review", rev)
@@ -449,8 +449,8 @@ func TestPass2Journey(t *testing.T) {
 	restoredDB := filepath.Join(t.TempDir(), "restored.db")
 	rest := decode[restoreData](t, run(t, restoredDB, "restore", "--from", exportPath).wantOK(t, "restore"))
 	for table, want := range map[string]int{
-		"scopes": 2, "profiles": 1, "captures": 1, "work_items": 2,
-		"plans": 1, "plan_items": 1, "reviews": 1, "focus_sessions": 2, "checkpoints": 3,
+		"scopes": 2, "settings": 1, "captures": 1, "work_items": 2,
+		"plans": 1, "plan_items": 1, "documents": 1, "focus_sessions": 2, "checkpoints": 3,
 	} {
 		if rest.Tables[table] != want {
 			t.Errorf("restored %s = %d, want %d", table, rest.Tables[table], want)
