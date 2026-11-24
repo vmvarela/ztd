@@ -19,7 +19,7 @@ func (e *testEnv) insertItem(id, scope, title string, lifecycle domain.Lifecycle
 	if lifecycle == domain.Waiting {
 		waiting = "someone"
 	}
-	e.mustExec(`INSERT INTO work_items (id, scope_id, title, lifecycle, waiting_on, revision, created_at, updated_at)
+	e.mustExec(`INSERT INTO work_items (id, scope_id, title, status, waiting_on, revision, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
 		id, scope, title, string(lifecycle), waiting, fmtTime(updatedAt), fmtTime(updatedAt))
 }
@@ -43,7 +43,7 @@ func TestProcessEachOutcome(t *testing.T) {
 	t.Run("work_items is atomic and links references", func(t *testing.T) {
 		e := newTestEnv(t)
 		e.mustExec(`INSERT INTO contexts (id, scope_id, name, revision) VALUES ('ctx1','personal','errands',1)`)
-		e.mustExec(`INSERT INTO areas (id, scope_id, name, revision) VALUES ('ar1','personal','home',1)`)
+		e.mustExec(`INSERT INTO contexts (id, scope_id, name, revision) VALUES ('ar1','personal','home',1)`)
 		e.mustExec(`INSERT INTO projects (id, scope_id, area_id, desired_outcome, status, revision)
 			VALUES ('pr1','personal','ar1','ship it','active',1)`)
 		c := e.capture("two things", "k")

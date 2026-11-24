@@ -161,23 +161,5 @@ func lintScope(scope string, docs []domain.Document) []LintFinding {
 			}
 		}
 	}
-	// Coverage rules: a scope without an index gets one finding instead of
-	// one orphan per document; an index itself is never an orphan.
-	if len(knowledge) > 0 && len(indexes) == 0 {
-		findings = append(findings, LintFinding{
-			Scope: scope, Kind: string(domain.DocumentKnowledgeIndex),
-			Severity: lintWarning, Code: LintMissingIndex,
-			Message: "scope has knowledge documents but no knowledge_index",
-		})
-	}
-	for _, d := range knowledge {
-		if len(indexes) > 0 && !referenced[d.Slug] {
-			findings = append(findings, LintFinding{
-				Scope: d.Scope, Kind: d.Kind, Slug: d.Slug,
-				Severity: lintWarning, Code: LintOrphanKnowledge,
-				Message: "knowledge document is not referenced by any knowledge_index",
-			})
-		}
-	}
 	return findings
 }

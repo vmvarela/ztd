@@ -27,25 +27,21 @@ type tableDef struct {
 // restore inserts in this order — with the primary key that fixes row order.
 var canonicalTables = []tableDef{
 	{name: "scopes", pk: []string{"id"}},
-	{name: "profiles", pk: []string{"id"}},
-	{name: "profile_scopes", pk: []string{"profile_id", "scope_id"}},
+	{name: "settings", pk: []string{"id"}},
 	{name: "contexts", pk: []string{"id"}},
-	{name: "areas", pk: []string{"id"}},
 	{name: "projects", pk: []string{"id"}},
 	{name: "documents", pk: []string{"id"}},
+	{name: "document_aliases", pk: []string{"scope_id", "kind", "slug"}},
 	{name: "captures", pk: []string{"id"}},
 	{name: "sources", pk: []string{"id"}},
 	{name: "source_reviews", pk: []string{"id"}},
 	{name: "work_items", pk: []string{"id"}},
 	{name: "plans", pk: []string{"id"}},
 	{name: "plan_items", pk: []string{"plan_id", "work_item_id"}},
+	{name: "goals", pk: []string{"id"}},
 	{name: "routines", pk: []string{"id"}},
-	{name: "knowledge_records", pk: []string{"id"}},
-	{name: "daily_limit_overrides", pk: []string{"id"}},
-	{name: "calendar_review_assertions", pk: []string{"id"}},
 	{name: "focus_sessions", pk: []string{"id"}},
 	{name: "checkpoints", pk: []string{"id"}},
-	{name: "reviews", pk: []string{"id"}},
 	{name: "history_events", pk: []string{"seq"}},
 	{name: "idempotency_records", pk: []string{"command", "idempotency_key"}},
 	{name: "import_runs", pk: []string{"id"}},
@@ -83,7 +79,16 @@ func (s *Store) Export(ctx context.Context, out string) error {
 	}
 	tables := make(map[string][]map[string]any, len(canonicalTables))
 	for _, t := range canonicalTables {
-		rows, err := s.db.QueryContext(ctx, "SELECT * FROM "+t.name+" ORDER BY "+strings.Join(t.pk, ", "))
+		stored, err := tableColumns(ctx, s.db, t.name)
+		if err != nil {
+			return err
+		}
+		names := make([]string, 0, len(stored))
+		for name := range stored {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		rows, err := s.db.QueryContext(ctx, "SELECT "+strings.Join(names, ",")+" FROM "+t.name+" ORDER BY "+strings.Join(t.pk, ", "))
 		if err != nil {
 			return err
 		}
@@ -116,7 +121,7 @@ func (s *Store) Export(ctx context.Context, out string) error {
 		rows.Close()
 		tables[t.name] = list
 	}
-	b, err := json.Marshal(exportDoc{Format: "ztd-export", Version: 1, Tables: tables})
+	b, err := json.Marshal(exportDoc{Format: "ztd-export", Version: 2, Tables: tables})
 	if err != nil {
 		return domain.Invalid("encode export: %v", err)
 	}
@@ -147,9 +152,12 @@ func (s *Store) Restore(ctx context.Context, from string) (app.RestoreReport, er
 	if err := dec.Decode(&doc); err != nil {
 		return report, domain.NewError(domain.UnsupportedFormat, "input is not a valid export document: %v", err)
 	}
-	if doc.Format != "ztd-export" || doc.Version != 1 {
+	if doc.Format == "ztd-export" && doc.Version == 1 {
+		return s.restoreLegacyExport(ctx, doc)
+	}
+	if doc.Format != "ztd-export" || doc.Version != 2 {
 		return report, domain.NewError(domain.UnsupportedFormat,
-			"unsupported export format %q version %d (want ztd-export version 1)", doc.Format, doc.Version)
+			"unsupported export format %q version %d (want ztd-export version 2)", doc.Format, doc.Version)
 	}
 	known := make(map[string]bool, len(canonicalTables))
 	for _, t := range canonicalTables {

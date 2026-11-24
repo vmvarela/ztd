@@ -12,14 +12,14 @@ import (
 	"ztd/internal/domain"
 )
 
-const planColumns = `id, profile_id, kind, period, status, revision, created_at, updated_at`
+const planColumns = `id, profile_id, kind, period, status, revision, created_at, updated_at, exception_reason`
 
 func scanPlan(sc scanner) (domain.Plan, error) {
 	var (
 		p                domain.Plan
 		created, updated string
 	)
-	if err := sc.Scan(&p.ID, &p.Profile, &p.Kind, &p.Period, &p.Status, &p.Revision, &created, &updated); err != nil {
+	if err := sc.Scan(&p.ID, &p.Profile, &p.Kind, &p.Period, &p.Status, &p.Revision, &created, &updated, &p.ExceptionReason); err != nil {
 		return domain.Plan{}, err
 	}
 	var err error
@@ -92,7 +92,7 @@ func (s *Store) Prepare(ctx context.Context, b domain.ScopeBinding, date string)
 		return app.PlanBrief{}, err
 	}
 	brief := app.PlanBrief{Profile: b.Profile, Date: date}
-	if goal, err := activeGoal(ctx, s.db, b.Profile); err != nil {
+	if goal, err := activeGoal(ctx, s.db, b); err != nil {
 		return app.PlanBrief{}, err
 	} else {
 		brief.Goal = goal
@@ -145,6 +145,14 @@ func (s *Store) Prepare(ctx context.Context, b domain.ScopeBinding, date string)
 			}
 			brief.MITs = append(brief.MITs, w)
 		}
+		visible, err := readPlanItems(ctx, s.db, b, plan.ID)
+		if err != nil {
+			return app.PlanBrief{}, err
+		}
+		if len(visible) != len(plan.Items) {
+			plan.ExceptionReason = ""
+		}
+		plan.Items = visible
 		brief.Plan = &plan
 		for _, item := range brief.MITs {
 			args := append([]any{string(item.ID)}, scopeArgs...)
@@ -255,6 +263,34 @@ func (s *Store) CommitPlan(ctx context.Context, cmd app.CommitPlanCmd, now time.
 			nextRev = 1
 		}
 
+		var hidden []domain.PlanItem
+		if found {
+			clause, args, _ := scopeClause(cmd.Binding)
+			args = append([]any{planID}, args...)
+			rows, err := tx.QueryContext(ctx, "SELECT pi.work_item_id, pi.role, pi.position FROM plan_items pi JOIN work_items w ON w.id = pi.work_item_id WHERE pi.plan_id = ? AND w.scope_id NOT IN ("+clause+") ORDER BY pi.position", args...)
+			if err != nil {
+				return err
+			}
+			for rows.Next() {
+				var it domain.PlanItem
+				if err := rows.Scan(&it.WorkItemID, &it.Role, &it.Position); err != nil {
+					rows.Close()
+					return err
+				}
+				hidden = append(hidden, it)
+			}
+			err = rows.Err()
+			rows.Close()
+			if err != nil {
+				return err
+			}
+		}
+		if len(hidden) > 0 {
+			if cmd.ExceptionReason != "" {
+				return domain.NewError(domain.ScopeDenied, "editing the global exception requires a full plan view")
+			}
+			cmd.ExceptionReason = existing.ExceptionReason
+		}
 		seen := make(map[domain.WorkItemID]bool, len(cmd.Items))
 		mitCount := 0
 		for _, item := range cmd.Items {
@@ -279,6 +315,9 @@ func (s *Store) CommitPlan(ctx context.Context, cmd app.CommitPlanCmd, now time.
 			case err != nil:
 				return err
 			}
+			if !cmd.Binding.Allows(domain.ScopeID(owner)) {
+				return domain.NewError(domain.ScopeDenied, "plan item is outside the active scopes")
+			}
 			if !owned[domain.ScopeID(owner)] {
 				return domain.NewError(domain.ScopeDenied,
 					"work item %s belongs to scope %s, which is not part of profile %s",
@@ -288,7 +327,12 @@ func (s *Store) CommitPlan(ctx context.Context, cmd app.CommitPlanCmd, now time.
 				mitCount++
 			}
 		}
-		if cmd.Kind == domain.DailyPlan && (mitCount < 1 || mitCount > 3 || cmd.OverrideID != "") {
+		for _, item := range hidden {
+			if item.Role == domain.MITRole {
+				mitCount++
+			}
+		}
+		if cmd.Kind == domain.DailyPlan && (mitCount > 3 || cmd.OverrideID != "") && strings.TrimSpace(cmd.ExceptionReason) == "" {
 			applies, err := overrideApplies(ctx, tx, cmd.Binding.Actor, cmd.Period, cmd.OverrideID)
 			if err != nil {
 				return err
@@ -299,7 +343,7 @@ func (s *Store) CommitPlan(ctx context.Context, cmd app.CommitPlanCmd, now time.
 						cmd.OverrideID, cmd.Period, cmd.Binding.Actor)
 				}
 				return domain.NewError(domain.RulesAcknowledgement,
-					"daily plan has %d MITs; 1..3 need no override, otherwise record a daily limit override", mitCount)
+					"daily priority limit exceeded; supply an exception reason from a full plan view")
 			}
 		}
 
@@ -314,6 +358,9 @@ func (s *Store) CommitPlan(ctx context.Context, cmd app.CommitPlanCmd, now time.
 			     VALUES (?, ?, ?, ?, 'committed', ?, ?, ?)`,
 			planID, string(cmd.Binding.Profile), string(cmd.Kind), cmd.Period,
 			nextRev, fmtTime(now), fmtTime(now)); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE plans SET exception_reason = ? WHERE id = ?", cmd.ExceptionReason, planID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM plan_items WHERE plan_id = ?", planID); err != nil {
@@ -345,6 +392,15 @@ func (s *Store) CommitPlan(ctx context.Context, cmd app.CommitPlanCmd, now time.
 				Position:   i,
 			})
 		}
+		for i, item := range hidden {
+			if _, err := tx.ExecContext(ctx, "INSERT INTO plan_items (plan_id, work_item_id, role, position) VALUES (?, ?, ?, ?)", planID, item.WorkItemID, item.Role, len(cmd.Items)+i); err != nil {
+				return err
+			}
+		}
+		plan.ExceptionReason = cmd.ExceptionReason
+		if len(hidden) > 0 {
+			plan.ExceptionReason = ""
+		}
 		if err := insertHistory(ctx, tx, "plan", planID, "committed", "",
 			string(cmd.Binding.Profile), plan.Revision, plan, now); err != nil {
 			return err
@@ -360,10 +416,10 @@ func (s *Store) CommitPlan(ctx context.Context, cmd app.CommitPlanCmd, now time.
 // overrideApplies reports whether a daily_limit_overrides(mit) row matches the
 // actor and local date, narrowed to OverrideID when one was supplied.
 func overrideApplies(ctx context.Context, tx *sql.Tx, actor domain.ActorID, localDate, overrideID string) (bool, error) {
-	query := `SELECT 1 FROM daily_limit_overrides WHERE rule = 'mit' AND actor_id = ? AND local_date = ?`
+	query := `SELECT 1 FROM legacy_records WHERE entity_type='limit_override' AND json_extract(payload_json,'$.rule') = 'mit' AND json_extract(payload_json,'$.actor_id') = ? AND json_extract(payload_json,'$.local_date') = ?`
 	args := []any{string(actor), localDate}
 	if overrideID != "" {
-		query += " AND id = ?"
+		query += " AND entity_id = ?"
 		args = append(args, overrideID)
 	}
 	var one int
@@ -375,4 +431,52 @@ func overrideApplies(ctx context.Context, tx *sql.Tx, actor domain.ActorID, loca
 		return false, err
 	}
 	return true, nil
+}
+
+// readPlanItems only returns task references inside the session binding.
+func readPlanItems(ctx context.Context, q queryer, b domain.ScopeBinding, id domain.PlanID) ([]domain.PlanItem, error) {
+	clause, args, err := scopeClause(b)
+	if err != nil {
+		return nil, err
+	}
+	args = append([]any{string(id)}, args...)
+	rows, err := q.QueryContext(ctx, "SELECT pi.work_item_id, pi.role, pi.position FROM plan_items pi JOIN work_items w ON w.id = pi.work_item_id WHERE pi.plan_id = ? AND w.scope_id IN ("+clause+") ORDER BY pi.position", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.PlanItem{}
+	for rows.Next() {
+		var it domain.PlanItem
+		if err := rows.Scan(&it.WorkItemID, &it.Role, &it.Position); err != nil {
+			return nil, err
+		}
+		it.Position = len(out)
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+func (s *Store) ReadPlan(ctx context.Context, b domain.ScopeBinding, kind domain.PlanKind, period string) (domain.Plan, error) {
+	if err := b.Validate(); err != nil {
+		return domain.Plan{}, err
+	}
+	p, found, err := loadPlan(ctx, s.db, b.Profile, kind, period)
+	if err != nil {
+		return p, err
+	}
+	if !found {
+		return p, domain.NewError(domain.NotFound, "plan not found")
+	}
+	p.Items, err = readPlanItems(ctx, s.db, b, p.ID)
+	if err != nil {
+		return p, err
+	}
+	var total int
+	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM plan_items WHERE plan_id=?", p.ID).Scan(&total); err != nil {
+		return p, err
+	}
+	if total != len(p.Items) {
+		p.ExceptionReason = ""
+	}
+	return p, nil
 }

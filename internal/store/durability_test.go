@@ -54,7 +54,7 @@ func TestExportRestoreRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw1, &doc); err != nil {
 		t.Fatalf("decode export: %v", err)
 	}
-	if doc.Format != "ztd-export" || doc.Version != 1 {
+	if doc.Format != "ztd-export" || doc.Version != 2 {
 		t.Fatalf("export header = %q v%d", doc.Format, doc.Version)
 	}
 	if len(doc.Tables) != len(canonicalTables) {
@@ -284,7 +284,6 @@ func TestCheckCatchesDeliberatelyBrokenRows(t *testing.T) {
 	}
 	joined := strings.Join(rep.Errors, "\n")
 	for _, want := range []string{
-		"outside the profile scopes",
 		"has no history events",
 		"carries closure fields while not archived",
 	} {

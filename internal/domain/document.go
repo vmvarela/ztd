@@ -38,6 +38,8 @@ type Document struct {
 	Title     string         `json:"title"`
 	Body      string         `json:"body"`
 	Status    DocumentStatus `json:"status"`
+	Sources   []string       `json:"sources,omitempty"`
+	ProjectID *ProjectID     `json:"project_id,omitempty"`
 	Revision  Revision       `json:"revision"`
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`

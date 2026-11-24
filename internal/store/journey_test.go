@@ -95,6 +95,7 @@ func TestGetWorkItemWithCheckpoint(t *testing.T) {
 
 func TestRecordReviewUpsertsOnePeriod(t *testing.T) {
 	e := newTestEnv(t)
+	e.binding.Scopes = []domain.ScopeID{"personal"}
 	first, err := e.s.RecordReview(e.ctx(), app.ReviewCmd{
 		Binding: e.binding, Key: "r1", Kind: "daily", Period: "2026-11-19",
 		Outcomes: "done", Coverage: "inbox", Complete: true,
@@ -115,7 +116,7 @@ func TestRecordReviewUpsertsOnePeriod(t *testing.T) {
 	if second.CompletionState != "partial" {
 		t.Fatalf("review state = %q, want partial", second.CompletionState)
 	}
-	if n := e.count(`SELECT count(*) FROM reviews`); n != 1 {
+	if n := e.count(`SELECT count(*) FROM documents WHERE kind='review'`); n != 1 {
 		t.Fatalf("reviews rows = %d, want 1", n)
 	}
 }

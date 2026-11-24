@@ -239,7 +239,7 @@ func (s *Store) VerifyImport(ctx context.Context, cmd app.ImportCmd) (app.Migrat
 }
 
 func stagingEmpty(ctx context.Context, tx *sql.Tx) error {
-	for _, table := range []string{"captures", "work_items", "plans", "routines", "knowledge_records", "legacy_records"} {
+	for _, table := range []string{"captures", "work_items", "plans", "routines", "documents", "legacy_records"} {
 		var n int
 		if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&n); err != nil {
 			return err
@@ -441,27 +441,10 @@ func (im *importer) ensureScope(scope string, profiles map[string]string) (strin
 		return "", err
 	}
 	profile := "personal"
-	profileKind := "personal"
-	profileName := "Personal"
-	switch {
-	case scope == "personal" || scope == "opensource":
-		profile = "personal"
-	case scope == "work":
-		profile, profileKind, profileName = "work", "work_client", "Work"
-	case strings.HasPrefix(scope, "client:"):
-		profile, profileKind, profileName = scope, "work_client", strings.TrimPrefix(scope, "client:")
-	}
-	if _, err := im.tx.ExecContext(im.ctx,
-		`INSERT INTO profiles (id, name, kind, owner_actor_id, timezone, status)
-		 VALUES (?, ?, ?, ?, ?, 'active') ON CONFLICT(id) DO NOTHING`,
-		profile, profileName, profileKind, im.actor, localTimezone()); err != nil {
+	if _, err := im.tx.ExecContext(im.ctx, "INSERT INTO settings(id,owner_actor_id,timezone) VALUES(1,?,?) ON CONFLICT(id) DO NOTHING", im.actor, localTimezone()); err != nil {
 		return "", err
 	}
-	if _, err := im.tx.ExecContext(im.ctx,
-		`INSERT INTO profile_scopes (profile_id, scope_id) VALUES (?, ?)
-		 ON CONFLICT(profile_id, scope_id) DO NOTHING`, profile, scope); err != nil {
-		return "", err
-	}
+
 	profiles[scope] = profile
 	return profile, nil
 }
@@ -492,8 +475,8 @@ func (im *importer) ensureArea(scope, name string) (string, error) {
 	}
 	id := "area:" + scope + ":" + name
 	if _, err := im.tx.ExecContext(im.ctx,
-		`INSERT INTO areas (id, scope_id, name, revision) VALUES (?, ?, ?, 1)
-		 ON CONFLICT(scope_id, name) DO NOTHING`, id, scope, name); err != nil {
+		`INSERT INTO contexts (id, scope_id, name, revision) VALUES (?, ?, ?, 1)
+		 ON CONFLICT(scope_id, name) DO NOTHING`, id, scope, "legacy-area/"+fmt.Sprintf("%X", id)); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -645,9 +628,9 @@ func (im *importer) importTask(t legacy.Task) error {
 		closed = &c
 		updated = c
 	}
-	closure := any(nil)
+	status := lifecycle
 	if lifecycle == "archived" {
-		closure = string(domain.Unspecified)
+		status = "closed_unknown"
 	}
 	var ctxArg, projArg, closedArg any
 	if ctxID != "" {
@@ -667,12 +650,12 @@ func (im *importer) importTask(t legacy.Task) error {
 	}
 	if _, err := im.tx.ExecContext(im.ctx,
 		`INSERT INTO work_items (id, scope_id, area_id, project_id, context_id, title, origin_capture_id,
-		   lifecycle, waiting_on, due_at, closure_kind, closed_at, resolution, revision, created_at, updated_at,
+		   status, waiting_on, due_at, closed_at, resolution, revision, created_at, updated_at,
 		   custom_fields)
-		 VALUES (?, ?, NULL, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, 1, ?, ?, ?)
+		 VALUES (?, ?, NULL, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, 1, ?, ?, ?)
 		 ON CONFLICT(id) DO NOTHING`,
-		t.ID, scope, projArg, ctxArg, t.Title, lifecycle, nullIfEmpty(waiting),
-		closure, closedArg, nullIfEmpty(resolution), fmtTime(captured), fmtTime(updated),
+		t.ID, scope, projArg, ctxArg, t.Title, status, nullIfEmpty(waiting),
+		closedArg, nullIfEmpty(resolution), fmtTime(captured), fmtTime(updated),
 		string(custom)); err != nil {
 		return err
 	}
@@ -872,11 +855,10 @@ func (im *importer) importAgent(export *legacy.AgentExport, profiles map[string]
 			created = fmtTime(im.now)
 		}
 		if _, err := im.tx.ExecContext(im.ctx,
-			`INSERT INTO knowledge_records (id, scope_id, kind, text, state, review_state, source_refs,
-			   valid_from, reviewed_at, supersedes_id, revision, created_at)
-			 VALUES (?, ?, ?, ?, 'current', 'verified', ?, NULL, ?, NULL, 1, ?)
-			 ON CONFLICT(id) DO NOTHING`,
-			k.ID, scope, k.Kind, k.Text, sourceRefs, created, created); err != nil {
+			`INSERT INTO documents (id, scope_id, kind, slug, title, body, status, sources_json, metadata_json, revision, created_at, updated_at)
+ VALUES (?, ?, 'knowledge', ?, ?, ?, 'verified', ?, ?, 1, ?, ?) ON CONFLICT(id) DO NOTHING`,
+			"legacy-knowledge:"+fmt.Sprintf("%X", k.ID), scope, "legacy/knowledge/"+fmt.Sprintf("%X", k.ID), k.ID, k.Text, sourceRefs,
+			string(mustJSON(k)), created, created); err != nil {
 			return err
 		}
 		if err := im.record("agent_knowledge", k.ID, scope, k, "imported", ""); err != nil {
@@ -960,3 +942,5 @@ func legacyTime(value, taskID string) time.Time {
 }
 
 var _ = io.Discard
+
+func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }

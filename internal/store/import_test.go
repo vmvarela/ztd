@@ -70,7 +70,7 @@ func TestImportFixtureIntoEmptyStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Imported != 20 || report.Quarantined != 0 {
+	if report.Imported != 19 || report.Quarantined != 0 {
 		t.Fatalf("unexpected dispositions: imported=%d quarantined=%d", report.Imported, report.Quarantined)
 	}
 	check, err := st.Check(ctx, nil)
@@ -81,8 +81,8 @@ func TestImportFixtureIntoEmptyStore(t *testing.T) {
 		t.Fatalf("check failed: %v", check.Errors)
 	}
 	for table, want := range map[string]int{
-		"work_items": 4, "captures": 2, "plans": 3, "plan_items": 3,
-		"routines": 2, "knowledge_records": 1, "legacy_records": 20,
+		"work_items": 4, "captures": 2, "plans": 2, "plan_items": 3,
+		"routines": 2, "documents": 1, "legacy_records": 19,
 	} {
 		var n int
 		if err := st.db.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&n); err != nil {
@@ -267,8 +267,8 @@ func TestImportSameSourceReplaysReport(t *testing.T) {
 	if err := st.db.QueryRowContext(ctx, "SELECT count(*) FROM legacy_records").Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 20 {
-		t.Fatalf("legacy rows after replay = %d, want 20", n)
+	if n != 19 {
+		t.Fatalf("legacy rows after replay = %d, want 19", n)
 	}
 }
 

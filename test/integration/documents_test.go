@@ -222,8 +222,8 @@ func TestDocLogLintArchive(t *testing.T) {
 		report.Errors[0].Slug != "broken" {
 		t.Fatalf("lint errors = %+v, want one unresolved_wikilink on broken", report.Errors)
 	}
-	if len(report.Warnings) != 1 || report.Warnings[0].Code != "orphan_knowledge" {
-		t.Fatalf("lint warnings = %+v, want the orphan warning", report.Warnings)
+	if len(report.Warnings) != 0 {
+		t.Fatalf("lint warnings = %+v, want no index requirement", report.Warnings)
 	}
 
 	// doc archive stores the answer under answers/<slug>, header included.

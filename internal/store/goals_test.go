@@ -41,7 +41,7 @@ func TestOneActivePrimaryGoalPerProfile(t *testing.T) {
 	if _, err := e.setGoal("g2", "primary", "second"); !domain.Of(err, domain.Conflict) {
 		t.Fatalf("second primary error = %v, want conflict", err)
 	}
-	if _, err := e.setGoal("g3", "subgoal", "supporting"); err != nil {
+	if _, err := e.setGoal("g3", "subgoal", "supporting"); !domain.Of(err, domain.InvalidInput) {
 		t.Fatalf("subgoal: %v", err)
 	}
 }

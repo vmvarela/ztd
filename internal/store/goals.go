@@ -11,28 +11,29 @@ import (
 	"ztd/internal/domain"
 )
 
-const goalColumns = `id, profile_id, kind, start_on, end_on, statement, status`
+const goalColumns = `id, profile_id, kind, start_on, end_on, statement, status, scope_id`
 
 func scanGoal(sc scanner) (domain.Goal, error) {
 	var (
 		g       domain.Goal
 		endOn   sql.NullString
 		profile string
+		scope   sql.NullString
 	)
-	if err := sc.Scan(&g.ID, &profile, &g.Kind, &g.StartOn, &endOn, &g.Statement, &g.Status); err != nil {
+	if err := sc.Scan(&g.ID, &profile, &g.Kind, &g.StartOn, &endOn, &g.Statement, &g.Status, &scope); err != nil {
 		return domain.Goal{}, err
 	}
 	g.Profile = domain.ProfileID(profile)
+	g.Scope = domain.ScopeID(scope.String)
 	if endOn.Valid {
 		g.EndOn = endOn.String
 	}
 	return g, nil
 }
 
-func activeGoal(ctx context.Context, q queryer, profile domain.ProfileID) (*domain.Goal, error) {
+func activeGoal(ctx context.Context, q queryer, b domain.ScopeBinding) (*domain.Goal, error) {
 	row := q.QueryRowContext(ctx,
-		"SELECT "+goalColumns+" FROM goals WHERE profile_id = ? AND kind = 'primary' AND status = 'active'",
-		string(profile))
+		"SELECT "+goalColumns+" FROM goals WHERE kind = 'primary' AND status = 'active' AND scope_id IN ("+scopeFilter(len(b.Scopes))+")", scopeArgs(b)...)
 	g, err := scanGoal(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -50,6 +51,9 @@ func (s *Store) SetGoal(ctx context.Context, cmd app.GoalCmd, now time.Time) (do
 	now = now.UTC().Truncate(time.Second)
 	if err := cmd.Binding.Validate(); err != nil {
 		return domain.Goal{}, err
+	}
+	if cmd.Kind != "primary" {
+		return domain.Goal{}, domain.Invalid("use projects for steps; only one primary goal is supported")
 	}
 	hash, err := hashPayload(cmd)
 	if err != nil {
@@ -69,13 +73,13 @@ func (s *Store) SetGoal(ctx context.Context, cmd app.GoalCmd, now time.Time) (do
 			return domain.NewError(domain.NotFound, "profile %s does not exist", cmd.Binding.Profile)
 		}
 		if cmd.Kind == "primary" {
-			existing, err := activeGoal(ctx, tx, cmd.Binding.Profile)
+			existing, err := activeGoal(ctx, tx, domain.ScopeBinding{Scopes: mapScopeKeys(scopes)})
 			if err != nil {
 				return err
 			}
 			if existing != nil {
 				return domain.NewError(domain.Conflict,
-					"profile %s already has active primary goal %s", cmd.Binding.Profile, existing.ID)
+					"the store already has an active goal")
 			}
 		}
 		date := idDate(now)
@@ -86,6 +90,7 @@ func (s *Store) SetGoal(ctx context.Context, cmd app.GoalCmd, now time.Time) (do
 		out = domain.Goal{
 			ID:        fmt.Sprintf("G-%s-%03d", date, seq),
 			Profile:   cmd.Binding.Profile,
+			Scope:     cmd.Binding.Scopes[0],
 			Kind:      cmd.Kind,
 			StartOn:   cmd.StartOn,
 			EndOn:     cmd.EndOn,
@@ -93,10 +98,10 @@ func (s *Store) SetGoal(ctx context.Context, cmd app.GoalCmd, now time.Time) (do
 			Status:    "active",
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO goals (id, profile_id, kind, start_on, end_on, statement, status, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+			`INSERT INTO goals (id, profile_id, kind, start_on, end_on, statement, status, created_at, updated_at, scope_id)
+			 VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
 			out.ID, string(out.Profile), out.Kind, out.StartOn, nullIfEmpty(out.EndOn), out.Statement,
-			fmtTime(now), fmtTime(now)); err != nil {
+			fmtTime(now), fmtTime(now), out.Scope); err != nil {
 			return err
 		}
 		if err := insertHistory(ctx, tx, "goal", out.ID, "created", "", string(out.Profile), 1, out, now); err != nil {
@@ -112,17 +117,16 @@ func (s *Store) ActiveGoal(ctx context.Context, b domain.ScopeBinding) (*domain.
 	if err := b.Validate(); err != nil {
 		return nil, err
 	}
-	return activeGoal(ctx, s.db, b.Profile)
+	return activeGoal(ctx, s.db, b)
 }
 
 // primaryGoal returns the Profile's primary goal: the active one when it
 // exists, otherwise the most recent terminal one, so repeating a close is
 // idempotent instead of not_found.
-func primaryGoal(ctx context.Context, q queryer, profile domain.ProfileID) (*domain.Goal, error) {
+func primaryGoal(ctx context.Context, q queryer, b domain.ScopeBinding) (*domain.Goal, error) {
 	row := q.QueryRowContext(ctx,
-		"SELECT "+goalColumns+" FROM goals WHERE profile_id = ? AND kind = 'primary'"+
-			" ORDER BY status = 'active' DESC, created_at DESC, id DESC LIMIT 1",
-		string(profile))
+		"SELECT "+goalColumns+" FROM goals WHERE kind = 'primary' AND scope_id IN ("+scopeFilter(len(b.Scopes))+")"+
+			" ORDER BY status = 'active' DESC, created_at DESC, id DESC LIMIT 1", scopeArgs(b)...)
 	g, err := scanGoal(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -149,7 +153,7 @@ func (s *Store) SetGoalStatus(ctx context.Context, b domain.ScopeBinding, status
 	}
 	var out domain.Goal
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		g, err := primaryGoal(ctx, tx, b.Profile)
+		g, err := primaryGoal(ctx, tx, b)
 		if err != nil {
 			return err
 		}
@@ -190,4 +194,12 @@ func verb(status string) string {
 		return "complete"
 	}
 	return "cancel"
+}
+
+func mapScopeKeys(m map[domain.ScopeID]bool) []domain.ScopeID {
+	out := make([]domain.ScopeID, 0, len(m))
+	for id := range m {
+		out = append(out, id)
+	}
+	return out
 }

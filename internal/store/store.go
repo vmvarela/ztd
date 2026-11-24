@@ -18,7 +18,8 @@ import (
 // Store owns the SQLite persistence behind the app.Repo methods implemented in
 // this package.
 type Store struct {
-	db *sql.DB
+	path string
+	db   *sql.DB
 }
 
 // Close releases the connection pool.
@@ -269,20 +270,10 @@ func (s *Store) SeedDefaults(ctx context.Context, actor string) error {
 				return err
 			}
 		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO profiles (id, name, kind, owner_actor_id, timezone, status)
-			     VALUES ('personal', 'Personal', 'personal', ?, ?, 'active')
-			     ON CONFLICT(id) DO NOTHING`,
-			actor, localTimezone()); err != nil {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO settings(id,owner_actor_id,timezone) VALUES(1,?,?) ON CONFLICT(id) DO NOTHING", actor, localTimezone()); err != nil {
 			return err
 		}
-		for _, sc := range []string{"personal", "opensource"} {
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO profile_scopes (profile_id, scope_id) VALUES ('personal', ?)
-				     ON CONFLICT(profile_id, scope_id) DO NOTHING`, sc); err != nil {
-				return err
-			}
-		}
+
 		return nil
 	})
 }
@@ -300,4 +291,11 @@ func localTimezone() string {
 		}
 	}
 	return time.Local.String()
+}
+
+func nullableString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }

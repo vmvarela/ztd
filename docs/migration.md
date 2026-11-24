@@ -1,5 +1,9 @@
 # Migrating the Markdown store
 
+> The [current model](current-model.md) supersedes the profile graph, separate
+> knowledge/review stores and manual-index workflows described in this historical
+> reference. Existing APIs remain compatibility adapters.
+
 The legacy store is Markdown plus an agent SQLite database. ZTD imports a
 **copy** of it into a new SQLite database. It never writes to the source and
 never runs a dual-write period.

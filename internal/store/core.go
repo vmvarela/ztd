@@ -16,7 +16,7 @@ import (
 
 const captureColumns = `id, scope_id, source_id, external_id, external_revision,
 	original_text, content_hash, source_uri, occurred_at, captured_at,
-	processing_state, processing_outcome, review_after, revision`
+	processing_state, processing_outcome, review_after, revision, outcome_json`
 
 const workItemColumns = `id, scope_id, area_id, project_id, context_id, title,
 	origin_capture_id, lifecycle, waiting_on, due_at, closure_kind, closed_at,
@@ -55,10 +55,11 @@ func scanCapture(sc scanner) (domain.Capture, error) {
 		cap                                          domain.Capture
 		extID, extRev, uri, occ, outcome, reviewVals sql.NullString
 		captured, state                              string
+		details                                      sql.NullString
 	)
 	if err := sc.Scan(&cap.ID, &cap.Scope, &cap.SourceID, &extID, &extRev,
 		&cap.OriginalText, &cap.ContentHash, &uri, &occ, &captured, &state,
-		&outcome, &reviewVals, &cap.Revision); err != nil {
+		&outcome, &reviewVals, &cap.Revision, &details); err != nil {
 		return domain.Capture{}, err
 	}
 	cap.ExternalID = nullStr(extID)
@@ -83,6 +84,11 @@ func scanCapture(sc scanner) (domain.Capture, error) {
 			o.ReviewAfter = cap.ReviewAfter
 		}
 		cap.Outcome = &o
+	}
+	if details.Valid && details.String != "null" {
+		if err := json.Unmarshal([]byte(details.String), &cap.Outcome); err != nil {
+			return domain.Capture{}, err
+		}
 	}
 	return cap, nil
 }
@@ -540,6 +546,33 @@ func (s *Store) Process(ctx context.Context, cmd app.ProcessCmd, now time.Time) 
 			return err
 		}
 
+		if cmd.Document != nil {
+			if cmd.Outcome.Kind != domain.OutcomeReference {
+				return domain.Invalid("document requires reference outcome")
+			}
+			docCmd := *cmd.Document
+			docCmd.Binding = cmd.Binding
+			if docCmd.Scope == "" {
+				docCmd.Scope = cap.Scope
+			}
+			// Keep capture provenance in its boundary. Move/copy knowledge explicitly.
+			if docCmd.Scope != cap.Scope {
+				return domain.Invalid("reference document must use the capture scope")
+			}
+			doc, err := putDocumentTx(ctx, tx, docCmd, now)
+			if err != nil {
+				return err
+			}
+			cmd.Outcome.DocumentID = doc.ID
+		}
+		if cmd.Outcome.DocumentID != "" {
+			if cmd.Outcome.Kind != domain.OutcomeReference {
+				return domain.Invalid("document_id requires reference outcome")
+			}
+			if err := checkSameScope(ctx, tx, "documents", "document", cmd.Outcome.DocumentID, cap.Scope); err != nil {
+				return err
+			}
+		}
 		state := domain.Processed
 		switch cmd.Outcome.Kind {
 		case domain.OutcomeDiscard:
@@ -577,9 +610,9 @@ func (s *Store) Process(ctx context.Context, cmd app.ProcessCmd, now time.Time) 
 				}
 				if _, err := tx.ExecContext(ctx,
 					`INSERT INTO work_items (id, scope_id, area_id, project_id, context_id, title,
-						origin_capture_id, lifecycle, waiting_on, due_at, closure_kind, closed_at,
+						origin_capture_id, status, waiting_on, due_at, closed_at,
 						resolution, revision, created_at, updated_at, custom_fields)
-					     VALUES (?, ?, ?, ?, ?, ?, ?, 'next', NULL, NULL, NULL, NULL, NULL, 1, ?, ?, '{}')`,
+					     VALUES (?, ?, ?, ?, ?, ?, ?, 'next', NULL, NULL, NULL, NULL, 1, ?, ?, '{}')`,
 					string(item.ID), string(item.Scope), argID(item.AreaID), argID(item.ProjectID),
 					argID(item.ContextID), item.Title, string(*item.OriginCaptureID),
 					fmtTime(item.CreatedAt), fmtTime(item.UpdatedAt),
@@ -594,10 +627,14 @@ func (s *Store) Process(ctx context.Context, cmd app.ProcessCmd, now time.Time) 
 			}
 		}
 
+		details, err := json.Marshal(cmd.Outcome)
+		if err != nil {
+			return err
+		}
 		res, err := tx.ExecContext(ctx,
-			`UPDATE captures SET processing_state = ?, processing_outcome = ?, review_after = ?, revision = ?
+			`UPDATE captures SET processing_state = ?, processing_outcome = ?, review_after = ?, revision = ?, outcome_json = ?, document_id = ?
 			     WHERE id = ? AND scope_id = ? AND revision = ?`,
-			string(state), string(cmd.Outcome.Kind), argTime(reviewAfter), cap.Revision+1,
+			string(state), string(cmd.Outcome.Kind), argTime(reviewAfter), cap.Revision+1, string(details), nullableString(cmd.Outcome.DocumentID),
 			string(cap.ID), string(cap.Scope), cap.Revision)
 		if err != nil {
 			return err
@@ -632,7 +669,7 @@ func checkOutcomeRefs(ctx context.Context, q queryer, scope domain.ScopeID, o do
 		}
 	}
 	if o.AreaID != nil {
-		if err := checkSameScope(ctx, q, "areas", "area", string(*o.AreaID), scope); err != nil {
+		if err := checkSameScope(ctx, q, "contexts", "area", string(*o.AreaID), scope); err != nil {
 			return err
 		}
 	}

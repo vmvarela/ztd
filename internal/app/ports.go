@@ -10,6 +10,8 @@ import (
 type Clock interface{ Now() time.Time }
 
 type Repo interface {
+	Settings(ctx context.Context) (domain.Settings, error)
+	SetTimezone(ctx context.Context, zone string) (domain.Settings, error)
 	// Captures and processing.
 	Capture(ctx context.Context, cmd CaptureCmd, now time.Time) (domain.Capture, error)
 	InboxNext(ctx context.Context, b domain.ScopeBinding, now time.Time) (domain.Capture, error)
@@ -19,12 +21,14 @@ type Repo interface {
 	GetCapture(ctx context.Context, b domain.ScopeBinding, id domain.CaptureID) (domain.Capture, error)
 
 	// Work and planning.
+	UpdateTask(ctx context.Context, b domain.ScopeBinding, in TaskUpdate, now time.Time) (domain.Task, error)
 	GetWorkItem(ctx context.Context, b domain.ScopeBinding, id domain.WorkItemID) (domain.WorkItem, error)
 	GetWorkItemWithCheckpoint(ctx context.Context, b domain.ScopeBinding, id domain.WorkItemID) (domain.WorkItem, *domain.Checkpoint, error)
 	ListWorkItems(ctx context.Context, b domain.ScopeBinding, lifecycle domain.Lifecycle) ([]domain.WorkItem, error)
 	ListWorkItemsFiltered(ctx context.Context, b domain.ScopeBinding, filter ListWorkItemsFilter) ([]domain.WorkItem, error)
 	MoveWorkItem(ctx context.Context, cmd MoveWorkItemCmd, now time.Time) (domain.WorkItem, error)
 	Prepare(ctx context.Context, b domain.ScopeBinding, date string) (PlanBrief, error)
+	ReadPlan(ctx context.Context, b domain.ScopeBinding, kind domain.PlanKind, period string) (domain.Plan, error)
 	CommitPlan(ctx context.Context, cmd CommitPlanCmd, now time.Time) (domain.Plan, error)
 	Find(ctx context.Context, b domain.ScopeBinding, query string, limit int) ([]domain.WorkItem, error)
 	SetGoal(ctx context.Context, cmd GoalCmd, now time.Time) (domain.Goal, error)
@@ -35,6 +39,7 @@ type Repo interface {
 	StartFocus(ctx context.Context, cmd FocusStartCmd, now time.Time) (domain.FocusSession, []domain.Checkpoint, error)
 	Checkpoint(ctx context.Context, cmd CheckpointCmd, now time.Time) (domain.Checkpoint, error)
 	FinishFocus(ctx context.Context, cmd FocusFinishCmd, now time.Time) (domain.FocusSession, error)
+	ReadReview(ctx context.Context, b domain.ScopeBinding, kind, period string) (domain.Document, error)
 	RecordReview(ctx context.Context, cmd ReviewCmd, now time.Time) (domain.Review, error)
 	DueRoutines(ctx context.Context, b domain.ScopeBinding, date string) ([]domain.Routine, error)
 	CompleteRoutine(ctx context.Context, b domain.ScopeBinding, id domain.RoutineID, date string) (domain.Routine, error)
@@ -62,7 +67,7 @@ type Repo interface {
 	PutDocument(ctx context.Context, cmd DocumentCmd, now time.Time) (domain.Document, error)
 	GetDocument(ctx context.Context, b domain.ScopeBinding, kind domain.DocumentKind, slug string, scope ...domain.ScopeID) (domain.Document, error)
 	ListDocuments(ctx context.Context, b domain.ScopeBinding, kind domain.DocumentKind) ([]domain.Document, error)
-	SearchDocuments(ctx context.Context, b domain.ScopeBinding, query string, kind domain.DocumentKind, limit int) ([]DocumentSearchHit, error)
+	SearchDocuments(ctx context.Context, b domain.ScopeBinding, query string, kind domain.DocumentKind, limit int, project ...domain.ProjectID) ([]DocumentSearchHit, error)
 	ListDocumentHistory(ctx context.Context, b domain.ScopeBinding, filter DocumentHistoryFilter) ([]DocumentLogEntry, error)
 	AddProject(ctx context.Context, cmd ProjectCmd, now time.Time) (domain.Project, error)
 	SetProjectRepo(ctx context.Context, projectID domain.ProjectID, repoURL, clonePath string, now time.Time) (domain.Project, error)
@@ -132,6 +137,7 @@ type ProcessCmd struct {
 	ID       domain.CaptureID
 	Expected domain.Revision
 	Outcome  domain.Outcome
+	Document *DocumentCmd `json:",omitempty"`
 }
 
 // ListWorkItemsFilter narrows a work item listing inside the binding scopes.
@@ -156,6 +162,9 @@ type MoveWorkItemCmd struct {
 	WaitingOn   *string
 	Resolution  *string
 	ClosureKind domain.ClosureKind
+	ProjectID   *domain.ProjectID `json:",omitempty"`
+	ContextID   *domain.ContextID `json:",omitempty"`
+	DueAt       *string           `json:",omitempty"`
 	Fields      map[string]string
 	Expected    domain.Revision
 }
@@ -166,13 +175,14 @@ type ProcessResult struct {
 }
 
 type CommitPlanCmd struct {
-	Binding    domain.ScopeBinding
-	Key        string
-	Kind       domain.PlanKind
-	Period     string
-	Expected   domain.Revision
-	Items      []domain.PlanItem
-	OverrideID string
+	Binding         domain.ScopeBinding
+	Key             string
+	Kind            domain.PlanKind
+	Period          string
+	Expected        domain.Revision
+	Items           []domain.PlanItem
+	ExceptionReason string `json:",omitempty"`
+	OverrideID      string
 }
 
 type GoalCmd struct {
@@ -291,7 +301,9 @@ type DocumentCmd struct {
 	Body      string
 	Status    domain.DocumentStatus
 	Expected  domain.Revision
-	DraftOnly bool `json:"-"`
+	Sources   []string          `json:",omitempty"`
+	ProjectID *domain.ProjectID `json:",omitempty"`
+	DraftOnly bool              `json:"-"`
 }
 
 // DocumentLogEntry is one append-only history event of a document, carrying

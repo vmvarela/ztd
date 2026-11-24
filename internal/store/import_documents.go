@@ -504,8 +504,7 @@ func (s *Store) ImportDocuments(ctx context.Context, cmd app.ImportDocumentsCmd,
 		}
 		for _, d := range plan.docs {
 			existing, err := scanDocument(tx.QueryRowContext(ctx,
-				"SELECT "+documentColumns+" FROM documents WHERE scope_id = ? AND kind = ? AND slug = ?",
-				d.scope, string(d.class.kind), d.class.slug))
+				"SELECT "+documentColumns+" FROM documents WHERE id = ?", fmt.Sprintf("doc:%s:%s:%s", d.scope, d.class.kind, d.class.slug)))
 			switch {
 			case errors.Is(err, sql.ErrNoRows):
 				report.Inserted++
@@ -522,12 +521,18 @@ func (s *Store) ImportDocuments(ctx context.Context, cmd app.ImportDocumentsCmd,
 						CreatedAt: now,
 						UpdatedAt: now,
 					}
+					if d.class.kind != domain.DocumentKnowledge {
+						doc.Slug = string(d.class.kind) + "/" + d.class.slug
+					}
 					if _, err := tx.ExecContext(ctx,
 						`INSERT INTO documents (id, scope_id, kind, slug, title, body, status,
 							revision, created_at, updated_at)
 						     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-						doc.ID, d.scope, string(d.class.kind), d.class.slug, doc.Title, doc.Body,
+						doc.ID, d.scope, string(d.class.kind), doc.Slug, doc.Title, doc.Body,
 						string(doc.Status), fmtTime(now), fmtTime(now)); err != nil {
+						return err
+					}
+					if _, err := tx.ExecContext(ctx, "INSERT INTO document_aliases(scope_id,kind,slug,document_id) VALUES(?,?,?,?)", d.scope, d.class.kind, d.class.slug, doc.ID); err != nil {
 						return err
 					}
 					if err := insertHistory(ctx, tx, "document", doc.ID, "created",
@@ -551,7 +556,7 @@ func (s *Store) ImportDocuments(ctx context.Context, cmd app.ImportDocumentsCmd,
 						`UPDATE documents SET title = ?, body = ?, status = ?, revision = ?, updated_at = ?
 						     WHERE id = ? AND scope_id = ? AND kind = ? AND slug = ?`,
 						next.Title, next.Body, string(next.Status), int64(next.Revision), fmtTime(next.UpdatedAt),
-						next.ID, d.scope, string(d.class.kind), d.class.slug); err != nil {
+						next.ID, d.scope, string(d.class.kind), next.Slug); err != nil {
 						return err
 					}
 					if err := insertHistory(ctx, tx, "document", next.ID, "updated",

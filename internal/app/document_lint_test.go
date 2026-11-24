@@ -118,9 +118,8 @@ func TestLintDocumentsOrphanKnowledge(t *testing.T) {
 	if !report.OK() {
 		t.Fatalf("errors = %+v, want none", report.Errors)
 	}
-	if len(report.Warnings) != 1 || report.Warnings[0].Code != LintOrphanKnowledge ||
-		report.Warnings[0].Slug != "lonely" {
-		t.Fatalf("warnings = %+v, want one orphan_knowledge for lonely", report.Warnings)
+	if len(report.Warnings) != 0 {
+		t.Fatalf("optional index produced warnings: %+v", report.Warnings)
 	}
 	for _, f := range report.Findings {
 		if f.Kind == string(domain.DocumentKnowledgeIndex) && f.Code == LintOrphanKnowledge {
@@ -133,8 +132,8 @@ func TestLintDocumentsOrphanKnowledge(t *testing.T) {
 		lintDoc("personal", string(domain.DocumentKnowledge), "a", "A", "text"),
 		lintDoc("personal", string(domain.DocumentKnowledge), "b", "B", "text"),
 	})
-	if !bare.OK() || len(bare.Warnings) != 1 || bare.Warnings[0].Code != LintMissingIndex {
-		t.Fatalf("bare scope = %+v, want one missing_index warning", bare.Warnings)
+	if !bare.OK() || len(bare.Warnings) != 0 {
+		t.Fatalf("bare scope = %+v, want no index requirement", bare.Warnings)
 	}
 }
 
@@ -149,10 +148,9 @@ func TestLintDocumentsDeterministicOrder(t *testing.T) {
 		lintDoc("alpha", string(domain.DocumentKnowledge), "alpha-doc", "Ad", "[missing](gone)"),
 	}
 	want := []string{
-		LintOrphanKnowledge, LintUnresolvedLink, // alpha/alpha-doc
-		LintOrphanKnowledge, LintUnresolvedWiki, // alpha/zeta
+		LintUnresolvedLink, // alpha/alpha-doc
+		LintUnresolvedWiki, // alpha/zeta
 		LintUnresolvedWiki, // alpha/i
-		LintMissingIndex,   // beta
 	}
 	got := codes(LintDocuments(docs))
 	if strings.Join(got, ",") != strings.Join(want, ",") {

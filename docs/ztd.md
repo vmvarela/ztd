@@ -1,5 +1,9 @@
 # Using ZTD
 
+> The [current model](current-model.md) supersedes the profile graph, separate
+> knowledge/review stores and manual-index workflows described in this historical
+> reference. Existing APIs remain compatibility adapters.
+
 ZTD is the method, not a generic to-do list. This walkthrough follows one day.
 Every command writes to one database; substitute your path for `DB`.
 
