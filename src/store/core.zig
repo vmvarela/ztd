@@ -454,6 +454,12 @@ const HistoryPayload = union(enum) {
     outcome: domain.Capture,
     work_item: domain.WorkItem,
     move: struct { target: []const u8, fields: []const u8 },
+    goal: domain.Goal,
+    plan: domain.Plan,
+    focus: domain.FocusSession,
+    focus_start: FocusStartResult,
+    checkpoint: domain.Checkpoint,
+    review: domain.Review,
 };
 
 fn writeHistoryPayload(w: *std.Io.Writer, payload: HistoryPayload) !void {
@@ -468,6 +474,26 @@ fn writeHistoryPayload(w: *std.Io.Writer, payload: HistoryPayload) !void {
             try o.raw("fields", m.fields);
             try o.str("target", m.target);
         },
+        .goal => |g| try g.write(&o),
+        .plan => |p| try p.write(&o),
+        .focus => |f| try f.write(&o),
+        // focus start stores the CLI result as a Go map: sorted keys.
+        .focus_start => |r| {
+            if (r.checkpoints.len > 0) {
+                var arr = try o.arr("checkpoints");
+                for (r.checkpoints) |cp| {
+                    var inner = try arr.obj();
+                    try cp.write(&inner);
+                    try inner.end();
+                }
+                try arr.end();
+            }
+            var inner = try o.obj("focus");
+            try r.focus.write(&inner);
+            try inner.end();
+        },
+        .checkpoint => |cp| try cp.write(&o),
+        .review => |r| try r.write(&o),
     }
     try o.end();
 }
@@ -1287,4 +1313,993 @@ test "capture writes one pending row and replays idempotently" {
     try std.testing.expectEqualStrings(cap.id, again.id);
     try std.testing.expectError(error.Ztd, capture(&s, a, .{ .binding = b, .key = "k1", .text = "other" }, 1_700_000_000));
     try std.testing.expectEqual(errors.Family.idempotency_conflict, errors.getFamily());
+}
+
+// ---------------------------------------------------------------- goals
+
+const goal_columns = "id, profile_id, kind, start_on, end_on, statement, status";
+
+pub const GoalCmd = struct {
+    binding: domain.Binding,
+    key: []const u8,
+    kind: []const u8,
+    start_on: []const u8 = "",
+    end_on: []const u8 = "",
+    statement: []const u8,
+};
+
+fn writeGoalRequest(w: *std.Io.Writer, cmd: GoalCmd) !void {
+    var o = try jsonw.Obj.init(w);
+    try writeBinding(&o, cmd.binding);
+    try o.str("Key", cmd.key);
+    try o.str("Kind", cmd.kind);
+    try o.str("StartOn", cmd.start_on);
+    try o.str("EndOn", cmd.end_on);
+    try o.str("Statement", cmd.statement);
+    try o.end();
+}
+
+fn scanGoal(a: std.mem.Allocator, stmt: sqlite.Statement) !domain.Goal {
+    return .{
+        .id = try dup(a, stmt.text(0)),
+        .profile_id = try dup(a, stmt.text(1)),
+        .kind = try dup(a, stmt.text(2)),
+        .start_on = try dup(a, stmt.text(3)),
+        .end_on = try dupOpt(a, stmt.optText(4)),
+        .statement = try dup(a, stmt.text(5)),
+        .status = try dup(a, stmt.text(6)),
+    };
+}
+
+fn goalFromValue(a: std.mem.Allocator, v: std.json.Value) !domain.Goal {
+    return .{
+        .id = try dup(a, jsonw.strField(v, "id") orelse ""),
+        .profile_id = try dup(a, jsonw.strField(v, "profile_id") orelse ""),
+        .kind = try dup(a, jsonw.strField(v, "kind") orelse ""),
+        .start_on = try dup(a, jsonw.strField(v, "start_on") orelse ""),
+        .end_on = try dupOpt(a, jsonw.strField(v, "end_on")),
+        .statement = try dup(a, jsonw.strField(v, "statement") orelse ""),
+        .status = try dup(a, jsonw.strField(v, "status") orelse ""),
+    };
+}
+
+pub fn setGoal(s: *Store, a: std.mem.Allocator, cmd_in: GoalCmd, now: Timestamp) !domain.Goal {
+    try validateBinding(cmd_in.binding);
+    try requireKey(cmd_in.key);
+    if (!std.mem.eql(u8, cmd_in.kind, "primary") and !std.mem.eql(u8, cmd_in.kind, "subgoal")) {
+        return errors.invalid("goal kind must be primary or subgoal", .{});
+    }
+    if (trimmed(cmd_in.statement).len == 0) return errors.invalid("goal statement is required", .{});
+    var cmd = cmd_in;
+    const date_buf = try idDate(a, now);
+    _ = date_buf;
+    if (cmd.start_on.len == 0) {
+        var dbuf: [10]u8 = undefined;
+        cmd.start_on = try dup(a, timeutil.date(now, &dbuf));
+    }
+    _ = timeutil.parseDate(cmd.start_on) catch return errors.invalid("start_on must be YYYY-MM-DD", .{});
+    if (cmd.end_on.len > 0) {
+        _ = timeutil.parseDate(cmd.end_on) catch return errors.invalid("end_on must be YYYY-MM-DD", .{});
+    }
+    var aw = std.Io.Writer.Allocating.init(a);
+    try writeGoalRequest(&aw.writer, cmd);
+    const hash = sha256hex(aw.written());
+    const now_s = try fmtTs(a, now);
+
+    try s.begin();
+    errdefer s.rollback();
+    if (try lookupIdemStmt(s, a, "goal", cmd.key, &hash)) |stored| {
+        try s.commit();
+        const parsed = std.json.parseFromSlice(std.json.Value, a, stored, .{}) catch
+            return errors.fail(.io_error, "stored result is unreadable", .{});
+        return goalFromValue(a, parsed.value);
+    }
+    {
+        var stmt = try s.db.prepare("SELECT 1 FROM profiles WHERE id = ?");
+        defer stmt.finalize();
+        try stmt.bindText(1, cmd.binding.profile);
+        if (!try stmt.step()) return errors.fail(.not_found, "profile {s} does not exist", .{cmd.binding.profile});
+    }
+    if (std.mem.eql(u8, cmd.kind, "primary")) {
+        var stmt = try s.db.prepare(
+            "SELECT id FROM goals WHERE profile_id = ? AND kind = 'primary' AND status = 'active' LIMIT 1",
+        );
+        defer stmt.finalize();
+        try stmt.bindText(1, cmd.binding.profile);
+        if (try stmt.step()) {
+            return errors.fail(.conflict, "profile {s} already has active primary goal {s}", .{ cmd.binding.profile, stmt.text(0) });
+        }
+    }
+    const date = try idDate(a, now);
+    const seq = try store.nextDailySeq(s.db, "goals", try std.fmt.allocPrint(a, "G-{s}-", .{date}));
+    const id = try std.fmt.allocPrint(a, "G-{s}-{d:0>3}", .{ date, @as(u32, @intCast(seq)) });
+    {
+        var ins = try s.db.prepare(
+            "INSERT INTO goals (id, profile_id, kind, start_on, end_on, statement, status, created_at, updated_at) " ++
+                "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+        );
+        defer ins.finalize();
+        try ins.bindText(1, id);
+        try ins.bindText(2, cmd.binding.profile);
+        try ins.bindText(3, cmd.kind);
+        try ins.bindText(4, cmd.start_on);
+        try ins.bindOptText(5, if (cmd.end_on.len == 0) null else cmd.end_on);
+        try ins.bindText(6, cmd.statement);
+        try ins.bindText(7, now_s);
+        try ins.bindText(8, now_s);
+        _ = try ins.step();
+    }
+    const goal = domain.Goal{
+        .id = id,
+        .profile_id = cmd.binding.profile,
+        .kind = cmd.kind,
+        .start_on = cmd.start_on,
+        .end_on = if (cmd.end_on.len == 0) null else cmd.end_on,
+        .statement = cmd.statement,
+        .status = "active",
+    };
+    try insertHistory(s, a, "goal", id, "created", "", cmd.binding.profile, 1, .{ .goal = goal }, now);
+    try writeIdem(s, a, "goal", cmd.key, &hash, .{ .goal = goal }, now);
+    try s.commit();
+    return goal;
+}
+
+pub fn activeGoal(s: *Store, a: std.mem.Allocator, b: domain.Binding) !?domain.Goal {
+    try validateBinding(b);
+    var stmt = try s.db.prepare(
+        "SELECT " ++ goal_columns ++ " FROM goals WHERE profile_id = ? AND kind = 'primary' AND status = 'active' LIMIT 1",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, b.profile);
+    if (!try stmt.step()) return null;
+    return try scanGoal(a, stmt);
+}
+
+fn primaryGoal(s: *Store, a: std.mem.Allocator, profile: []const u8) !?domain.Goal {
+    var stmt = try s.db.prepare(
+        "SELECT " ++ goal_columns ++ " FROM goals WHERE profile_id = ? AND kind = 'primary' " ++
+            "ORDER BY status = 'active' DESC, created_at DESC, id DESC LIMIT 1",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, profile);
+    if (!try stmt.step()) return null;
+    return try scanGoal(a, stmt);
+}
+
+pub fn setGoalStatus(s: *Store, a: std.mem.Allocator, b: domain.Binding, status: []const u8, now: Timestamp) !domain.Goal {
+    try validateBinding(b);
+    if (!std.mem.eql(u8, status, "completed") and !std.mem.eql(u8, status, "cancelled")) {
+        return errors.invalid("goal status must be completed or cancelled, got \"{s}\"", .{status});
+    }
+    const verb: []const u8 = if (std.mem.eql(u8, status, "completed")) "complete" else "cancel";
+    const goal = (try primaryGoal(s, a, b.profile)) orelse
+        return errors.fail(.not_found, "profile {s} has no primary goal to {s}", .{ b.profile, verb });
+    if (std.mem.eql(u8, goal.status, status)) return goal;
+    if (!std.mem.eql(u8, goal.status, "active")) {
+        return errors.fail(.invalid_transition, "goal {s} is {s}; cannot mark it {s}", .{ goal.id, goal.status, status });
+    }
+    const now_s = try fmtTs(a, now);
+    try s.begin();
+    errdefer s.rollback();
+    {
+        var upd = try s.db.prepare("UPDATE goals SET status = ?, updated_at = ? WHERE id = ? AND status = 'active'");
+        defer upd.finalize();
+        try upd.bindText(1, status);
+        try upd.bindText(2, now_s);
+        try upd.bindText(3, goal.id);
+        _ = try upd.step();
+        if (s.db.changes() != 1) return errors.fail(.conflict, "goal {s} changed concurrently", .{goal.id});
+    }
+    var out = goal;
+    out.status = status;
+    try insertHistory(s, a, "goal", goal.id, status, "", b.profile, 2, .{ .goal = out }, now);
+    try s.commit();
+    return out;
+}
+
+// ------------------------------------------------------------ planning
+
+const plan_columns = "id, profile_id, kind, period, status, revision, created_at, updated_at";
+const source_columns = "id, name, scope_id, kind, connector, provider, connection_ref, non_secret_query, cadence, " ++
+    "auth_state, coverage_state, cursor, last_attempt_at, last_success_at, created_at, updated_at";
+
+pub const PlanItemCmd = struct {
+    work_item_id: []const u8,
+    role: []const u8,
+    position: i64,
+};
+
+pub const CommitPlanCmd = struct {
+    binding: domain.Binding,
+    key: []const u8,
+    kind: []const u8,
+    period: []const u8,
+    expected: i64 = 0,
+    items: []const PlanItemCmd = &.{},
+    override_id: []const u8 = "",
+};
+
+fn writeCommitPlanRequest(w: *std.Io.Writer, cmd: CommitPlanCmd) !void {
+    var o = try jsonw.Obj.init(w);
+    try writeBinding(&o, cmd.binding);
+    try o.str("Key", cmd.key);
+    try o.str("Kind", cmd.kind);
+    try o.str("Period", cmd.period);
+    try o.int("Expected", cmd.expected);
+    var arr = try o.arr("Items");
+    for (cmd.items) |it| {
+        var inner = try arr.obj();
+        try inner.str("work_item_id", it.work_item_id);
+        try inner.str("role", it.role);
+        try inner.int("position", it.position);
+        try inner.end();
+    }
+    try arr.end();
+    try o.str("OverrideID", cmd.override_id);
+    try o.end();
+}
+
+fn scanPlan(a: std.mem.Allocator, stmt: sqlite.Statement) !domain.Plan {
+    return .{
+        .id = try dup(a, stmt.text(0)),
+        .profile = try dup(a, stmt.text(1)),
+        .kind = try dup(a, stmt.text(2)),
+        .period = try dup(a, stmt.text(3)),
+        .status = try dup(a, stmt.text(4)),
+        .revision = stmt.int(5),
+        .created_at = try reformat(a, stmt.text(6), "plans.created_at"),
+        .updated_at = try reformat(a, stmt.text(7), "plans.updated_at"),
+    };
+}
+
+fn planFromValue(a: std.mem.Allocator, v: std.json.Value) !domain.Plan {
+    var items = std.ArrayList(domain.PlanItem).empty;
+    if (jsonw.arrField(v, "items")) |list| {
+        for (list) |it| {
+            try items.append(a, .{
+                .work_item_id = try dup(a, jsonw.strField(it, "work_item_id") orelse ""),
+                .role = try dup(a, jsonw.strField(it, "role") orelse ""),
+                .position = jsonw.intField(it, "position") orelse 0,
+            });
+        }
+    }
+    return .{
+        .id = try dup(a, jsonw.strField(v, "id") orelse ""),
+        .profile = try dup(a, jsonw.strField(v, "profile") orelse ""),
+        .kind = try dup(a, jsonw.strField(v, "kind") orelse ""),
+        .period = try dup(a, jsonw.strField(v, "period") orelse ""),
+        .status = try dup(a, jsonw.strField(v, "status") orelse ""),
+        .revision = jsonw.intField(v, "revision") orelse 0,
+        .items = items.items,
+        .created_at = try dup(a, jsonw.strField(v, "created_at") orelse ""),
+        .updated_at = try dup(a, jsonw.strField(v, "updated_at") orelse ""),
+    };
+}
+
+fn scanSource(a: std.mem.Allocator, stmt: sqlite.Statement) !domain.Source {
+    return .{
+        .id = try dup(a, stmt.text(0)),
+        .name = try dup(a, stmt.text(1)),
+        .scope = try dup(a, stmt.text(2)),
+        .kind = try dup(a, stmt.text(3)),
+        .connector = try dup(a, stmt.text(4)),
+        .provider = try dup(a, stmt.text(5)),
+        .connection_ref = try dup(a, stmt.text(6)),
+        .non_secret_query = try dup(a, stmt.text(7)),
+        .cadence = try dup(a, stmt.text(8)),
+        .auth_state = try dup(a, stmt.text(9)),
+        .coverage = try dup(a, stmt.text(10)),
+        .cursor = try dup(a, stmt.text(11)),
+        .last_attempt_at = try dupOpt(a, stmt.optText(12)),
+        .last_success_at = try dupOpt(a, stmt.optText(13)),
+        .created_at = try reformat(a, stmt.text(14), "sources.created_at"),
+        .updated_at = try reformat(a, stmt.text(15), "sources.updated_at"),
+    };
+}
+
+pub fn listSources(s: *Store, a: std.mem.Allocator, b: domain.Binding) ![]domain.Source {
+    try validateBinding(b);
+    const clause = try scopeFilter(a, b.scopes.len);
+    const sql = try std.fmt.allocPrint(a, "SELECT " ++ source_columns ++ " FROM sources WHERE scope_id IN ({s}) ORDER BY id ASC", .{clause});
+    var stmt = try s.db.prepare(sql);
+    defer stmt.finalize();
+    _ = try scopeArgs(stmt, 1, b);
+    var list = std.ArrayList(domain.Source).empty;
+    while (try stmt.step()) try list.append(a, try scanSource(a, stmt));
+    return list.items;
+}
+
+fn loadPlan(s: *Store, a: std.mem.Allocator, profile: []const u8, kind: []const u8, period: []const u8) !?domain.Plan {
+    var stmt = try s.db.prepare(
+        "SELECT " ++ plan_columns ++ " FROM plans WHERE profile_id = ? AND kind = ? AND period = ?",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, profile);
+    try stmt.bindText(2, kind);
+    try stmt.bindText(3, period);
+    if (!try stmt.step()) return null;
+    var plan = try scanPlan(a, stmt);
+    var items = std.ArrayList(domain.PlanItem).empty;
+    var q = try s.db.prepare(
+        "SELECT work_item_id, role, position FROM plan_items WHERE plan_id = ? ORDER BY position ASC",
+    );
+    defer q.finalize();
+    try q.bindText(1, plan.id);
+    while (try q.step()) {
+        try items.append(a, .{
+            .work_item_id = try dup(a, q.text(0)),
+            .role = try dup(a, q.text(1)),
+            .position = q.int(2),
+        });
+    }
+    plan.items = items.items;
+    return plan;
+}
+
+pub fn prepare(s: *Store, a: std.mem.Allocator, b: domain.Binding, date_in: []const u8, now: Timestamp) !domain.PlanBrief {
+    try validateBinding(b);
+    var date = date_in;
+    if (date.len == 0) {
+        var dbuf: [10]u8 = undefined;
+        date = try dup(a, timeutil.date(now, &dbuf));
+    }
+    _ = timeutil.parseDate(date) catch return errors.invalid("date must be YYYY-MM-DD", .{});
+    {
+        var stmt = try s.db.prepare("SELECT 1 FROM profiles WHERE id = ?");
+        defer stmt.finalize();
+        try stmt.bindText(1, b.profile);
+        if (!try stmt.step()) return errors.fail(.not_found, "profile {s} not found", .{b.profile});
+    }
+    var brief = domain.PlanBrief{
+        .profile = b.profile,
+        .date = date,
+        .mits = &.{},
+        .next = &.{},
+        .waiting = &.{},
+    };
+    brief.goal = try activeGoal(s, a, b);
+    const sources = try listSources(s, a, b);
+    if (sources.len > 0) brief.sources = sources;
+    if (try loadPlan(s, a, b.profile, "daily", date)) |p| {
+        brief.plan = p;
+        var mits = std.ArrayList(domain.WorkItem).empty;
+        var cps = std.ArrayList(domain.Checkpoint).empty;
+        for (p.items) |it| {
+            if (!std.mem.eql(u8, it.role, "mit")) continue;
+            const item = getWorkItem(s, a, b, it.work_item_id) catch continue;
+            try mits.append(a, item);
+            var q = try s.db.prepare(
+                "SELECT id, scope_id, work_item_id, result, evidence_json, uncertainties, next_action, revision, created_at " ++
+                    "FROM checkpoints WHERE work_item_id = ? ORDER BY revision DESC LIMIT 1",
+            );
+            defer q.finalize();
+            try q.bindText(1, item.id);
+            if (try q.step()) try cps.append(a, try scanCheckpoint(a, q));
+        }
+        brief.mits = mits.items;
+        if (cps.items.len > 0) brief.checkpoints = cps.items;
+    }
+    var next = std.ArrayList(domain.WorkItem).empty;
+    var waiting = std.ArrayList(domain.WorkItem).empty;
+    for ([_][]const u8{ "next", "waiting" }) |lc| {
+        const clause = try scopeFilter(a, b.scopes.len);
+        const sql = try std.fmt.allocPrint(a,
+            "SELECT " ++ work_item_columns ++ " FROM work_items WHERE lifecycle = ? AND scope_id IN ({s}) " ++
+                "ORDER BY updated_at DESC, id ASC LIMIT 10", .{clause});
+        var stmt = try s.db.prepare(sql);
+        defer stmt.finalize();
+        try stmt.bindText(1, lc);
+        _ = try scopeArgs(stmt, 2, b);
+        while (try stmt.step()) {
+            const item = try scanWorkItem(a, stmt);
+            if (std.mem.eql(u8, lc, "next")) try next.append(a, item) else try waiting.append(a, item);
+        }
+    }
+    brief.next = next.items;
+    brief.waiting = waiting.items;
+    return brief;
+}
+
+fn overrideApplies(s: *Store, actor: []const u8, period: []const u8, override_id: []const u8) !bool {
+    const sql = if (override_id.len > 0)
+        "SELECT 1 FROM daily_limit_overrides WHERE rule = 'mit' AND actor_id = ? AND local_date = ? AND id = ?"
+    else
+        "SELECT 1 FROM daily_limit_overrides WHERE rule = 'mit' AND actor_id = ? AND local_date = ?";
+    var stmt = try s.db.prepare(sql);
+    defer stmt.finalize();
+    try stmt.bindText(1, actor);
+    try stmt.bindText(2, period);
+    if (override_id.len > 0) try stmt.bindText(3, override_id);
+    return try stmt.step();
+}
+
+pub fn commitPlan(s: *Store, a: std.mem.Allocator, cmd: CommitPlanCmd, now: Timestamp) !domain.Plan {
+    try validateBinding(cmd.binding);
+    try requireKey(cmd.key);
+    if (!std.mem.eql(u8, cmd.kind, "daily") and !std.mem.eql(u8, cmd.kind, "weekly")) {
+        return errors.invalid("plan kind must be daily or weekly", .{});
+    }
+    if (cmd.period.len == 0) return errors.invalid("period is required", .{});
+    var aw = std.Io.Writer.Allocating.init(a);
+    try writeCommitPlanRequest(&aw.writer, cmd);
+    const hash = sha256hex(aw.written());
+    const now_s = try fmtTs(a, now);
+
+    try s.begin();
+    errdefer s.rollback();
+    if (try lookupIdemStmt(s, a, "commit_plan", cmd.key, &hash)) |stored| {
+        try s.commit();
+        const parsed = std.json.parseFromSlice(std.json.Value, a, stored, .{}) catch
+            return errors.fail(.io_error, "stored result is unreadable", .{});
+        return planFromValue(a, parsed.value);
+    }
+    const owned = profileScopes(s, a, cmd.binding.profile) catch |e| {
+        if (errors.getFamily() == .not_found) return errors.fail(.not_found, "profile {s} not found", .{cmd.binding.profile});
+        return e;
+    };
+    for (cmd.binding.scopes) |sc| {
+        var found = false;
+        for (owned) |o| if (std.mem.eql(u8, o, sc)) {
+            found = true;
+        };
+        if (!found) return errors.fail(.scope_denied, "scope {s} is not part of profile {s}", .{ sc, cmd.binding.profile });
+    }
+    const existing = try loadPlan(s, a, cmd.binding.profile, cmd.kind, cmd.period);
+    if (existing) |p| {
+        if (cmd.expected != 0 and cmd.expected != p.revision) {
+            return errors.fail(.stale_revision, "plan {s} is at revision {d}, expected {d}", .{ p.id, p.revision, cmd.expected });
+        }
+    } else if (cmd.expected != 0) {
+        return errors.fail(.stale_revision, "no plan exists for profile {s} {s} {s}, so expected must be 0", .{ cmd.binding.profile, cmd.kind, cmd.period });
+    }
+    const plan_id = if (existing) |p| p.id else
+        try std.fmt.allocPrint(a, "P-{s}-{s}-{s}", .{ cmd.binding.profile, cmd.kind, cmd.period });
+    const next_rev: i64 = if (existing) |p| p.revision + 1 else 1;
+
+    var seen = std.StringHashMap(void).init(a);
+    var mit_count: i64 = 0;
+    for (cmd.items) |it| {
+        if (seen.contains(it.work_item_id)) return errors.invalid("duplicate plan item {s}", .{it.work_item_id});
+        try seen.put(it.work_item_id, {});
+        const role_ok = std.mem.eql(u8, it.role, "mit") or std.mem.eql(u8, it.role, "big_rock") or std.mem.eql(u8, it.role, "batch");
+        if (!role_ok) return errors.invalid("invalid plan role \"{s}\"", .{it.role});
+        if (std.mem.eql(u8, cmd.kind, "weekly") and std.mem.eql(u8, it.role, "mit")) {
+            return errors.invalid("weekly plans accept big_rock and batch roles, not mit", .{});
+        }
+        const item = getWorkItem(s, a, .{ .profile = cmd.binding.profile, .actor = cmd.binding.actor, .scopes = owned }, it.work_item_id) catch |e| {
+            if (errors.getFamily() == .not_found) return errors.fail(.not_found, "work item {s} not found", .{it.work_item_id});
+            return e;
+        };
+        _ = item;
+        if (std.mem.eql(u8, it.role, "mit")) mit_count += 1;
+    }
+    if (std.mem.eql(u8, cmd.kind, "daily")) {
+        const needs_override = mit_count < 1 or mit_count > 3 or cmd.override_id.len > 0;
+        if (needs_override) {
+            const ok = try overrideApplies(s, cmd.binding.actor, cmd.period, cmd.override_id);
+            if (!ok) {
+                if (cmd.override_id.len > 0) {
+                    return errors.invalid("daily limit override \"{s}\" does not apply to {s} for actor {s}", .{ cmd.override_id, cmd.period, cmd.binding.actor });
+                }
+                return errors.fail(.rules_acknowledgement_required,
+                    "daily plan has {d} MITs; 1..3 need no override, otherwise record a daily limit override", .{mit_count});
+            }
+        }
+    }
+
+    var plan = domain.Plan{
+        .id = plan_id,
+        .profile = cmd.binding.profile,
+        .kind = cmd.kind,
+        .period = cmd.period,
+        .status = "committed",
+        .revision = next_rev,
+        .items = &.{},
+        .created_at = now_s,
+        .updated_at = now_s,
+    };
+    if (existing) |p| {
+        plan.created_at = p.created_at;
+        var upd = try s.db.prepare("UPDATE plans SET status = 'committed', revision = ?, updated_at = ? WHERE id = ?");
+        defer upd.finalize();
+        try upd.bindInt(1, next_rev);
+        try upd.bindText(2, now_s);
+        try upd.bindText(3, plan_id);
+        _ = try upd.step();
+    } else {
+        var ins = try s.db.prepare(
+            "INSERT INTO plans (id, profile_id, kind, period, status, revision, created_at, updated_at) " ++
+                "VALUES (?, ?, ?, ?, 'committed', ?, ?, ?)",
+        );
+        defer ins.finalize();
+        try ins.bindText(1, plan_id);
+        try ins.bindText(2, cmd.binding.profile);
+        try ins.bindText(3, cmd.kind);
+        try ins.bindText(4, cmd.period);
+        try ins.bindInt(5, next_rev);
+        try ins.bindText(6, now_s);
+        try ins.bindText(7, now_s);
+        _ = try ins.step();
+    }
+    {
+        var del = try s.db.prepare("DELETE FROM plan_items WHERE plan_id = ?");
+        defer del.finalize();
+        try del.bindText(1, plan_id);
+        _ = try del.step();
+    }
+    var items = std.ArrayList(domain.PlanItem).empty;
+    for (cmd.items) |it| {
+        var ins = try s.db.prepare(
+            "INSERT INTO plan_items (plan_id, work_item_id, role, position) VALUES (?, ?, ?, ?)",
+        );
+        defer ins.finalize();
+        try ins.bindText(1, plan_id);
+        try ins.bindText(2, it.work_item_id);
+        try ins.bindText(3, it.role);
+        try ins.bindInt(4, it.position);
+        _ = try ins.step();
+        try items.append(a, .{ .work_item_id = it.work_item_id, .role = it.role, .position = it.position });
+    }
+    plan.items = items.items;
+    try insertHistory(s, a, "plan", plan_id, "committed", "", cmd.binding.profile, next_rev, .{ .plan = plan }, now);
+    try writeIdem(s, a, "commit_plan", cmd.key, &hash, .{ .plan = plan }, now);
+    try s.commit();
+    return plan;
+}
+
+// ---------------------------------------------------------------- focus
+
+fn scanCheckpoint(a: std.mem.Allocator, stmt: sqlite.Statement) !domain.Checkpoint {
+    const evidence = stmt.optText(4);
+    return .{
+        .id = try dup(a, stmt.text(0)),
+        .scope = try dup(a, stmt.text(1)),
+        .work_item_id = try dup(a, stmt.text(2)),
+        .result = try dup(a, stmt.text(3)),
+        .evidence_refs_json = if (evidence) |e| (if (std.mem.eql(u8, e, "[]") or std.mem.eql(u8, e, "null")) null else try dup(a, e)) else null,
+        .uncertainties = try dup(a, stmt.text(5)),
+        .next_action = try dup(a, stmt.text(6)),
+        .revision = stmt.int(7),
+        .created_at = try reformat(a, stmt.text(8), "checkpoints.created_at"),
+    };
+}
+
+fn checkpointFromValue(a: std.mem.Allocator, v: std.json.Value) !domain.Checkpoint {
+    var evidence_json: ?[]const u8 = null;
+    if (jsonw.field(v, "evidence_refs")) |ev| {
+        var aw = std.Io.Writer.Allocating.init(a);
+        try std.json.Stringify.value(ev, .{}, &aw.writer);
+        evidence_json = aw.written();
+    }
+    return .{
+        .id = try dup(a, jsonw.strField(v, "id") orelse ""),
+        .scope = try dup(a, jsonw.strField(v, "scope") orelse ""),
+        .work_item_id = try dup(a, jsonw.strField(v, "work_item_id") orelse ""),
+        .result = try dup(a, jsonw.strField(v, "result") orelse ""),
+        .evidence_refs_json = evidence_json,
+        .uncertainties = try dup(a, jsonw.strField(v, "uncertainties") orelse ""),
+        .next_action = try dup(a, jsonw.strField(v, "next_action") orelse ""),
+        .created_at = try dup(a, jsonw.strField(v, "created_at") orelse ""),
+        .revision = jsonw.intField(v, "revision") orelse 0,
+    };
+}
+
+fn focusFromValue(a: std.mem.Allocator, v: std.json.Value) !domain.FocusSession {
+    return .{
+        .id = try dup(a, jsonw.strField(v, "id") orelse ""),
+        .profile = try dup(a, jsonw.strField(v, "profile") orelse ""),
+        .actor = try dup(a, jsonw.strField(v, "actor") orelse ""),
+        .work_item_id = try dup(a, jsonw.strField(v, "work_item_id") orelse ""),
+        .started_at = try dup(a, jsonw.strField(v, "started_at") orelse ""),
+        .ended_at = try dupOpt(a, jsonw.strField(v, "ended_at")),
+        .outcome = try dupOpt(a, jsonw.strField(v, "outcome")),
+    };
+}
+
+pub const FocusStartCmd = struct { binding: domain.Binding, key: []const u8, item: []const u8 };
+pub const CheckpointCmd = struct {
+    binding: domain.Binding,
+    key: []const u8,
+    item: []const u8,
+    result: []const u8,
+    evidence: []const []const u8 = &.{},
+    uncertain: []const u8 = "",
+    next_action: []const u8 = "",
+};
+pub const FocusFinishCmd = struct { binding: domain.Binding, key: []const u8, focus: []const u8, outcome: []const u8 = "" };
+pub const FocusStartResult = struct { focus: domain.FocusSession, checkpoints: []const domain.Checkpoint };
+
+fn writeStringArrayField(o: *jsonw.Obj, name: []const u8, items: []const []const u8) !void {
+    var arr = try o.arr(name);
+    for (items) |s| try arr.str(s);
+    try arr.end();
+}
+
+fn writeFocusStartRequest(w: *std.Io.Writer, cmd: FocusStartCmd) !void {
+    var o = try jsonw.Obj.init(w);
+    try writeBinding(&o, cmd.binding);
+    try o.str("Key", cmd.key);
+    try o.str("Item", cmd.item);
+    try o.end();
+}
+
+fn writeCheckpointRequest(w: *std.Io.Writer, cmd: CheckpointCmd) !void {
+    var o = try jsonw.Obj.init(w);
+    try writeBinding(&o, cmd.binding);
+    try o.str("Key", cmd.key);
+    try o.str("Item", cmd.item);
+    try o.str("Result", cmd.result);
+    try writeStringArrayField(&o, "Evidence", cmd.evidence);
+    try o.str("Uncertain", cmd.uncertain);
+    try o.str("NextAction", cmd.next_action);
+    try o.end();
+}
+
+fn writeFocusFinishRequest(w: *std.Io.Writer, cmd: FocusFinishCmd) !void {
+    var o = try jsonw.Obj.init(w);
+    try writeBinding(&o, cmd.binding);
+    try o.str("Key", cmd.key);
+    try o.str("Focus", cmd.focus);
+    try o.str("Outcome", cmd.outcome);
+    try o.end();
+}
+
+fn lastCheckpoint(s: *Store, a: std.mem.Allocator, work_item_id: []const u8) !?domain.Checkpoint {
+    var stmt = try s.db.prepare(
+        "SELECT id, scope_id, work_item_id, result, evidence_json, uncertainties, next_action, revision, created_at " ++
+            "FROM checkpoints WHERE work_item_id = ? ORDER BY revision DESC LIMIT 1",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, work_item_id);
+    if (!try stmt.step()) return null;
+    return try scanCheckpoint(a, stmt);
+}
+
+pub fn startFocus(s: *Store, a: std.mem.Allocator, cmd: FocusStartCmd, now: Timestamp) !FocusStartResult {
+    try validateBinding(cmd.binding);
+    try requireKey(cmd.key);
+    if (trimmed(cmd.item).len == 0) return errors.invalid("work item is required", .{});
+    var aw = std.Io.Writer.Allocating.init(a);
+    try writeFocusStartRequest(&aw.writer, cmd);
+    const hash = sha256hex(aw.written());
+    const now_s = try fmtTs(a, now);
+
+    try s.begin();
+    errdefer s.rollback();
+    if (try lookupIdemStmt(s, a, "focus_start", cmd.key, &hash)) |stored| {
+        try s.commit();
+        const parsed = std.json.parseFromSlice(std.json.Value, a, stored, .{}) catch
+            return errors.fail(.io_error, "stored result is unreadable", .{});
+        const fv = jsonw.field(parsed.value, "focus") orelse return errors.fail(.io_error, "stored result is unreadable", .{});
+        var cps = std.ArrayList(domain.Checkpoint).empty;
+        if (jsonw.arrField(parsed.value, "checkpoints")) |list| {
+            for (list) |v| try cps.append(a, try checkpointFromValue(a, v));
+        }
+        return .{ .focus = try focusFromValue(a, fv), .checkpoints = cps.items };
+    }
+    const item = try getWorkItem(s, a, cmd.binding, cmd.item);
+    if (!std.mem.eql(u8, item.lifecycle, "next")) {
+        return errors.fail(.invalid_transition, "work item {s} is {s}, not actionable", .{ item.id, item.lifecycle });
+    }
+    {
+        var stmt = try s.db.prepare("SELECT id FROM focus_sessions WHERE actor_id = ? AND ended_at IS NULL");
+        defer stmt.finalize();
+        try stmt.bindText(1, cmd.binding.actor);
+        if (try stmt.step()) {
+            return errors.fail(.focus_conflict, "actor {s} already has open focus {s}", .{ cmd.binding.actor, stmt.text(0) });
+        }
+    }
+    const date = try idDate(a, now);
+    const seq = try store.nextDailySeq(s.db, "focus_sessions", try std.fmt.allocPrint(a, "F-{s}-", .{date}));
+    const id = try std.fmt.allocPrint(a, "F-{s}-{d:0>3}", .{ date, @as(u32, @intCast(seq)) });
+    {
+        var ins = try s.db.prepare(
+            "INSERT INTO focus_sessions (id, profile_id, actor_id, work_item_id, started_at, ended_at, outcome, revision) " ++
+                "VALUES (?, ?, ?, ?, ?, NULL, NULL, 1)",
+        );
+        defer ins.finalize();
+        try ins.bindText(1, id);
+        try ins.bindText(2, cmd.binding.profile);
+        try ins.bindText(3, cmd.binding.actor);
+        try ins.bindText(4, item.id);
+        try ins.bindText(5, now_s);
+        _ = try ins.step();
+    }
+    const focus = domain.FocusSession{
+        .id = id,
+        .profile = cmd.binding.profile,
+        .actor = cmd.binding.actor,
+        .work_item_id = item.id,
+        .started_at = now_s,
+    };
+    var cps = std.ArrayList(domain.Checkpoint).empty;
+    if (try lastCheckpoint(s, a, item.id)) |cp| try cps.append(a, cp);
+    const result = FocusStartResult{ .focus = focus, .checkpoints = cps.items };
+    try insertHistory(s, a, "focus_session", id, "started", item.scope, cmd.binding.profile, 1, .{ .focus = focus }, now);
+    try writeIdem(s, a, "focus_start", cmd.key, &hash, .{ .focus_start = result }, now);
+    try s.commit();
+    return result;
+}
+
+pub fn recordCheckpoint(s: *Store, a: std.mem.Allocator, cmd: CheckpointCmd, now: Timestamp) !domain.Checkpoint {
+    try validateBinding(cmd.binding);
+    try requireKey(cmd.key);
+    if (trimmed(cmd.item).len == 0) return errors.invalid("work item is required", .{});
+    if (trimmed(cmd.result).len == 0) return errors.invalid("checkpoint result is required", .{});
+    var aw = std.Io.Writer.Allocating.init(a);
+    try writeCheckpointRequest(&aw.writer, cmd);
+    const hash = sha256hex(aw.written());
+    const now_s = try fmtTs(a, now);
+
+    try s.begin();
+    errdefer s.rollback();
+    if (try lookupIdemStmt(s, a, "checkpoint", cmd.key, &hash)) |stored| {
+        try s.commit();
+        const parsed = std.json.parseFromSlice(std.json.Value, a, stored, .{}) catch
+            return errors.fail(.io_error, "stored result is unreadable", .{});
+        return checkpointFromValue(a, parsed.value);
+    }
+    const item = try getWorkItem(s, a, cmd.binding, cmd.item);
+    if (std.mem.eql(u8, item.lifecycle, "archived")) {
+        return errors.fail(.invalid_transition, "work item {s} is archived", .{item.id});
+    }
+    var focus_id: []const u8 = undefined;
+    {
+        var stmt = try s.db.prepare("SELECT id FROM focus_sessions WHERE actor_id = ? AND work_item_id = ? AND ended_at IS NULL");
+        defer stmt.finalize();
+        try stmt.bindText(1, cmd.binding.actor);
+        try stmt.bindText(2, item.id);
+        if (!try stmt.step()) {
+            return errors.fail(.focus_conflict, "actor {s} has no open focus on work item {s}", .{ cmd.binding.actor, item.id });
+        }
+        focus_id = try dup(a, stmt.text(0));
+    }
+    var rev: i64 = 1;
+    {
+        var stmt = try s.db.prepare("SELECT COALESCE(MAX(revision), 0) + 1 FROM checkpoints WHERE work_item_id = ?");
+        defer stmt.finalize();
+        try stmt.bindText(1, item.id);
+        if (try stmt.step()) rev = stmt.int(0);
+    }
+    var evidence_json = std.Io.Writer.Allocating.init(a);
+    try writeStringArrayRaw(&evidence_json.writer, cmd.evidence);
+    const date = try idDate(a, now);
+    const seq = try store.nextDailySeq(s.db, "checkpoints", try std.fmt.allocPrint(a, "CP-{s}-", .{date}));
+    const id = try std.fmt.allocPrint(a, "CP-{s}-{d:0>3}", .{ date, @as(u32, @intCast(seq)) });
+    {
+        var ins = try s.db.prepare(
+            "INSERT INTO checkpoints (id, scope_id, work_item_id, focus_id, result, evidence_json, uncertainties, next_action, revision, created_at) " ++
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        );
+        defer ins.finalize();
+        try ins.bindText(1, id);
+        try ins.bindText(2, item.scope);
+        try ins.bindText(3, item.id);
+        try ins.bindText(4, focus_id);
+        try ins.bindText(5, cmd.result);
+        try ins.bindText(6, evidence_json.written());
+        try ins.bindOptText(7, if (cmd.uncertain.len == 0) null else cmd.uncertain);
+        try ins.bindOptText(8, if (cmd.next_action.len == 0) null else cmd.next_action);
+        try ins.bindInt(9, rev);
+        try ins.bindText(10, now_s);
+        _ = try ins.step();
+    }
+    const cp = domain.Checkpoint{
+        .id = id,
+        .scope = item.scope,
+        .work_item_id = item.id,
+        .result = cmd.result,
+        .evidence_refs_json = if (cmd.evidence.len > 0) evidence_json.written() else null,
+        .uncertainties = cmd.uncertain,
+        .next_action = cmd.next_action,
+        .created_at = now_s,
+        .revision = rev,
+    };
+    try insertHistory(s, a, "checkpoint", id, "recorded", item.scope, cmd.binding.profile, rev, .{ .checkpoint = cp }, now);
+    try writeIdem(s, a, "checkpoint", cmd.key, &hash, .{ .checkpoint = cp }, now);
+    try s.commit();
+    return cp;
+}
+
+fn writeStringArrayRaw(w: *std.Io.Writer, items: []const []const u8) !void {
+    var arr = try jsonw.Arr.init(w);
+    for (items) |s| try arr.str(s);
+    try arr.end();
+}
+
+pub fn finishFocus(s: *Store, a: std.mem.Allocator, cmd: FocusFinishCmd, now: Timestamp) !domain.FocusSession {
+    try validateBinding(cmd.binding);
+    try requireKey(cmd.key);
+    if (trimmed(cmd.focus).len == 0) return errors.invalid("focus id is required", .{});
+    var aw = std.Io.Writer.Allocating.init(a);
+    try writeFocusFinishRequest(&aw.writer, cmd);
+    const hash = sha256hex(aw.written());
+    const now_s = try fmtTs(a, now);
+
+    try s.begin();
+    errdefer s.rollback();
+    if (try lookupIdemStmt(s, a, "focus_finish", cmd.key, &hash)) |stored| {
+        try s.commit();
+        const parsed = std.json.parseFromSlice(std.json.Value, a, stored, .{}) catch
+            return errors.fail(.io_error, "stored result is unreadable", .{});
+        return focusFromValue(a, parsed.value);
+    }
+    var focus = domain.FocusSession{ .id = "", .profile = "", .actor = "", .work_item_id = "", .started_at = "" };
+    var revision: i64 = 0;
+    var ended = false;
+    {
+        var stmt = try s.db.prepare(
+            "SELECT profile_id, actor_id, work_item_id, started_at, ended_at, outcome, revision FROM focus_sessions WHERE id = ?",
+        );
+        defer stmt.finalize();
+        try stmt.bindText(1, cmd.focus);
+        if (!try stmt.step()) return errors.fail(.not_found, "focus {s} does not exist", .{cmd.focus});
+        focus.profile = try dup(a, stmt.text(0));
+        focus.actor = try dup(a, stmt.text(1));
+        focus.work_item_id = try dup(a, stmt.text(2));
+        focus.started_at = try reformat(a, stmt.text(3), "focus_sessions.started_at");
+        focus.ended_at = try dupOpt(a, stmt.optText(4));
+        focus.outcome = try dupOpt(a, stmt.optText(5));
+        revision = stmt.int(6);
+        ended = !stmt.isNull(4);
+    }
+    focus.id = cmd.focus;
+    if (!std.mem.eql(u8, focus.actor, cmd.binding.actor)) {
+        return errors.fail(.scope_denied, "focus {s} belongs to another actor", .{cmd.focus});
+    }
+    const item = try getWorkItem(s, a, cmd.binding, focus.work_item_id);
+    if (ended) return errors.fail(.invalid_transition, "focus {s} is already finished", .{cmd.focus});
+    {
+        var upd = try s.db.prepare("UPDATE focus_sessions SET ended_at = ?, outcome = ?, revision = ? WHERE id = ? AND ended_at IS NULL");
+        defer upd.finalize();
+        try upd.bindText(1, now_s);
+        try upd.bindOptText(2, if (cmd.outcome.len == 0) null else cmd.outcome);
+        try upd.bindInt(3, revision + 1);
+        try upd.bindText(4, cmd.focus);
+        _ = try upd.step();
+        if (s.db.changes() != 1) return errors.fail(.invalid_transition, "focus {s} is already finished", .{cmd.focus});
+    }
+    focus.ended_at = now_s;
+    focus.outcome = if (cmd.outcome.len == 0) null else cmd.outcome;
+    try insertHistory(s, a, "focus_session", cmd.focus, "finished", item.scope, cmd.binding.profile, revision + 1, .{ .focus = focus }, now);
+    try writeIdem(s, a, "focus_finish", cmd.key, &hash, .{ .focus = focus }, now);
+    try s.commit();
+    return focus;
+}
+
+// --------------------------------------------------------------- reviews
+
+pub const ReviewCmd = struct {
+    binding: domain.Binding,
+    key: []const u8,
+    kind: []const u8,
+    period: []const u8,
+    outcomes: []const u8,
+    coverage: []const u8,
+    complete: bool = true,
+};
+
+fn writeReviewRequest(w: *std.Io.Writer, cmd: ReviewCmd) !void {
+    var o = try jsonw.Obj.init(w);
+    try writeBinding(&o, cmd.binding);
+    try o.str("Key", cmd.key);
+    try o.str("Kind", cmd.kind);
+    try o.str("Period", cmd.period);
+    try o.str("Outcomes", cmd.outcomes);
+    try o.str("Coverage", cmd.coverage);
+    try o.boolean("Complete", cmd.complete);
+    try o.end();
+}
+
+fn reviewFromValue(a: std.mem.Allocator, v: std.json.Value) !domain.Review {
+    return .{
+        .id = try dup(a, jsonw.strField(v, "id") orelse ""),
+        .profile = try dup(a, jsonw.strField(v, "profile") orelse ""),
+        .kind = try dup(a, jsonw.strField(v, "kind") orelse ""),
+        .period = try dup(a, jsonw.strField(v, "period") orelse ""),
+        .outcomes = try dup(a, jsonw.strField(v, "outcomes") orelse ""),
+        .coverage = try dup(a, jsonw.strField(v, "coverage") orelse ""),
+        .completion_state = try dup(a, jsonw.strField(v, "completion_state") orelse ""),
+        .created_at = try dup(a, jsonw.strField(v, "created_at") orelse ""),
+    };
+}
+
+pub fn recordReview(s: *Store, a: std.mem.Allocator, cmd: ReviewCmd, now: Timestamp) !domain.Review {
+    try validateBinding(cmd.binding);
+    try requireKey(cmd.key);
+    const kind_ok = std.mem.eql(u8, cmd.kind, "daily") or std.mem.eql(u8, cmd.kind, "weekly") or
+        std.mem.eql(u8, cmd.kind, "monthly") or std.mem.eql(u8, cmd.kind, "yearly");
+    if (!kind_ok) return errors.invalid("unknown review kind \"{s}\"", .{cmd.kind});
+    if (cmd.period.len == 0) return errors.invalid("period is required", .{});
+    if (cmd.outcomes.len == 0) return errors.invalid("outcomes are required", .{});
+    if (cmd.coverage.len == 0) return errors.invalid("coverage is required", .{});
+    var aw = std.Io.Writer.Allocating.init(a);
+    try writeReviewRequest(&aw.writer, cmd);
+    const hash = sha256hex(aw.written());
+    const now_s = try fmtTs(a, now);
+
+    try s.begin();
+    errdefer s.rollback();
+    if (try lookupIdemStmt(s, a, "review", cmd.key, &hash)) |stored| {
+        try s.commit();
+        const parsed = std.json.parseFromSlice(std.json.Value, a, stored, .{}) catch
+            return errors.fail(.io_error, "stored result is unreadable", .{});
+        return reviewFromValue(a, parsed.value);
+    }
+    const owned = profileScopes(s, a, cmd.binding.profile) catch |e| {
+        if (errors.getFamily() == .not_found) return errors.fail(.not_found, "profile {s} does not exist", .{cmd.binding.profile});
+        return e;
+    };
+    for (cmd.binding.scopes) |sc| {
+        var found = false;
+        for (owned) |o| if (std.mem.eql(u8, o, sc)) {
+            found = true;
+        };
+        if (!found) return errors.fail(.scope_denied, "scope {s} is not part of profile {s}", .{ sc, cmd.binding.profile });
+    }
+    const state: []const u8 = if (cmd.complete) "complete" else "partial";
+    var existing_id: ?[]const u8 = null;
+    var rev: i64 = 1;
+    var created_at: []const u8 = now_s;
+    {
+        var stmt = try s.db.prepare(
+            "SELECT id, revision, created_at FROM reviews WHERE profile_id = ? AND kind = ? AND period = ?",
+        );
+        defer stmt.finalize();
+        try stmt.bindText(1, cmd.binding.profile);
+        try stmt.bindText(2, cmd.kind);
+        try stmt.bindText(3, cmd.period);
+        if (try stmt.step()) {
+            existing_id = try dup(a, stmt.text(0));
+            rev = stmt.int(1) + 1;
+            created_at = try reformat(a, stmt.text(2), "reviews.created_at");
+        }
+    }
+    const id = existing_id orelse blk: {
+        const date = try idDate(a, now);
+        const seq = try store.nextDailySeq(s.db, "reviews", try std.fmt.allocPrint(a, "R-{s}-", .{date}));
+        break :blk try std.fmt.allocPrint(a, "R-{s}-{d:0>3}", .{ date, @as(u32, @intCast(seq)) });
+    };
+    if (existing_id != null) {
+        var upd = try s.db.prepare(
+            "UPDATE reviews SET outcomes = ?, coverage = ?, completion_state = ?, revision = ? WHERE id = ?",
+        );
+        defer upd.finalize();
+        try upd.bindText(1, cmd.outcomes);
+        try upd.bindText(2, cmd.coverage);
+        try upd.bindText(3, state);
+        try upd.bindInt(4, rev);
+        try upd.bindText(5, id);
+        _ = try upd.step();
+    } else {
+        var ins = try s.db.prepare(
+            "INSERT INTO reviews (id, profile_id, kind, period, outcomes, coverage, completion_state, created_at, revision) " ++
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        );
+        defer ins.finalize();
+        try ins.bindText(1, id);
+        try ins.bindText(2, cmd.binding.profile);
+        try ins.bindText(3, cmd.kind);
+        try ins.bindText(4, cmd.period);
+        try ins.bindText(5, cmd.outcomes);
+        try ins.bindText(6, cmd.coverage);
+        try ins.bindText(7, state);
+        try ins.bindText(8, now_s);
+        try ins.bindInt(9, rev);
+        _ = try ins.step();
+    }
+    const review = domain.Review{
+        .id = id,
+        .profile = cmd.binding.profile,
+        .kind = cmd.kind,
+        .period = cmd.period,
+        .outcomes = cmd.outcomes,
+        .coverage = cmd.coverage,
+        .completion_state = state,
+        .created_at = created_at,
+    };
+    try insertHistory(s, a, "review", id, "recorded", "", cmd.binding.profile, rev, .{ .review = review }, now);
+    try writeIdem(s, a, "review", cmd.key, &hash, .{ .review = review }, now);
+    try s.commit();
+    return review;
 }

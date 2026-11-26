@@ -194,6 +194,223 @@ pub const ConfigEntry = struct {
     existed: bool,
 };
 
+pub const Goal = struct {
+    id: []const u8,
+    profile_id: []const u8,
+    kind: []const u8,
+    start_on: []const u8,
+    end_on: ?[]const u8 = null,
+    statement: []const u8,
+    status: []const u8,
+
+    pub fn write(self: Goal, o: *json.Obj) !void {
+        try o.str("id", self.id);
+        try o.str("profile_id", self.profile_id);
+        try o.str("kind", self.kind);
+        try o.str("start_on", self.start_on);
+        try o.optStr("end_on", self.end_on);
+        try o.str("statement", self.statement);
+        try o.str("status", self.status);
+    }
+};
+
+pub const PlanItem = struct {
+    work_item_id: []const u8,
+    role: []const u8,
+    position: i64,
+
+    pub fn write(self: PlanItem, o: *json.Obj) !void {
+        try o.str("work_item_id", self.work_item_id);
+        try o.str("role", self.role);
+        try o.int("position", self.position);
+    }
+};
+
+pub const Plan = struct {
+    id: []const u8,
+    profile: []const u8,
+    kind: []const u8,
+    period: []const u8,
+    status: []const u8,
+    revision: i64,
+    items: []const PlanItem = &.{},
+    created_at: []const u8,
+    updated_at: []const u8,
+
+    pub fn write(self: Plan, o: *json.Obj) !void {
+        try o.str("id", self.id);
+        try o.str("profile", self.profile);
+        try o.str("kind", self.kind);
+        try o.str("period", self.period);
+        try o.str("status", self.status);
+        try o.int("revision", self.revision);
+        if (self.items.len > 0) {
+            var arr = try o.arr("items");
+            for (self.items) |item| {
+                var io = try arr.obj();
+                try item.write(&io);
+                try io.end();
+            }
+            try arr.end();
+        }
+        try o.str("created_at", self.created_at);
+        try o.str("updated_at", self.updated_at);
+    }
+};
+
+pub const PlanBrief = struct {
+    profile: []const u8,
+    date: []const u8,
+    goal: ?Goal = null,
+    mits: []const WorkItem = &.{},
+    next: []const WorkItem = &.{},
+    waiting: []const WorkItem = &.{},
+    sources: ?[]const Source = null,
+    checkpoints: ?[]const Checkpoint = null,
+    plan: ?Plan = null,
+    needs_human: ?[]const []const u8 = null,
+
+    pub fn write(self: PlanBrief, o: *json.Obj) !void {
+        try o.str("profile", self.profile);
+        try o.str("date", self.date);
+        if (self.goal) |g| {
+            var inner = try o.obj("goal");
+            try g.write(&inner);
+            try inner.end();
+        }
+        try writeWorkItemsOrNull(o, "mits", self.mits);
+        try writeWorkItemsOrNull(o, "next", self.next);
+        try writeWorkItemsOrNull(o, "waiting", self.waiting);
+        if (self.sources) |sources| {
+            var arr = try o.arr("sources");
+            for (sources) |s| {
+                var io = try arr.obj();
+                try s.write(&io);
+                try io.end();
+            }
+            try arr.end();
+        }
+        if (self.checkpoints) |cps| {
+            var arr = try o.arr("checkpoints");
+            for (cps) |cp| {
+                var io = try arr.obj();
+                try cp.write(&io);
+                try io.end();
+            }
+            try arr.end();
+        }
+        if (self.plan) |plan| {
+            var inner = try o.obj("plan");
+            try plan.write(&inner);
+            try inner.end();
+        }
+        if (self.needs_human) |items| {
+            var arr = try o.arr("needs_human");
+            for (items) |item| try arr.str(item);
+            try arr.end();
+        }
+    }
+
+    fn writeWorkItems(o: *json.Obj, name: []const u8, items: []const WorkItem) !void {
+        var arr = try o.arr(name);
+        for (items) |item| {
+            var io = try arr.obj();
+            try item.write(&io);
+            try io.end();
+        }
+        try arr.end();
+    }
+
+    // Go marshals a nil slice as null, and these lists start nil.
+    fn writeWorkItemsOrNull(o: *json.Obj, name: []const u8, items: []const WorkItem) !void {
+        if (items.len == 0) {
+            try o.raw(name, "null");
+            return;
+        }
+        try writeWorkItems(o, name, items);
+    }
+};
+
+pub const FocusSession = struct {
+    id: []const u8,
+    profile: []const u8,
+    actor: []const u8,
+    work_item_id: []const u8,
+    started_at: []const u8,
+    ended_at: ?[]const u8 = null,
+    outcome: ?[]const u8 = null,
+
+    pub fn write(self: FocusSession, o: *json.Obj) !void {
+        try o.str("id", self.id);
+        try o.str("profile", self.profile);
+        try o.str("actor", self.actor);
+        try o.str("work_item_id", self.work_item_id);
+        try o.str("started_at", self.started_at);
+        try o.optStr("ended_at", self.ended_at);
+        try o.optStr("outcome", self.outcome);
+    }
+};
+
+pub const Review = struct {
+    id: []const u8,
+    profile: []const u8,
+    kind: []const u8,
+    period: []const u8,
+    outcomes: []const u8,
+    coverage: []const u8,
+    completion_state: []const u8,
+    created_at: []const u8,
+
+    pub fn write(self: Review, o: *json.Obj) !void {
+        try o.str("id", self.id);
+        try o.str("profile", self.profile);
+        try o.str("kind", self.kind);
+        try o.str("period", self.period);
+        try o.str("outcomes", self.outcomes);
+        try o.str("coverage", self.coverage);
+        try o.str("completion_state", self.completion_state);
+        try o.str("created_at", self.created_at);
+    }
+};
+
+pub const Source = struct {
+    id: []const u8,
+    name: []const u8,
+    scope: []const u8,
+    kind: []const u8,
+    connector: []const u8,
+    provider: []const u8,
+    connection_ref: []const u8,
+    non_secret_query: []const u8,
+    cadence: []const u8,
+    auth_state: []const u8,
+    coverage: []const u8,
+    cursor: []const u8,
+    last_attempt_at: ?[]const u8 = null,
+    last_success_at: ?[]const u8 = null,
+    created_at: []const u8,
+    updated_at: []const u8,
+
+    pub fn write(self: Source, o: *json.Obj) !void {
+        try o.str("id", self.id);
+        try o.str("name", self.name);
+        try o.str("scope", self.scope);
+        try o.str("kind", self.kind);
+        try o.str("connector", self.connector);
+        try o.str("provider", self.provider);
+        try o.str("connection_ref", self.connection_ref);
+        try o.str("non_secret_query", self.non_secret_query);
+        try o.str("cadence", self.cadence);
+        try o.str("auth_state", self.auth_state);
+        try o.str("coverage", self.coverage);
+        try o.str("cursor", self.cursor);
+        try o.optStr("last_attempt_at", self.last_attempt_at);
+        try o.optStr("last_success_at", self.last_success_at);
+        try o.str("created_at", self.created_at);
+        try o.str("updated_at", self.updated_at);
+    }
+};
+
 test "capture emits Go field order and omits empty optionals" {
     var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();

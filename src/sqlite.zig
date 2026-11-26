@@ -108,6 +108,12 @@ pub const Db = struct {
         return c.sqlite3_last_insert_rowid(self.handle);
     }
 
+    /// Number of rows changed by the most recent INSERT/UPDATE/DELETE, used to
+    /// detect a concurrent writer that invalidated a revision guard.
+    pub fn changes(self: Db) i64 {
+        return c.sqlite3_changes(self.handle);
+    }
+
     pub fn errmsg(self: Db) []const u8 {
         return std.mem.span(c.sqlite3_errmsg(self.handle));
     }

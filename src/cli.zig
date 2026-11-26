@@ -223,6 +223,11 @@ fn dispatch(c: *Cli, init: std.process.Init, command: []const u8, args: []const 
     if (std.mem.eql(u8, command, "find")) return cmdFind(c, args);
     if (std.mem.eql(u8, command, "list")) return cmdList(c, args);
     if (std.mem.eql(u8, command, "move")) return cmdMove(c, args);
+    if (std.mem.eql(u8, command, "goal")) return cmdGoal(c, args);
+    if (std.mem.eql(u8, command, "prepare")) return cmdPrepare(c, args);
+    if (std.mem.eql(u8, command, "plan")) return cmdPlan(c, args);
+    if (std.mem.eql(u8, command, "focus")) return cmdFocus(c, args);
+    if (std.mem.eql(u8, command, "review")) return cmdReview(c, args);
     return errors.invalid("unknown command \"{s}\" (see usage)", .{command});
 }
 
@@ -862,6 +867,286 @@ fn cmdMove(c: *Cli, args: []const []const u8) !void {
     try item.write(&o);
     try o.end();
     try succeedData(c, "move", aw.written());
+}
+
+// --------------------------------------------------------------------- goal
+
+fn writeJson(c: *Cli, command: []const u8, value: anytype) !void {
+    var aw = Io.Writer.Allocating.init(c.arena);
+    var o = try jsonw.Obj.init(&aw.writer);
+    try value.write(&o);
+    try o.end();
+    try succeedData(c, command, aw.written());
+}
+
+fn cmdGoal(c: *Cli, args: []const []const u8) !void {
+    if (args.len == 0) return errors.invalid("usage: goal set|show|complete|cancel [flags]", .{});
+    const sub = args[0];
+    const rest = args[1..];
+
+    if (std.mem.eql(u8, sub, "set")) {
+        const specs = [_]Spec{
+            .{ .name = "scope", .value = true },
+            .{ .name = "key", .value = true },
+            .{ .name = "kind", .value = true },
+            .{ .name = "start-on", .value = true },
+            .{ .name = "end-on", .value = true },
+            .{ .name = "statement", .value = true },
+        };
+        var parsed = try parseFlags(c.arena, rest, &specs);
+        var statement = parsed.get("statement", "");
+        if (statement.len == 0) statement = try std.mem.join(c.arena, " ", parsed.positional);
+        const key = if (parsed.get("key", "").len > 0) parsed.get("key", "") else try newKey(c, "goal");
+        var opened = try bound(c, oneScope(parsed.get("scope", "")));
+        defer opened.st.close();
+        const goal = try core.setGoal(&opened.st, c.arena, .{
+            .binding = opened.b,
+            .key = key,
+            .kind = parsed.get("kind", "primary"),
+            .start_on = parsed.get("start-on", ""),
+            .end_on = parsed.get("end-on", ""),
+            .statement = statement,
+        }, nowSeconds(c));
+        return writeJson(c, "goal set", goal);
+    }
+    if (std.mem.eql(u8, sub, "show")) {
+        const specs = [_]Spec{.{ .name = "scope", .value = true }};
+        const parsed = try parseFlags(c.arena, rest, &specs);
+        var opened = try bound(c, oneScope(parsed.get("scope", "")));
+        defer opened.st.close();
+        const goal = try core.activeGoal(&opened.st, c.arena, opened.b);
+        var aw = Io.Writer.Allocating.init(c.arena);
+        if (goal) |g| {
+            var o = try jsonw.Obj.init(&aw.writer);
+            try g.write(&o);
+            try o.end();
+        } else try aw.writer.writeAll("null");
+        return succeedData(c, "goal show", aw.written());
+    }
+    if (std.mem.eql(u8, sub, "complete") or std.mem.eql(u8, sub, "cancel")) {
+        const specs = [_]Spec{.{ .name = "scope", .value = true }};
+        const parsed = try parseFlags(c.arena, rest, &specs);
+        if (parsed.positional.len != 0) {
+            return errors.invalid("usage: goal {s} [--scope S]", .{sub});
+        }
+        var opened = try bound(c, oneScope(parsed.get("scope", "")));
+        defer opened.st.close();
+        const status: []const u8 = if (std.mem.eql(u8, sub, "complete")) "completed" else "cancelled";
+        const goal = try core.setGoalStatus(&opened.st, c.arena, opened.b, status, nowSeconds(c));
+        var aw = Io.Writer.Allocating.init(c.arena);
+        var o = try jsonw.Obj.init(&aw.writer);
+        try goal.write(&o);
+        try o.end();
+        return succeedData(c, try std.fmt.allocPrint(c.arena, "goal {s}", .{sub}), aw.written());
+    }
+    return errors.invalid("unknown goal subcommand \"{s}\"", .{sub});
+}
+
+// ------------------------------------------------------------------ prepare
+
+fn cmdPrepare(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true },
+        .{ .name = "date", .value = true },
+    };
+    const parsed = try parseFlags(c.arena, args, &specs);
+    if (parsed.positional.len != 0) return errors.invalid("usage: prepare [flags]", .{});
+    var opened = try bound(c, oneScope(parsed.get("scope", "")));
+    defer opened.st.close();
+    const brief = try core.prepare(&opened.st, c.arena, opened.b, parsed.get("date", ""), nowSeconds(c));
+    return writeJson(c, "prepare", brief);
+}
+
+// --------------------------------------------------------------------- plan
+
+fn cmdPlan(c: *Cli, args: []const []const u8) !void {
+    const is_commit = args.len > 0 and std.mem.eql(u8, args[0], "commit");
+    if (!is_commit) {
+        const specs = [_]Spec{
+            .{ .name = "scope", .value = true },
+            .{ .name = "context", .value = true },
+            .{ .name = "date", .value = true },
+            .{ .name = "client", .value = true },
+        };
+        const parsed = try parseFlags(c.arena, args, &specs);
+        if (parsed.positional.len != 0) return errors.invalid("usage: plan [flags]", .{});
+        var opened = try bound(c, oneScope(parsed.get("scope", "")));
+        defer opened.st.close();
+        var brief = try core.prepare(&opened.st, c.arena, opened.b, parsed.get("date", ""), nowSeconds(c));
+        const context = parsed.get("context", "");
+        if (context.len > 0) {
+            brief.mits = try filterContext(c.arena, brief.mits, context);
+            brief.next = try filterContext(c.arena, brief.next, context);
+            brief.waiting = try filterContext(c.arena, brief.waiting, context);
+        }
+        return writeJson(c, "plan", brief);
+    }
+
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true },
+        .{ .name = "kind", .value = true },
+        .{ .name = "period", .value = true },
+        .{ .name = "expected", .value = true },
+        .{ .name = "override", .value = true },
+        .{ .name = "key", .value = true },
+        .{ .name = "item", .value = true, .multi = true },
+    };
+    const parsed = try parseFlags(c.arena, args[1..], &specs);
+    if (parsed.positional.len != 0) return errors.invalid("usage: plan commit [flags]", .{});
+    const period = parsed.get("period", "");
+    if (period.len == 0) return errors.invalid("--period is required", .{});
+
+    var items = std.ArrayList(core.PlanItemCmd).empty;
+    if (parsed.multi.get("item")) |raw_items| {
+        for (raw_items.items, 0..) |raw, idx| {
+            const colon = std.mem.indexOfScalar(u8, raw, ':') orelse
+                return errors.invalid("item \"{s}\" must be ID:role", .{raw});
+            try items.append(c.arena, .{
+                .work_item_id = raw[0..colon],
+                .role = raw[colon + 1 ..],
+                .position = @intCast(idx),
+            });
+        }
+    }
+    const key = if (parsed.get("key", "").len > 0) parsed.get("key", "") else try newKey(c, "plan");
+    const expected = std.fmt.parseInt(i64, parsed.get("expected", "0"), 10) catch
+        return errors.invalid("invalid value \"{s}\" for flag -expected", .{parsed.get("expected", "")});
+    var opened = try bound(c, oneScope(parsed.get("scope", "")));
+    defer opened.st.close();
+    const plan = try core.commitPlan(&opened.st, c.arena, .{
+        .binding = opened.b,
+        .key = key,
+        .kind = parsed.get("kind", "daily"),
+        .period = period,
+        .expected = expected,
+        .items = items.items,
+        .override_id = parsed.get("override", ""),
+    }, nowSeconds(c));
+    return writeJson(c, "plan commit", plan);
+}
+
+fn filterContext(a: std.mem.Allocator, items: []const domain.WorkItem, context: []const u8) ![]const domain.WorkItem {
+    var suffix_buf = std.Io.Writer.Allocating.init(a);
+    try suffix_buf.writer.print(":{s}", .{context});
+    const suffix = suffix_buf.written();
+    var out = std.ArrayList(domain.WorkItem).empty;
+    for (items) |item| {
+        const id = item.context_id orelse continue;
+        if (std.mem.endsWith(u8, id, suffix)) try out.append(a, item);
+    }
+    return out.items;
+}
+
+// -------------------------------------------------------------------- focus
+
+fn cmdFocus(c: *Cli, args: []const []const u8) !void {
+    if (args.len == 0) return errors.invalid("usage: focus start|checkpoint|finish [flags]", .{});
+    const sub = args[0];
+    const rest = args[1..];
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true },
+        .{ .name = "key", .value = true },
+        .{ .name = "result", .value = true },
+        .{ .name = "next", .value = true },
+        .{ .name = "evidence", .value = true },
+        .{ .name = "outcome", .value = true },
+    };
+    const parsed = try parseFlags(c.arena, rest, &specs);
+    const key = if (parsed.get("key", "").len > 0) parsed.get("key", "") else try newKey(c, sub);
+
+    if (std.mem.eql(u8, sub, "start")) {
+        if (parsed.positional.len != 1) return errors.invalid("usage: focus start [flags] <work-item-id>", .{});
+        var opened = try bound(c, oneScope(parsed.get("scope", "")));
+        defer opened.st.close();
+        const result = try core.startFocus(&opened.st, c.arena, .{
+            .binding = opened.b,
+            .key = key,
+            .item = parsed.positional[0],
+        }, nowSeconds(c));
+        var aw = Io.Writer.Allocating.init(c.arena);
+        var o = try jsonw.Obj.init(&aw.writer);
+        // Go builds a map here, so the keys sort alphabetically and a nil
+        // checkpoint list marshals as null.
+        if (result.checkpoints.len == 0) {
+            try o.raw("checkpoints", "null");
+        } else {
+            var arr = try o.arr("checkpoints");
+            for (result.checkpoints) |cp| {
+                var aw_cp = Io.Writer.Allocating.init(c.arena);
+                var cp_o = try jsonw.Obj.init(&aw_cp.writer);
+                try cp.write(&cp_o);
+                try cp_o.end();
+                try arr.raw(aw_cp.written());
+            }
+            try arr.end();
+        }
+        var inner = try o.obj("focus");
+        try result.focus.write(&inner);
+        try inner.end();
+        try o.end();
+        return succeedData(c, "focus start", aw.written());
+    }
+    if (std.mem.eql(u8, sub, "checkpoint")) {
+        if (parsed.positional.len != 1) return errors.invalid("usage: focus checkpoint [flags] <work-item-id>", .{});
+        var evidence = std.ArrayList([]const u8).empty;
+        const ev = parsed.get("evidence", "");
+        if (ev.len > 0) try evidence.append(c.arena, ev);
+        var opened = try bound(c, oneScope(parsed.get("scope", "")));
+        defer opened.st.close();
+        const cp = try core.recordCheckpoint(&opened.st, c.arena, .{
+            .binding = opened.b,
+            .key = key,
+            .item = parsed.positional[0],
+            .result = parsed.get("result", ""),
+            .evidence = evidence.items,
+            .next_action = parsed.get("next", ""),
+        }, nowSeconds(c));
+        return writeJson(c, "focus checkpoint", cp);
+    }
+    if (std.mem.eql(u8, sub, "finish")) {
+        if (parsed.positional.len != 1) return errors.invalid("usage: focus finish [flags] <focus-id>", .{});
+        var opened = try bound(c, oneScope(parsed.get("scope", "")));
+        defer opened.st.close();
+        const focus = try core.finishFocus(&opened.st, c.arena, .{
+            .binding = opened.b,
+            .key = key,
+            .focus = parsed.positional[0],
+            .outcome = parsed.get("outcome", ""),
+        }, nowSeconds(c));
+        return writeJson(c, "focus finish", focus);
+    }
+    return errors.invalid("unknown focus subcommand \"{s}\"", .{sub});
+}
+
+// ------------------------------------------------------------------- review
+
+fn cmdReview(c: *Cli, args: []const []const u8) !void {
+    if (args.len == 0) return errors.invalid("usage: review daily|weekly|monthly|yearly [flags]", .{});
+    const kind = args[0];
+    const kind_ok = std.mem.eql(u8, kind, "daily") or std.mem.eql(u8, kind, "weekly") or
+        std.mem.eql(u8, kind, "monthly") or std.mem.eql(u8, kind, "yearly");
+    if (!kind_ok) return errors.invalid("unknown review kind \"{s}\"", .{kind});
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true },
+        .{ .name = "key", .value = true },
+        .{ .name = "period", .value = true },
+        .{ .name = "outcomes", .value = true },
+        .{ .name = "coverage", .value = true },
+    };
+    const parsed = try parseFlags(c.arena, args[1..], &specs);
+    const key = if (parsed.get("key", "").len > 0) parsed.get("key", "") else try newKey(c, "review");
+    var opened = try bound(c, oneScope(parsed.get("scope", "")));
+    defer opened.st.close();
+    const review = try core.recordReview(&opened.st, c.arena, .{
+        .binding = opened.b,
+        .key = key,
+        .kind = kind,
+        .period = parsed.get("period", ""),
+        .outcomes = parsed.get("outcomes", ""),
+        .coverage = parsed.get("coverage", ""),
+        .complete = true,
+    }, nowSeconds(c));
+    return writeJson(c, "review", review);
 }
 
 pub const usage =

@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ZTD architecture</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --color-paper:   #f5f5f5;
+      --color-ink:     #2d3142;
+      --color-muted:   #4f5d75;
+      --color-accent:  #bf4520;
+      --font-sans:     'Geist', system-ui, sans-serif;
+      --font-serif:    'Instrument Serif', serif;
+      --font-mono:     'Geist Mono', ui-monospace, monospace;
+    }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--color-paper);
+      color: var(--color-ink);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 3rem 2rem;
+    }
+
+    .frame { max-width: 1200px; width: 100%; }
+    .diagram-container { width: 100%; overflow-x: auto; }
+
+    .eyebrow {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      font-weight: 500;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--color-muted);
+      margin-bottom: 0.5rem;
+    }
+
+    h1 {
+      font-family: var(--font-serif);
+      font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem);
+      font-weight: 400;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+      color: var(--color-ink);
+      margin-bottom: 1.5rem;
+    }
+
+    svg { width: 100%; min-width: 960px; display: block; }
+    @media print {
+      .diagram-container { overflow-x: visible; }
+      svg { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Architecture · ZTD</p>
+    <h1>One binary, one SQLite file</h1>
+
+    <div class="diagram-container">
+      <svg viewBox="0 0 960 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ztd-architecture-title ztd-architecture-desc">
+        <title id="ztd-architecture-title">ZTD architecture</title>
+        <desc id="ztd-architecture-desc">An agent drives one local Go binary through the CLI or an MCP server; both call the same use cases, which depend on domain vocabulary and write through a storage port into a single SQLite database.</desc>
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+          <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+        </defs>
+
+        <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+        <!-- Zone: single local binary (drawn before arrows and nodes) -->
+        <rect x="224" y="96" width="592" height="388" rx="8"
+              fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+        <rect x="240" y="100" width="80" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="280" y="109" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace"
+              text-anchor="middle" letter-spacing="0.14em">ONE GO BINARY</text>
+
+        <!-- Arrows first (behind boxes) -->
+        <path d="M 184,204 H 212 Q 220,204 220,196 V 176 Q 220,168 228,168 H 256"
+              fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <path d="M 184,232 H 228 Q 236,232 236,240 V 256 Q 236,264 244,264 H 256"
+              fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <path d="M 416,168 H 436 Q 444,168 444,176 V 192 Q 444,200 452,200 H 472"
+              fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <path d="M 416,264 H 448 Q 456,264 456,256 V 232 Q 456,224 464,224 H 472"
+              fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <line x1="548" y1="248" x2="548" y2="296" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <path d="M 624,212 H 644 Q 652,212 652,220 V 228 Q 652,236 660,236 H 680"
+              fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <line x1="800" y1="236" x2="832" y2="236" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <path d="M 416,412 H 704 Q 712,412 712,404 V 272"
+              fill="none" stroke="#4f5d75" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+
+        <!-- Arrow labels -->
+        <rect x="556" y="262" width="52" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="582" y="271" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace"
+              text-anchor="middle" letter-spacing="0.08em">IMPORTS</text>
+
+        <rect x="536" y="394" width="48" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="560" y="403" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace"
+              text-anchor="middle" letter-spacing="0.08em">IMPORT</text>
+
+        <!-- Node: agent (input) -->
+        <rect x="48" y="184" width="136" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="48" y="184" width="136" height="64" rx="6" fill="rgba(79,93,117,0.10)" stroke="#5a6580" stroke-width="1"/>
+        <rect x="56" y="192" width="40" height="12" rx="2" fill="transparent" stroke="rgba(90,101,128,0.40)" stroke-width="0.8"/>
+        <text x="76" y="201" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">HOST</text>
+        <text x="116" y="220" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">AI agent</text>
+        <text x="116" y="236" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">CLI · MCP host</text>
+
+        <!-- Node: CLI -->
+        <rect x="256" y="136" width="160" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="256" y="136" width="160" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="264" y="144" width="44" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+        <text x="286" y="153" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ADAPTER</text>
+        <text x="336" y="172" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">CLI</text>
+        <text x="336" y="188" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">cmd/ztd · internal/cli</text>
+
+        <!-- Node: MCP server -->
+        <rect x="256" y="232" width="160" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="256" y="232" width="160" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="264" y="240" width="44" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+        <text x="286" y="249" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ADAPTER</text>
+        <text x="336" y="268" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">MCP server</text>
+        <text x="336" y="284" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">stdio · 17 tools</text>
+
+        <!-- Node: use cases (focal) -->
+        <rect x="472" y="176" width="152" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="472" y="176" width="152" height="72" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1.2"/>
+        <rect x="480" y="184" width="40" height="12" rx="2" fill="transparent" stroke="rgba(191,69,32,0.50)" stroke-width="0.8"/>
+        <text x="500" y="193" fill="#bf4520" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CORE</text>
+        <text x="548" y="216" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Use cases</text>
+        <text x="548" y="232" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">app · Repo port</text>
+
+        <!-- Node: domain -->
+        <rect x="472" y="296" width="152" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="472" y="296" width="152" height="64" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <rect x="480" y="304" width="44" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+        <text x="502" y="313" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">VOCAB</text>
+        <text x="548" y="332" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Domain</text>
+        <text x="548" y="348" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">entities · invariants</text>
+
+        <!-- Node: store -->
+        <rect x="680" y="200" width="120" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="680" y="200" width="120" height="72" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+        <rect x="688" y="208" width="40" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.50)" stroke-width="0.8"/>
+        <text x="708" y="217" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">STORE</text>
+        <text x="740" y="240" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Store</text>
+        <text x="740" y="256" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">SQLite · history</text>
+
+        <!-- Node: database -->
+        <rect x="832" y="200" width="88" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="832" y="200" width="88" height="72" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+        <rect x="840" y="208" width="40" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.50)" stroke-width="0.8"/>
+        <text x="860" y="217" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">DATA</text>
+        <text x="876" y="240" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">ztd.db</text>
+        <text x="876" y="256" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">SQLite</text>
+
+        <!-- Node: legacy import -->
+        <rect x="256" y="380" width="160" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="256" y="380" width="160" height="64" rx="6" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.35)" stroke-width="1" stroke-dasharray="4,3"/>
+        <rect x="264" y="388" width="48" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.20)" stroke-width="0.8"/>
+        <text x="288" y="397" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">IMPORT</text>
+        <text x="336" y="416" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Legacy import</text>
+        <text x="336" y="432" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Markdown · read-only</text>
+
+        <!-- Legend strip -->
+        <line x1="40" y1="508" x2="920" y2="508" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+        <text x="40" y="524" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.18em">LEGEND</text>
+
+        <rect x="40" y="540" width="14" height="10" rx="2" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+        <text x="60" y="548" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Focal use cases</text>
+
+        <rect x="196" y="540" width="14" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="216" y="548" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Adapter</text>
+
+        <rect x="312" y="540" width="14" height="10" rx="2" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+        <text x="332" y="548" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Store · database</text>
+
+        <rect x="472" y="540" width="14" height="10" rx="2" fill="rgba(79,93,117,0.10)" stroke="#5a6580" stroke-width="1"/>
+        <text x="492" y="548" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Agent · host</text>
+
+        <rect x="616" y="540" width="14" height="10" rx="2" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.35)" stroke-width="1" stroke-dasharray="4,3"/>
+        <text x="636" y="548" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Legacy import path</text>
+      </svg>
+    </div>
+  </div>
+</body>
+</html>
