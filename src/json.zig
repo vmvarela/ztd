@@ -7,6 +7,64 @@
 const std = @import("std");
 const Io = std.Io;
 
+/// Escapes a string exactly like Go's encoding/json with the default
+/// HTML escaping: control chars, quote, backslash, `<`, `>`, `&` and the
+/// U+2028/U+2029 separators. Invalid UTF-8 becomes U+FFFD. Byte parity here
+/// also keeps request hashes identical to the Go binary's.
+pub fn writeString(w: *Io.Writer, s: []const u8) !void {
+    try w.writeByte('"');
+    var i: usize = 0;
+    while (i < s.len) {
+        const b = s[i];
+        if (b < 0x20) {
+            switch (b) {
+                '\n' => try w.writeAll("\\n"),
+                '\r' => try w.writeAll("\\r"),
+                '\t' => try w.writeAll("\\t"),
+                else => try w.print("\\u00{x:0>2}", .{@as(u32, b)}),
+            }
+            i += 1;
+            continue;
+        }
+        switch (b) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '<' => try w.writeAll("\\u003c"),
+            '>' => try w.writeAll("\\u003e"),
+            '&' => try w.writeAll("\\u0026"),
+            else => {},
+        }
+        if (b == '"' or b == '\\' or b == '<' or b == '>' or b == '&') {
+            i += 1;
+            continue;
+        }
+        const n = std.unicode.utf8ByteSequenceLength(b) catch {
+            try w.writeAll("\\ufffd");
+            i += 1;
+            continue;
+        };
+        if (i + n > s.len) {
+            try w.writeAll("\\ufffd");
+            i += 1;
+            continue;
+        }
+        const cp = std.unicode.utf8Decode(s[i .. i + n]) catch {
+            try w.writeAll("\\ufffd");
+            i += 1;
+            continue;
+        };
+        if (cp == 0x2028) {
+            try w.writeAll("\\u2028");
+        } else if (cp == 0x2029) {
+            try w.writeAll("\\u2029");
+        } else {
+            try w.writeAll(s[i .. i + n]);
+        }
+        i += n;
+    }
+    try w.writeByte('"');
+}
+
 pub const Obj = struct {
     w: *Io.Writer,
     first: bool = true,
@@ -23,13 +81,13 @@ pub const Obj = struct {
 
     pub fn key(self: *Obj, name: []const u8) !void {
         try self.sep();
-        try std.json.Stringify.value(name, .{}, self.w);
+        try writeString(self.w, name);
         try self.w.writeByte(':');
     }
 
     pub fn str(self: *Obj, name: []const u8, value: []const u8) !void {
         try self.key(name);
-        try std.json.Stringify.value(value, .{}, self.w);
+        try writeString(self.w, value);
     }
 
     /// Emits the field only when the value is present, like `omitempty`.
@@ -84,7 +142,7 @@ pub const Arr = struct {
 
     pub fn str(self: *Arr, value: []const u8) !void {
         try self.sep();
-        try std.json.Stringify.value(value, .{}, self.w);
+        try writeString(self.w, value);
     }
 
     pub fn raw(self: *Arr, value: []const u8) !void {

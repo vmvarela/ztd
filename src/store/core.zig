@@ -2303,3 +2303,191 @@ pub fn recordReview(s: *Store, a: std.mem.Allocator, cmd: ReviewCmd, now: Timest
     try s.commit();
     return review;
 }
+
+// ---- routines ----
+
+pub const RoutineCmd = struct {
+    binding: domain.Binding,
+    id: []const u8,
+    cadence: []const u8,
+    last: []const u8 = "",
+};
+
+const routine_columns = "id, scope_id, kind, cadence, last_completed_at, active, revision";
+
+fn scanRoutine(a: std.mem.Allocator, stmt: anytype) !domain.Routine {
+    return .{
+        .id = try dup(a, stmt.text(0)),
+        .scope = try dup(a, stmt.text(1)),
+        .kind = try dup(a, stmt.text(2)),
+        .cadence = try dup(a, stmt.text(3)),
+        .last_completed_at = if (stmt.optText(4)) |v| try reformat(a, v, "routines.last_completed_at") else null,
+        .active = stmt.int(5) != 0,
+        .revision = stmt.int(6),
+    };
+}
+
+fn weekdayName(name: []const u8) ?u8 {
+    const names = [_][]const u8{ "sun", "mon", "tue", "wed", "thu", "fri", "sat" };
+    for (names, 0..) |n, i| {
+        if (std.mem.eql(u8, name, n)) return @intCast(i);
+    }
+    return null;
+}
+
+/// routineDue mirrors the Go cadence rules: daily fires on a later day, weekly
+/// on the first matching weekday after the last completion.
+pub fn routineDue(cadence_in: []const u8, last: ?timeutil.Timestamp, date: timeutil.Timestamp) !bool {
+    const cadence = trimmed(cadence_in);
+    if (std.mem.eql(u8, cadence, "daily")) {
+        const l = last orelse return true;
+        return date > l;
+    }
+    if (!std.mem.startsWith(u8, cadence, "weekly:")) {
+        return errors.invalid("unknown routine cadence \"{s}\"", .{cadence});
+    }
+    const want = weekdayName(trimmed(cadence[7..])) orelse
+        return errors.invalid("unknown routine weekday in \"{s}\"", .{cadence});
+    const l = last orelse return true;
+    var next = l + 86400;
+    var i: usize = 0;
+    while (i < 7) : (i += 1) {
+        if (timeutil.civilFromTimestamp(next).weekday == want) return date >= next;
+        next += 86400;
+    }
+    return errors.fail(.io_error, "could not resolve weekly cadence \"{s}\"", .{cadence});
+}
+
+pub fn addRoutine(s: *Store, a: std.mem.Allocator, cmd: RoutineCmd) !domain.Routine {
+    try validateBinding(cmd.binding);
+    const id = trimmed(cmd.id);
+    if (id.len == 0) return errors.invalid("routine id is required", .{});
+    const cadence = trimmed(cmd.cadence);
+    _ = try routineDue(cadence, null, 0);
+    var last_day: ?timeutil.Timestamp = null;
+    const last_raw = trimmed(cmd.last);
+    if (last_raw.len > 0) {
+        last_day = timeutil.parseDate(last_raw) catch
+            return errors.invalid("last must be YYYY-MM-DD, got \"{s}\"", .{last_raw});
+    }
+    const scope = cmd.binding.scopes[0];
+
+    try s.begin();
+    errdefer s.rollback();
+    var exists = try s.db.prepare("SELECT 1 FROM scopes WHERE id = ?");
+    defer exists.finalize();
+    try exists.bindText(1, scope);
+    if (!try exists.step()) return errors.invalid("unknown scope reference {s}", .{scope});
+    var dup_check = try s.db.prepare("SELECT 1 FROM routines WHERE id = ? AND scope_id = ?");
+    defer dup_check.finalize();
+    try dup_check.bindText(1, id);
+    try dup_check.bindText(2, scope);
+    if (try dup_check.step()) return errors.fail(.conflict, "routine {s} already exists", .{id});
+
+    const last_text: ?[]const u8 = if (last_day) |d| try fmtTs(a, d) else null;
+    var ins = try s.db.prepare(
+        "INSERT INTO routines (id, scope_id, kind, cadence, last_completed_at, active, revision) VALUES (?, ?, 'routine', ?, ?, 1, 1)",
+    );
+    defer ins.finalize();
+    try ins.bindText(1, id);
+    try ins.bindText(2, scope);
+    try ins.bindText(3, cadence);
+    try ins.bindOptText(4, last_text);
+    _ = try ins.step();
+    try s.commit();
+
+    return .{
+        .id = try dup(a, id),
+        .scope = try dup(a, scope),
+        .kind = try dup(a, "routine"),
+        .cadence = try dup(a, cadence),
+        .last_completed_at = last_text,
+        .active = true,
+        .revision = 1,
+    };
+}
+
+/// dueRoutines returns null, not an empty array, when nothing is due: Go keeps
+/// the nil slice and the corpus compares that null.
+pub fn dueRoutines(s: *Store, a: std.mem.Allocator, b: domain.Binding, date_text: []const u8) !?[]domain.Routine {
+    try validateBinding(b);
+    const day = timeutil.parseDate(date_text) catch
+        return errors.invalid("date must be YYYY-MM-DD", .{});
+
+    var buf = std.Io.Writer.Allocating.init(a);
+    const w = &buf.writer;
+    try w.writeAll("SELECT " ++ routine_columns ++ " FROM routines WHERE scope_id IN (");
+    try w.writeAll(try scopeFilter(a, b.scopes.len));
+    try w.writeAll(") AND active = 1 ORDER BY id");
+    var stmt = try s.db.prepare(buf.written());
+    defer stmt.finalize();
+    _ = try scopeArgs(stmt, 1, b);
+
+    var items = std.ArrayList(domain.Routine).empty;
+    while (try stmt.step()) {
+        const r = try scanRoutine(a, stmt);
+        const last = if (r.last_completed_at) |v| timeutil.parseTime(v) catch null else null;
+        if (try routineDue(r.cadence, last, day)) try items.append(a, r);
+    }
+    if (items.items.len == 0) return null;
+    return items.items;
+}
+
+pub fn completeRoutine(s: *Store, a: std.mem.Allocator, b: domain.Binding, id: []const u8, date_text: []const u8) !domain.Routine {
+    try validateBinding(b);
+    const day = timeutil.parseDate(date_text) catch
+        return errors.invalid("date must be YYYY-MM-DD", .{});
+
+    try s.begin();
+    errdefer s.rollback();
+    var sql_buf = std.Io.Writer.Allocating.init(a);
+    const w = &sql_buf.writer;
+    try w.writeAll("SELECT " ++ routine_columns ++ " FROM routines WHERE id = ? AND scope_id IN (");
+    try w.writeAll(try scopeFilter(a, b.scopes.len));
+    try w.writeAll(")");
+    var stmt = try s.db.prepare(sql_buf.written());
+    defer stmt.finalize();
+    try stmt.bindText(1, id);
+    _ = try scopeArgs(stmt, 2, b);
+    if (!try stmt.step()) return rowAccessError(s, "routines", "routine", id);
+    var r = try scanRoutine(a, stmt);
+    if (!r.active) return errors.fail(.invalid_transition, "routine {s} is inactive", .{id});
+
+    const day_text = try fmtTs(a, day);
+    var upd = try s.db.prepare("UPDATE routines SET last_completed_at = ?, revision = ? WHERE id = ? AND scope_id = ?");
+    defer upd.finalize();
+    try upd.bindText(1, day_text);
+    try upd.bindInt(2, r.revision + 1);
+    try upd.bindText(3, id);
+    try upd.bindText(4, r.scope);
+    _ = try upd.step();
+    try s.commit();
+
+    r.last_completed_at = day_text;
+    r.revision += 1;
+    return r;
+}
+
+// ---- check ----
+
+pub const CheckReport = struct {
+    ok: bool,
+    errors: []const []const u8,
+};
+
+/// runCheck runs the foreign-key gate today; the remaining Go checks
+/// (shortcut: per-table invariants are not ported yet, port them before
+/// cutover) are tracked in the implementation plan.
+pub fn runCheck(s: *Store, a: std.mem.Allocator) !CheckReport {
+    var failures = std.ArrayList([]const u8).empty;
+    var stmt = try s.db.prepare("PRAGMA foreign_key_check");
+    defer stmt.finalize();
+    while (try stmt.step()) {
+        try failures.append(a, try std.fmt.allocPrint(
+            a,
+            "foreign key violation in {s} (rowid {s}) references {s}",
+            .{ stmt.text(0), stmt.text(1), stmt.text(2) },
+        ));
+    }
+    return .{ .ok = failures.items.len == 0, .errors = failures.items };
+}

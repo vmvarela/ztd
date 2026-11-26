@@ -228,6 +228,23 @@ fn dispatch(c: *Cli, init: std.process.Init, command: []const u8, args: []const 
     if (std.mem.eql(u8, command, "plan")) return cmdPlan(c, args);
     if (std.mem.eql(u8, command, "focus")) return cmdFocus(c, args);
     if (std.mem.eql(u8, command, "review")) return cmdReview(c, args);
+    if (std.mem.eql(u8, command, "routines")) return cmdRoutines(c, args);
+    if (std.mem.eql(u8, command, "due")) {
+        const forwarded = try c.arena.alloc([]const u8, args.len + 1);
+        forwarded[0] = "due";
+        @memcpy(forwarded[1..], args);
+        return cmdRoutines(c, forwarded);
+    }
+    if (std.mem.eql(u8, command, "routine")) {
+        if (args.len == 0 or (!std.mem.eql(u8, args[0], "done") and !std.mem.eql(u8, args[0], "add"))) {
+            return errors.invalid("usage: routine done [flags] <routine-id> | routine add --id ID --cadence daily|weekly:<day> [--last YYYY-MM-DD]", .{});
+        }
+        const forwarded = try c.arena.alloc([]const u8, args.len + 1);
+        forwarded[0] = "routines";
+        @memcpy(forwarded[1..], args);
+        return cmdRoutines(c, forwarded);
+    }
+    if (std.mem.eql(u8, command, "check")) return cmdCheck(c, args);
     return errors.invalid("unknown command \"{s}\" (see usage)", .{command});
 }
 
@@ -1147,6 +1164,82 @@ fn cmdReview(c: *Cli, args: []const []const u8) !void {
         .complete = true,
     }, nowSeconds(c));
     return writeJson(c, "review", review);
+}
+
+fn cmdRoutines(c: *Cli, args: []const []const u8) !void {
+    const a = c.arena;
+    if (args.len == 0) return errors.invalid("usage: routines due|done|add [flags]", .{});
+    const sub = args[0];
+    if (std.mem.eql(u8, sub, "add")) {
+        const parsed = try parseFlags(a, args[1..], &.{
+            .{ .name = "scope", .value = true },
+            .{ .name = "id", .value = true },
+            .{ .name = "cadence", .value = true },
+            .{ .name = "last", .value = true },
+        });
+        if (parsed.positional.len != 0) return errors.invalid(
+            "usage: routines add --id ID --cadence daily|weekly:<day> [--last YYYY-MM-DD] [--scope S]",
+            .{},
+        );
+        const parsed_scope = parsed.get("scope", "");
+        var opened = try bound(c, oneScope(parsed_scope));
+        defer opened.st.close();
+        const r = try core.addRoutine(&opened.st, a, .{
+            .binding = opened.b,
+            .id = parsed.get("id", ""),
+            .cadence = parsed.get("cadence", ""),
+            .last = parsed.get("last", ""),
+        });
+        return writeJson(c, "routines add", r);
+    }
+    if (!std.mem.eql(u8, sub, "due") and !std.mem.eql(u8, sub, "done")) {
+        return errors.invalid("unknown routines subcommand \"{s}\" (usage: routines due|done|add)", .{sub});
+    }
+    const parsed = try parseFlags(a, args[1..], &.{
+        .{ .name = "scope", .value = true },
+        .{ .name = "date", .value = true },
+    });
+    var date_buf: [10]u8 = undefined;
+    const date_text = blk: {
+        const given = parsed.get("date", "");
+        if (given.len > 0) break :blk given;
+        break :blk timeutil.date(nowSeconds(c), &date_buf);
+    };
+    var opened = try bound(c, oneScope(parsed.get("scope", "")));
+    defer opened.st.close();
+
+    if (std.mem.eql(u8, sub, "due")) {
+        const due = try core.dueRoutines(&opened.st, a, opened.b, date_text);
+        var aw = Io.Writer.Allocating.init(a);
+        if (due) |items| {
+            var arr = try jsonw.Arr.init(&aw.writer);
+            for (items) |r| {
+                var o = try arr.obj();
+                try r.write(&o);
+                try o.end();
+            }
+            try arr.end();
+        } else {
+            try aw.writer.writeAll("null");
+        }
+        return succeedData(c, "routines due", aw.written());
+    }
+    if (parsed.positional.len != 1) return errors.invalid("usage: routines done [flags] <routine-id>", .{});
+    const r = try core.completeRoutine(&opened.st, a, opened.b, parsed.positional[0], date_text);
+    return writeJson(c, "routines done", r);
+}
+
+fn cmdCheck(c: *Cli, args: []const []const u8) !void {
+    _ = args;
+    var opened = try bound(c, &.{});
+    defer opened.st.close();
+    const report = try core.runCheck(&opened.st, c.arena);
+    var aw = Io.Writer.Allocating.init(c.arena);
+    var o = try jsonw.Obj.init(&aw.writer);
+    try o.boolean("ok", report.ok);
+    if (report.errors.len > 0) try writeStringArray(&o, "errors", report.errors);
+    try o.end();
+    return succeedData(c, "check", aw.written());
 }
 
 pub const usage =

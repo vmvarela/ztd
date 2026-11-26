@@ -411,6 +411,26 @@ pub const Source = struct {
     }
 };
 
+pub const Routine = struct {
+    id: []const u8,
+    scope: []const u8,
+    kind: []const u8,
+    cadence: []const u8,
+    last_completed_at: ?[]const u8 = null,
+    active: bool,
+    revision: i64,
+
+    pub fn write(self: Routine, o: *json.Obj) !void {
+        try o.str("id", self.id);
+        try o.str("scope", self.scope);
+        try o.str("kind", self.kind);
+        try o.str("cadence", self.cadence);
+        try o.optStr("last_completed_at", self.last_completed_at);
+        try o.boolean("active", self.active);
+        try o.int("revision", self.revision);
+    }
+};
+
 test "capture emits Go field order and omits empty optionals" {
     var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
