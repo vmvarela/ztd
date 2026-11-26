@@ -1,0 +1,313 @@
+{
+  "steps": [
+    {
+      "exit": 0,
+      "envelope": {
+        "ok": true,
+        "command": "init",
+        "data": {
+          "actor": "ztd-corpus",
+          "database": "\u003ctmp\u003e/ztd.db",
+          "profiles": [
+            {
+              "id": "personal",
+              "existed": false
+            }
+          ],
+          "scopes": [
+            {
+              "id": "personal",
+              "existed": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "exit": 0,
+      "envelope": {
+        "ok": true,
+        "command": "capture",
+        "data": {
+          "id": "\u003ccid\u003e",
+          "scope": "personal",
+          "source_id": "MANUAL",
+          "original_text": "renew the parking permit",
+          "content_hash": "\u003chash\u003e",
+          "captured_at": "\u003cts\u003e",
+          "processing_state": "pending",
+          "revision": 1
+        }
+      }
+    },
+    {
+      "exit": 0,
+      "envelope": {
+        "ok": true,
+        "command": "capture",
+        "data": {
+          "id": "\u003ccid\u003e",
+          "scope": "personal",
+          "source_id": "MANUAL",
+          "original_text": "renew the parking permit",
+          "content_hash": "\u003chash\u003e",
+          "captured_at": "\u003cts\u003e",
+          "processing_state": "pending",
+          "revision": 1
+        }
+      }
+    },
+    {
+      "exit": 1,
+      "envelope": {
+        "ok": false,
+        "command": "capture",
+        "error": {
+          "family": "idempotency_conflict",
+          "detail": "idempotency key \"cap-1\" was already used with a different payload"
+        }
+      }
+    },
+    {
+      "exit": 1,
+      "envelope": {
+        "ok": false,
+        "command": "capture",
+        "error": {
+          "family": "invalid_input",
+          "detail": "capture text is required"
+        }
+      }
+    },
+    {
+      "exit": 1,
+      "envelope": {
+        "ok": false,
+        "command": "show",
+        "error": {
+          "family": "not_found",
+          "detail": "work item \u003ctid\u003e not found"
+        }
+      }
+    },
+    {
+      "exit": 1,
+      "envelope": {
+        "ok": false,
+        "command": "process",
+        "error": {
+          "family": "invalid_input",
+          "detail": "unknown outcome kind \"nonsense\""
+        }
+      }
+    },
+    {
+      "exit": 1,
+      "envelope": {
+        "ok": false,
+        "command": "process",
+        "error": {
+          "family": "invalid_input",
+          "detail": "work_items outcome requires at least one title"
+        }
+      }
+    },
+    {
+      "exit": 1,
+      "envelope": {
+        "ok": false,
+        "command": "move",
+        "error": {
+          "family": "not_found",
+          "detail": "work item \u003ccid\u003e not found"
+        }
+      }
+    },
+    {
+      "exit": 1,
+      "envelope": {
+        "ok": false,
+        "command": "doc",
+        "error": {
+          "family": "invalid_input",
+          "detail": "unknown document kind \"nonsense\""
+        }
+      }
+    },
+    {
+      "exit": 1,
+      "envelope": {
+        "ok": false,
+        "command": "doc",
+        "error": {
+          "family": "not_found",
+          "detail": "document knowledge/missing not found"
+        }
+      }
+    },
+    {
+      "exit": 0,
+      "envelope": {
+        "ok": true,
+        "command": "source add",
+        "data": {
+          "id": "feed",
+          "name": "Feed",
+          "scope": "personal",
+          "kind": "capture",
+          "connector": "manual",
+          "provider": "",
+          "connection_ref": "",
+          "non_secret_query": "",
+          "cadence": "",
+          "auth_state": "unknown",
+          "coverage": "unknown",
+          "cursor": "",
+          "created_at": "\u003cts\u003e",
+          "updated_at": "\u003cts\u003e"
+        }
+      }
+    },
+    {
+      "exit": 0,
+      "envelope": {
+        "ok": true,
+        "command": "source delete",
+        "data": {
+          "id": "feed",
+          "name": "Feed",
+          "scope": "personal",
+          "kind": "capture",
+          "connector": "manual",
+          "provider": "",
+          "connection_ref": "",
+          "non_secret_query": "",
+          "cadence": "",
+          "auth_state": "unknown",
+          "coverage": "unknown",
+          "cursor": "",
+          "created_at": "\u003cts\u003e",
+          "updated_at": "\u003cts\u003e"
+        }
+      }
+    },
+    {
+      "exit": 1,
+      "envelope": {
+        "ok": false,
+        "command": "nonsense",
+        "error": {
+          "family": "invalid_input",
+          "detail": "unknown command \"nonsense\" (see usage)"
+        }
+      }
+    }
+  ],
+  "db": {
+    "areas": null,
+    "calendar_review_assertions": null,
+    "captures": [
+      [
+        "\u003ccid\u003e",
+        "personal",
+        "MANUAL",
+        "\u003cnull\u003e",
+        "\u003cnull\u003e",
+        "renew the parking permit",
+        "\u003chash\u003e",
+        "\u003cnull\u003e",
+        "\u003cnull\u003e",
+        "\u003cts\u003e",
+        "pending",
+        "\u003cnull\u003e",
+        "\u003cnull\u003e",
+        "1"
+      ]
+    ],
+    "checkpoints": null,
+    "contexts": null,
+    "daily_limit_overrides": null,
+    "documents": null,
+    "focus_sessions": null,
+    "goals": null,
+    "history_events": [
+      [
+        "1",
+        "capture",
+        "\u003ccid\u003e",
+        "personal",
+        "\u003cnull\u003e",
+        "captured",
+        "1",
+        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
+        "\u003cts\u003e"
+      ],
+      [
+        "2",
+        "source",
+        "feed",
+        "personal",
+        "\u003cnull\u003e",
+        "created",
+        "1",
+        "{\"id\":\"feed\",\"name\":\"Feed\",\"scope\":\"personal\",\"kind\":\"capture\",\"connector\":\"manual\",\"provider\":\"\",\"connection_ref\":\"\",\"non_secret_query\":\"\",\"cadence\":\"\",\"auth_state\":\"unknown\",\"coverage\":\"unknown\",\"cursor\":\"\",\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
+        "\u003cts\u003e"
+      ],
+      [
+        "3",
+        "source",
+        "feed",
+        "personal",
+        "\u003cnull\u003e",
+        "deleted",
+        "1",
+        "{\"id\":\"feed\",\"name\":\"Feed\",\"scope\":\"personal\",\"kind\":\"capture\",\"connector\":\"manual\",\"provider\":\"\",\"connection_ref\":\"\",\"non_secret_query\":\"\",\"cadence\":\"\",\"auth_state\":\"unknown\",\"coverage\":\"unknown\",\"cursor\":\"\",\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
+        "\u003cts\u003e"
+      ]
+    ],
+    "idempotency_records": [
+      [
+        "capture",
+        "cap-1",
+        "\u003chash\u003e",
+        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
+        "\u003cts\u003e"
+      ]
+    ],
+    "import_runs": null,
+    "knowledge_records": null,
+    "legacy_records": null,
+    "plan_items": null,
+    "plans": null,
+    "profile_scopes": [
+      [
+        "personal",
+        "personal"
+      ]
+    ],
+    "profiles": [
+      [
+        "personal",
+        "personal",
+        "personal",
+        "ztd-corpus",
+        "Europe/Madrid",
+        "active"
+      ]
+    ],
+    "projects": null,
+    "reviews": null,
+    "routines": null,
+    "scopes": [
+      [
+        "personal",
+        "personal",
+        "personal",
+        "\u003cts\u003e"
+      ]
+    ],
+    "source_reviews": null,
+    "sources": null,
+    "work_items": null
+  }
+}

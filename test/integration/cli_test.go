@@ -19,6 +19,17 @@ import (
 var binPath string
 
 func TestMain(m *testing.M) {
+	// ZTD_BIN replays the same suite against prebuilt binaries (the Zig build
+	// during the v3 rewrite) instead of compiling the Go product.
+	if bin := os.Getenv("ZTD_BIN"); bin != "" {
+		abs, err := resolveBin(bin)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ZTD_BIN:", err)
+			os.Exit(1)
+		}
+		binPath = abs
+		os.Exit(m.Run())
+	}
 	dir, err := os.MkdirTemp("", "ztd-integration-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "temp dir:", err)
@@ -49,6 +60,22 @@ func repoRoot() string {
 		panic("runtime.Caller failed")
 	}
 	return filepath.Dir(filepath.Dir(filepath.Dir(file)))
+}
+
+// resolveBin accepts an absolute path or one relative to the repository root,
+// because `go test` runs with the package directory as its working directory.
+func resolveBin(bin string) (string, error) {
+	if !filepath.IsAbs(bin) {
+		if p := filepath.Join(repoRoot(), bin); fileExists(p) {
+			bin = p
+		}
+	}
+	return filepath.Abs(bin)
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 type errorShape struct {
