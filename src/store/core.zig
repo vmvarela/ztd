@@ -2523,21 +2523,157 @@ pub const CheckReport = struct {
     errors: []const []const u8,
 };
 
-/// runCheck runs the foreign-key gate today; the remaining Go checks
-/// (shortcut: per-table invariants are not ported yet, port them before
-/// cutover) are tracked in the implementation plan.
-pub fn runCheck(s: *Store, a: std.mem.Allocator) !CheckReport {
-    var failures = std.ArrayList([]const u8).empty;
-    var stmt = try s.db.prepare("PRAGMA foreign_key_check");
-    defer stmt.finalize();
-    while (try stmt.step()) {
-        try failures.append(a, try std.fmt.allocPrint(
-            a,
-            "foreign key violation in {s} (rowid {s}) references {s}",
-            .{ stmt.text(0), stmt.text(1), stmt.text(2) },
-        ));
+const CheckRun = struct {
+    s: *Store,
+    a: std.mem.Allocator,
+    failures: std.ArrayList([]const u8) = .empty,
+
+    fn fail(self: *CheckRun, comptime fmt: []const u8, args: anytype) !void {
+        try self.failures.append(self.a, try std.fmt.allocPrint(self.a, fmt, args));
     }
-    return .{ .ok = failures.items.len == 0, .errors = failures.items };
+
+    /// Runs a single-column id query, binding the scope list and/or profile.
+    fn collect(self: *CheckRun, query: []const u8, b: ?domain.Binding, profile: ?[]const u8) ![]const []const u8 {
+        var stmt = try self.s.db.prepare(query);
+        defer stmt.finalize();
+        var idx: c_int = 1;
+        if (b) |binding| idx = try scopeArgs(stmt, idx, binding);
+        if (profile) |p| {
+            try stmt.bindText(idx, p);
+            idx += 1;
+        }
+        var out: std.ArrayList([]const u8) = .empty;
+        while (try stmt.step()) try out.append(self.a, try dup(self.a, stmt.text(0)));
+        return out.items;
+    }
+};
+
+fn cat(a: std.mem.Allocator, base: []const u8, suffix: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "{s}{s}", .{ base, suffix });
+}
+
+/// Valida el store completo. Con binding, los checks de fila se limitan a sus
+/// scopes y perfil; la integridad referencial siempre cubre toda la base.
+pub fn runCheck(s: *Store, a: std.mem.Allocator, b: ?domain.Binding) !CheckReport {
+    var run = CheckRun{ .s = s, .a = a };
+    if (b) |binding| try validateBinding(binding);
+
+    var scope_sql: []const u8 = "";
+    if (b) |binding| scope_sql = try std.fmt.allocPrint(a, " AND scope_id IN ({s})", .{try scopeFilter(a, binding.scopes.len)});
+    const plan_sql = " AND profile_id = ?";
+    const bound = b != null;
+    const profile: ?[]const u8 = if (b) |binding| binding.profile else null;
+
+    // 1. Integridad referencial.
+    {
+        var stmt = try s.db.prepare("PRAGMA foreign_key_check");
+        defer stmt.finalize();
+        while (try stmt.step()) {
+            const rowid = if (stmt.isNull(1)) "NULL" else stmt.text(1);
+            try run.fail("foreign key violation in {s} (rowid {s}) references {s}", .{ stmt.text(0), rowid, stmt.text(2) });
+        }
+    }
+
+    // 2. Campos requeridos.
+    for (try run.collect(try cat(a, "SELECT id FROM work_items WHERE title IS NULL OR trim(title) = ''", scope_sql), b, null)) |id|
+        try run.fail("work item {s} has no title", .{id});
+    for (try run.collect(try cat(a, "SELECT id FROM work_items WHERE json_valid(custom_fields) = 0 OR json_type(custom_fields) <> 'object'", scope_sql), b, null)) |id|
+        try run.fail("work item {s} has custom fields that are not a JSON object", .{id});
+    for (try run.collect(try cat(a, "SELECT id FROM captures WHERE original_text = '' OR content_hash = ''", scope_sql), b, null)) |id|
+        try run.fail("capture {s} is missing original text or content hash", .{id});
+    for (try run.collect(try cat(a, "SELECT id FROM plans WHERE trim(period) = ''", plan_sql), null, profile)) |id|
+        try run.fail("plan {s} has no period", .{id});
+    for (try run.collect("SELECT id FROM scopes WHERE trim(name) = ''", null, null)) |id|
+        try run.fail("scope {s} has no name", .{id});
+
+    // 3. Invariantes de espera y archivo.
+    for (try run.collect(try cat(a, "SELECT id FROM work_items WHERE lifecycle = 'waiting' AND (waiting_on IS NULL OR waiting_on = '')", scope_sql), b, null)) |id|
+        try run.fail("work item {s} is waiting without waiting_on", .{id});
+    for (try run.collect(try cat(a, "SELECT id FROM work_items WHERE lifecycle = 'archived' AND (closed_at IS NULL OR resolution IS NULL OR resolution = '')", scope_sql), b, null)) |id|
+        try run.fail("work item {s} is archived without closed_at or resolution", .{id});
+    for (try run.collect(try cat(a, "SELECT id FROM work_items WHERE lifecycle <> 'archived' AND (closed_at IS NOT NULL OR closure_kind IS NOT NULL OR (resolution IS NOT NULL AND resolution <> ''))", scope_sql), b, null)) |id|
+        try run.fail("work item {s} carries closure fields while not archived", .{id});
+
+    // 4. Estado de captura frente a review_after y outcome.
+    for (try run.collect(try cat(a, "SELECT id FROM captures WHERE (processing_state = 'deferred') <> (review_after IS NOT NULL)", scope_sql), b, null)) |id|
+        try run.fail("capture {s} has a review_after that does not match its state", .{id});
+    for (try run.collect(try cat(a, "SELECT id FROM captures WHERE processing_state IN ('processed','discarded') AND processing_outcome IS NULL", scope_sql), b, null)) |id|
+        try run.fail("capture {s} is processed or discarded without a recorded outcome", .{id});
+    for (try run.collect(try cat(a, "SELECT id FROM captures WHERE processing_state = 'pending' AND processing_outcome IS NOT NULL", scope_sql), b, null)) |id|
+        try run.fail("capture {s} is pending with a recorded outcome", .{id});
+
+    // 5. Identidad externa completa y sin duplicados.
+    for (try run.collect(try cat(a, "SELECT id FROM captures WHERE external_id IS NOT NULL AND external_revision IS NULL", scope_sql), b, null)) |id|
+        try run.fail("capture {s} has an external id without an external revision", .{id});
+    for (try run.collect(try cat(a, "SELECT id FROM captures WHERE external_revision IS NOT NULL AND external_id IS NULL", scope_sql), b, null)) |id|
+        try run.fail("capture {s} has an external revision without an external id", .{id});
+    for (try run.collect(
+        try cat(a, "SELECT scope_id || '/' || source_id || '/' || external_id || '/' || ifnull(external_revision, '<null>') FROM captures WHERE external_id IS NOT NULL", try std.fmt.allocPrint(a, "{s} GROUP BY scope_id, source_id, external_id, external_revision HAVING count(*) > 1", .{scope_sql})),
+        b,
+        null,
+    )) |id| try run.fail("duplicate external identity {s}", .{id});
+
+    // 6. Registro de fuentes.
+    for (try run.collect(try cat(a, "SELECT id FROM sources WHERE NOT EXISTS (SELECT 1 FROM scopes WHERE scopes.id = sources.scope_id)", scope_sql), b, null)) |id|
+        try run.fail("source {s} references a missing scope", .{id});
+    for (try run.collect("SELECT id FROM sources GROUP BY id HAVING count(*) > 1", null, null)) |id|
+        try run.fail("duplicate source id {s}", .{id});
+    for (try run.collect("SELECT id FROM source_reviews WHERE NOT EXISTS (SELECT 1 FROM sources WHERE sources.id = source_reviews.source_id)", null, null)) |id|
+        try run.fail("source review {s} references a missing source", .{id});
+    for (try run.collect("SELECT id FROM source_reviews WHERE result_kind NOT IN ('observed','reported') OR coverage_state NOT IN ('unknown','unverified','partial','complete','failed')", null, null)) |id|
+        try run.fail("source review {s} has an invalid result kind or coverage", .{id});
+    for (try run.collect(try cat(a, "SELECT id FROM captures WHERE external_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sources WHERE sources.id = captures.source_id)", scope_sql), b, null)) |id|
+        try run.fail("capture {s} references a missing source", .{id});
+
+    // 7. Capa de documentos.
+    for (try run.collect(try cat(a, "SELECT id FROM documents WHERE NOT EXISTS (SELECT 1 FROM scopes WHERE scopes.id = documents.scope_id)", scope_sql), b, null)) |id|
+        try run.fail("document {s} references a missing scope", .{id});
+    for (try run.collect(try cat(a, "SELECT id FROM documents WHERE kind NOT IN ('knowledge','knowledge_index','project_note','plan_daily','plan_weekly','review','journal','calendar','adoption','passion','routine')", scope_sql), b, null)) |id|
+        try run.fail("document {s} has an unknown kind", .{id});
+    for (try run.collect(try cat(a, "SELECT id FROM documents WHERE status NOT IN ('draft','verified','superseded')", scope_sql), b, null)) |id|
+        try run.fail("document {s} has an unknown status", .{id});
+    for (try run.collect(try cat(a, "SELECT id FROM documents WHERE trim(slug) = ''", scope_sql), b, null)) |id|
+        try run.fail("document {s} has an empty slug", .{id});
+
+    // 8. Metadatos de repositorio de proyectos.
+    for (try run.collect(try cat(a, "SELECT id FROM projects WHERE clone_path <> '' AND NOT (substr(clone_path, 1, 1) IN ('/', '\\') OR (length(clone_path) >= 3 AND substr(clone_path, 1, 1) GLOB '[A-Za-z]' AND substr(clone_path, 2, 1) = ':' AND substr(clone_path, 3, 1) IN ('/', '\\')))", scope_sql), b, null)) |id|
+        try run.fail("project {s} has a relative clone path", .{id});
+    for (try run.collect(try cat(a, "SELECT id FROM projects WHERE clone_path <> '' AND ('/' || replace(clone_path, '\\', '/') || '/') LIKE '%/../%'", scope_sql), b, null)) |id|
+        try run.fail("project {s} has a clone path with a .. segment", .{id});
+    for (try run.collect(try cat(a, "SELECT id FROM projects WHERE repo_url <> '' AND instr(repo_url, '://') = 0 AND repo_url NOT GLOB '*@*:*'", scope_sql), b, null)) |id|
+        try run.fail("project {s} has a non-absolute repository url", .{id});
+
+    // 9. Historial como evidencia de cada mutación.
+    for (try run.collect(try cat(a, "SELECT id FROM captures WHERE NOT EXISTS (SELECT 1 FROM history_events h WHERE h.entity_type = 'capture' AND h.entity_id = captures.id)", scope_sql), b, null)) |id|
+        try run.fail("capture {s} has no history events", .{id});
+    for (try run.collect(try cat(a, "SELECT id FROM work_items WHERE NOT EXISTS (SELECT 1 FROM history_events h WHERE h.entity_type = 'work_item' AND h.entity_id = work_items.id)", scope_sql), b, null)) |id|
+        try run.fail("work item {s} has no history events", .{id});
+    for (try run.collect(try cat(a, "SELECT id FROM plans WHERE NOT EXISTS (SELECT 1 FROM history_events h WHERE h.entity_type = 'plan' AND h.entity_id = plans.id)", plan_sql), null, profile)) |id|
+        try run.fail("plan {s} has no history events", .{id});
+
+    // 10. Work items de planes fuera de los scopes del perfil.
+    {
+        const base = "SELECT pi.work_item_id, pi.plan_id FROM plan_items pi JOIN plans p ON p.id = pi.plan_id JOIN work_items w ON w.id = pi.work_item_id WHERE w.scope_id NOT IN (SELECT scope_id FROM profile_scopes WHERE profile_id = p.profile_id)";
+        const query = if (bound) try cat(a, base, " AND p.profile_id = ?") else base;
+        var stmt = try s.db.prepare(query);
+        defer stmt.finalize();
+        if (profile) |p| try stmt.bindText(1, p);
+        while (try stmt.step()) {
+            try run.fail("plan {s} references work item {s} outside the profile scopes", .{ stmt.text(1), stmt.text(0) });
+        }
+    }
+
+    // 11. Invariantes de recorrido.
+    for (try run.collect("SELECT actor_id FROM focus_sessions WHERE ended_at IS NULL GROUP BY actor_id HAVING count(*) > 1", null, null)) |id|
+        try run.fail("actor {s} has more than one open focus", .{id});
+    for (try run.collect("SELECT f.id FROM focus_sessions f JOIN work_items w ON w.id = f.work_item_id WHERE w.scope_id NOT IN (SELECT scope_id FROM profile_scopes WHERE profile_id = f.profile_id)", null, null)) |id|
+        try run.fail("focus {s} uses a work item outside its profile scopes", .{id});
+    for (try run.collect("SELECT c.id FROM checkpoints c JOIN work_items w ON w.id = c.work_item_id WHERE c.scope_id <> w.scope_id", null, null)) |id|
+        try run.fail("checkpoint {s} has a scope that differs from its work item", .{id});
+    for (try run.collect("SELECT profile_id || '/' || kind || '/' || period FROM reviews GROUP BY profile_id, kind, period HAVING count(*) > 1", null, null)) |id|
+        try run.fail("review {s} duplicates a profile/kind/period", .{id});
+
+    return .{ .ok = run.failures.items.len == 0, .errors = run.failures.items };
 }
 
 // ------------------------------------------------------------ documents
@@ -4017,7 +4153,7 @@ pub fn restoreFrom(s: *Store, a: std.mem.Allocator, io: std.Io, from: []const u8
         }
         try counts.append(a, .{ .name = def.name, .count = n });
     }
-    const report = try runCheck(s, a);
+    const report = try runCheck(s, a, null);
     if (!report.ok) {
         const joined = try joinCapped(a, report.errors);
         return errors.invalid("restored data failed validation: {s}", .{joined});

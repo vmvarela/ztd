@@ -1250,16 +1250,109 @@ fn cmdRoutines(c: *Cli, args: []const []const u8) !void {
 }
 
 fn cmdCheck(c: *Cli, args: []const []const u8) !void {
-    _ = args;
-    var opened = try bound(c, &.{});
-    defer opened.st.close();
-    const report = try core.runCheck(&opened.st, c.arena);
+    const specs = [_]Spec{ .{ .name = "scope", .value = true }, .{ .name = "bindings", .value = false } };
+    const p = try parseFlags(c.arena, args, &specs);
+    if (p.positional.len != 0) return errors.invalid("usage: check [--scope S] [--bindings]", .{});
+    if (p.has("bindings")) return checkBindings(c);
+    const scope = p.get("scope", "");
     var aw = Io.Writer.Allocating.init(c.arena);
     var o = try jsonw.Obj.init(&aw.writer);
-    try o.boolean("ok", report.ok);
-    if (report.errors.len > 0) try writeStringArray(&o, "errors", report.errors);
+    if (scope.len > 0) {
+        var opened = try bound(c, oneScope(scope));
+        defer opened.st.close();
+        const report = try core.runCheck(&opened.st, c.arena, opened.b);
+        try o.boolean("ok", report.ok);
+        if (report.errors.len > 0) try writeStringArray(&o, "errors", report.errors);
+    } else {
+        var opened = try openStore(c);
+        defer opened.close();
+        const report = try core.runCheck(&opened, c.arena, null);
+        try o.boolean("ok", report.ok);
+        if (report.errors.len > 0) try writeStringArray(&o, "errors", report.errors);
+    }
     try o.end();
     return succeedData(c, "check", aw.written());
+}
+
+fn checkBindings(c: *Cli) !void {
+    const raw = Io.Dir.cwd().readFileAlloc(c.io, ".ztd.json", c.arena, .limited(1 << 20)) catch |e| switch (e) {
+        error.FileNotFound => return errors.invalid(".ztd.json not found", .{}),
+        else => return errors.fail(.io_error, "read .ztd.json: {s}", .{@errorName(e)}),
+    };
+    const parsed = std.json.parseFromSlice(std.json.Value, c.arena, raw, .{}) catch
+        return errors.invalid(".ztd.json is not valid JSON", .{});
+    const hint = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return errors.invalid(".ztd.json must be a JSON object", .{}),
+    };
+    for (hint.keys()) |key| {
+        if (!std.mem.eql(u8, key, "context") and !std.mem.eql(u8, key, "client") and !std.mem.eql(u8, key, "project")) {
+            return errors.invalid(".ztd.json has unexpected field \"{s}\" (want context, client, project)", .{key});
+        }
+    }
+    const context_val = try hintField(hint, "context", true);
+    const client_val = try hintField(hint, "client", false);
+    const project_val = try hintField(hint, "project", true);
+
+    var scopes: []const domain.Scope = &.{};
+    var st_val: Store = undefined;
+    var have_store = false;
+    defer if (have_store) st_val.close();
+    if (Io.Dir.cwd().access(c.io, c.db, .{})) |_| {
+        st_val = try openStore(c);
+        have_store = true;
+        scopes = try core.listScopes(&st_val, c.arena);
+    } else |_| {}
+
+    var resolved: ?[]const u8 = null;
+    for (scopes) |sc| {
+        if (std.mem.eql(u8, sc.id, context_val)) resolved = sc.id;
+    }
+    if (resolved == null and client_val.len > 0) {
+        const client_scope = try std.fmt.allocPrint(c.arena, "client:{s}", .{client_val});
+        for (scopes) |sc| {
+            if (std.mem.eql(u8, sc.id, client_scope)) resolved = sc.id;
+        }
+    }
+    if (resolved == null) {
+        for (scopes) |sc| {
+            if (std.mem.eql(u8, sc.id, "personal")) resolved = sc.id;
+        }
+    }
+    const scope_id = resolved orelse
+        return errors.invalid("no scope matches .ztd.json (context \"{s}\", client \"{s}\")", .{ context_val, client_val });
+    if (!have_store) return errors.fail(.not_found, "project {s} not found", .{project_val});
+    const project = try core.getProject(&st_val, c.arena, .{
+        .profile = "personal",
+        .actor = c.actor,
+        .scopes = oneScope(scope_id),
+    }, project_val);
+
+    var aw = Io.Writer.Allocating.init(c.arena);
+    var o = try jsonw.Obj.init(&aw.writer);
+    var binding_aw = Io.Writer.Allocating.init(c.arena);
+    try jsonw.writeValue(c.arena, &binding_aw.writer, .{ .object = hint });
+    try o.raw("binding", binding_aw.written());
+    try o.boolean("ok", true);
+    try o.str("project", project.id);
+    try o.str("scope", scope_id);
+    try o.end();
+    try succeedData(c, "check", aw.written());
+}
+
+fn hintField(hint: std.json.ObjectMap, name: []const u8, required: bool) ![]const u8 {
+    const v = hint.get(name) orelse {
+        if (required) return errors.invalid(".ztd.json is missing \"{s}\"", .{name});
+        return "";
+    };
+    const s = switch (v) {
+        .string => |sv| sv,
+        else => return errors.invalid(".ztd.json field \"{s}\" must be a string", .{name}),
+    };
+    if (required and std.mem.trim(u8, s, " \t\n\r\x0b\x0c").len == 0) {
+        return errors.invalid(".ztd.json field \"{s}\" must be non-empty", .{name});
+    }
+    return s;
 }
 
 pub const usage =

@@ -228,6 +228,43 @@ pub const Arr = struct {
     }
 };
 
+/// Emits a parsed JSON value with object keys sorted, matching Go's map
+/// marshaling of decoded documents.
+pub fn writeValue(a: std.mem.Allocator, w: *Io.Writer, v: std.json.Value) !void {
+    switch (v) {
+        .null => try w.writeAll("null"),
+        .bool => |b| try w.writeAll(if (b) "true" else "false"),
+        .integer => |i| try w.print("{d}", .{i}),
+        .float => |f| try writeFloat(w, f),
+        .number_string => |n| try w.writeAll(n),
+        .string => |sv| try writeString(w, sv),
+        .array => |arr| {
+            try w.writeByte('[');
+            for (arr.items, 0..) |item, i| {
+                if (i > 0) try w.writeByte(',');
+                try writeValue(a, w, item);
+            }
+            try w.writeByte(']');
+        },
+        .object => |obj| {
+            const keys = try a.dupe([]const u8, obj.keys());
+            std.mem.sort([]const u8, keys, {}, struct {
+                fn less(_: void, x: []const u8, y: []const u8) bool {
+                    return std.mem.order(u8, x, y) == .lt;
+                }
+            }.less);
+            try w.writeByte('{');
+            for (keys, 0..) |key, i| {
+                if (i > 0) try w.writeByte(',');
+                try writeString(w, key);
+                try w.writeByte(':');
+                try writeValue(a, w, obj.get(key).?);
+            }
+            try w.writeByte('}');
+        },
+    }
+}
+
 pub fn field(v: std.json.Value, name: []const u8) ?std.json.Value {
     return switch (v) {
         .object => |o| o.get(name),
