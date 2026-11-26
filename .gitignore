@@ -3,3 +3,5 @@
 *.db-wal
 *.db-shm
 .slim/
+/zig-out/
+/.zig-cache/
