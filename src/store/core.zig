@@ -4049,3 +4049,21 @@ pub fn snapshot(s: *Store, a: std.mem.Allocator, io: std.Io, out: []const u8) ![
     };
     return abs;
 }
+
+pub const InboxStats = struct { pending: i64, due: i64, remaining: i64 };
+
+pub fn inboxStats(s: *Store, a: std.mem.Allocator, b: domain.Binding, now: Timestamp) !InboxStats {
+    try validateBinding(b);
+    const sql = try std.fmt.allocPrint(a,
+        "SELECT COALESCE(SUM(CASE WHEN processing_state = 'pending' THEN 1 ELSE 0 END), 0), " ++
+            "COALESCE(SUM(CASE WHEN processing_state = 'deferred' AND review_after <= ? THEN 1 ELSE 0 END), 0) " ++
+            "FROM captures WHERE scope_id IN ({s})", .{try scopeFilter(a, b.scopes.len)});
+    var stmt = try s.db.prepare(sql);
+    defer stmt.finalize();
+    try stmt.bindText(1, try fmtTs(a, now));
+    _ = try scopeArgs(stmt, 2, b);
+    _ = try stmt.step();
+    const pending = stmt.int(0);
+    const due = stmt.int(1);
+    return .{ .pending = pending, .due = due, .remaining = pending + due };
+}

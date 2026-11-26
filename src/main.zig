@@ -3,7 +3,6 @@
 
 const std = @import("std");
 const Io = std.Io;
-const mcp = @import("mcp.zig");
 const sqlite = @import("sqlite.zig");
 const cli = @import("cli.zig");
 
@@ -28,11 +27,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     var code: u8 = 0;
-    if (std.mem.eql(u8, command, "mcp")) {
-        try mcp.serve(arena, io, w);
-        try w.flush();
-        return;
-    } else if (std.mem.eql(u8, command, "selftest")) {
+    if (std.mem.eql(u8, command, "selftest")) {
         try sqlite.selfTest(w);
     } else {
         code = try cli.run(init, w, ew, args[1..]);

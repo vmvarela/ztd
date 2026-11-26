@@ -13,6 +13,7 @@ const domain = @import("domain.zig");
 const store_mod = @import("store/store.zig");
 const core = @import("store/core.zig");
 const doc = @import("docs.zig");
+const mcp = @import("mcp.zig");
 const version = @import("version.zig").version;
 
 const Store = store_mod.Store;
@@ -251,6 +252,7 @@ fn dispatch(c: *Cli, init: std.process.Init, command: []const u8, args: []const 
     }
     if (std.mem.eql(u8, command, "check")) return cmdCheck(c, args);
     if (std.mem.eql(u8, command, "doc")) return cmdDoc(c, args);
+    if (std.mem.eql(u8, command, "mcp")) return cmdMcp(c, args);
     if (std.mem.eql(u8, command, "export")) return cmdExport(c, args);
     if (std.mem.eql(u8, command, "restore")) return cmdRestore(c, args);
     if (std.mem.eql(u8, command, "snapshot")) return cmdSnapshot(c, args);
@@ -2009,4 +2011,17 @@ fn cmdRecover(c: *Cli, args: []const []const u8) !void {
     try o.boolean("recovered", false);
     try o.end();
     try succeedData(c, "recover", aw.written());
+}
+
+fn cmdMcp(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{
+        .{ .name = "allow-delete-source", .value = false },
+        .{ .name = "scope", .value = true },
+    };
+    const p = try parseFlags(c.arena, args, &specs);
+    if (p.positional.len != 0) return errors.invalid("usage: mcp [--scope S] [--allow-delete-source]", .{});
+    var r = try bound(c, oneScope(p.get("scope", "")));
+    defer r.st.close();
+    try mcp.serve(c.arena, c.io, c.out, &r.st, r.b, p.has("allow-delete-source"));
+    try c.out.flush();
 }
