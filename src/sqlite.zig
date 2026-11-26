@@ -149,6 +149,12 @@ pub const Statement = struct {
         }
     }
 
+    pub fn bindDouble(self: Statement, idx: c_int, value: f64) errors.Ztd!void {
+        if (c.sqlite3_bind_double(self.stmt, idx, value) != c.SQLITE_OK) {
+            return errors.fail(.io_error, "sqlite bind double failed", .{});
+        }
+    }
+
     pub fn bindNull(self: Statement, idx: c_int) errors.Ztd!void {
         if (c.sqlite3_bind_null(self.stmt, idx) != c.SQLITE_OK) {
             return errors.fail(.io_error, "sqlite bind null failed", .{});
@@ -188,6 +194,30 @@ pub const Statement = struct {
     }
 
     /// Reads a REAL column (bm25 ranks, ratios) as Go's database/sql does.
+    pub fn columnName(self: Statement, col: c_int) []const u8 {
+        const p = c.sqlite3_column_name(self.stmt, col) orelse return "";
+        return std.mem.span(p);
+    }
+
+    pub const ColumnType = enum { integer, float, text, blob, null_value };
+
+    pub fn columnType(self: Statement, col: c_int) ColumnType {
+        return switch (c.sqlite3_column_type(self.stmt, col)) {
+            c.SQLITE_INTEGER => .integer,
+            c.SQLITE_FLOAT => .float,
+            c.SQLITE_TEXT => .text,
+            c.SQLITE_BLOB => .blob,
+            else => .null_value,
+        };
+    }
+
+    pub fn bytes(self: Statement, col: c_int) []const u8 {
+        const p = c.sqlite3_column_blob(self.stmt, col);
+        const n = c.sqlite3_column_bytes(self.stmt, col);
+        if (p == null or n <= 0) return "";
+        return @as([*]const u8, @ptrCast(p))[0..@intCast(n)];
+    }
+
     pub fn real(self: Statement, col: c_int) f64 {
         return c.sqlite3_column_double(self.stmt, col);
     }

@@ -3795,3 +3795,257 @@ pub fn applySources(s: *Store, a: std.mem.Allocator, cmds: []const SourceCmd, no
     try s.commit();
     return out.items;
 }
+
+// ------------------------------------------------------------ durability
+
+const TableDef = struct { name: []const u8, pk: []const u8 };
+
+const canonical_tables = [_]TableDef{
+    .{ .name = "scopes", .pk = "id" },
+    .{ .name = "profiles", .pk = "id" },
+    .{ .name = "profile_scopes", .pk = "profile_id, scope_id" },
+    .{ .name = "contexts", .pk = "id" },
+    .{ .name = "areas", .pk = "id" },
+    .{ .name = "projects", .pk = "id" },
+    .{ .name = "documents", .pk = "id" },
+    .{ .name = "captures", .pk = "id" },
+    .{ .name = "sources", .pk = "id" },
+    .{ .name = "source_reviews", .pk = "id" },
+    .{ .name = "work_items", .pk = "id" },
+    .{ .name = "plans", .pk = "id" },
+    .{ .name = "plan_items", .pk = "plan_id, work_item_id" },
+    .{ .name = "routines", .pk = "id" },
+    .{ .name = "knowledge_records", .pk = "id" },
+    .{ .name = "daily_limit_overrides", .pk = "id" },
+    .{ .name = "calendar_review_assertions", .pk = "id" },
+    .{ .name = "focus_sessions", .pk = "id" },
+    .{ .name = "checkpoints", .pk = "id" },
+    .{ .name = "reviews", .pk = "id" },
+    .{ .name = "history_events", .pk = "seq" },
+    .{ .name = "idempotency_records", .pk = "command, idempotency_key" },
+    .{ .name = "import_runs", .pk = "id" },
+    .{ .name = "legacy_records", .pk = "source, entity_type, entity_id" },
+};
+
+fn lessTable(_: void, a: TableDef, b: TableDef) bool {
+    return std.mem.order(u8, a.name, b.name) == .lt;
+}
+
+
+const ColumnIdx = struct { name: []const u8, idx: c_int };
+
+fn lessIndexByName(_: void, a: ColumnIdx, b: ColumnIdx) bool {
+    return std.mem.order(u8, a.name, b.name) == .lt;
+}
+
+fn writeCell(w: *std.Io.Writer, stmt: sqlite.Statement, col: c_int) !void {
+    switch (stmt.columnType(col)) {
+        .null_value => try w.writeAll("null"),
+        .integer => try w.print("{d}", .{stmt.int(col)}),
+        .float => try jsonw.writeFloat(w, stmt.real(col)),
+        .text => try jsonw.writeString(w, stmt.text(col)),
+        .blob => try jsonw.writeString(w, stmt.bytes(col)),
+    }
+}
+
+/// Writes every canonical table row to one deterministic JSON document.
+pub fn exportTo(s: *Store, a: std.mem.Allocator, io: std.Io, out: []const u8) !void {
+    if (trimmed(out).len == 0) return errors.invalid("export path is required", .{});
+    var defs = canonical_tables;
+    std.mem.sort(TableDef, &defs, {}, lessTable);
+
+    var aw = std.Io.Writer.Allocating.init(a);
+    var o = try jsonw.Obj.init(&aw.writer);
+    try o.str("format", "ztd-export");
+    try o.int("version", 1);
+    var tables = try o.obj("tables");
+    for (defs) |def| {
+        const sql = try std.fmt.allocPrint(a, "SELECT * FROM {s} ORDER BY {s}", .{ def.name, def.pk });
+        var stmt = try s.db.prepare(sql);
+        defer stmt.finalize();
+        const n = stmt.columnCount();
+        const idxs = try a.alloc(ColumnIdx, @intCast(n));
+        for (0..@intCast(n)) |i| {
+            idxs[i] = .{ .name = stmt.columnName(@intCast(i)), .idx = @intCast(i) };
+        }
+        std.mem.sort(ColumnIdx, idxs, {}, lessIndexByName);
+        var arr = try tables.arr(def.name);
+        while (try stmt.step()) {
+            var row = try arr.obj();
+            for (idxs) |it| {
+                try row.key(it.name);
+                try writeCell(&aw.writer, stmt, it.idx);
+            }
+            try row.end();
+        }
+        try arr.end();
+    }
+    try tables.end();
+    try o.end();
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out, .data = aw.written() }) catch |e|
+        return errors.fail(.io_error, "write export: {s}", .{@errorName(e)});
+}
+
+pub const TableCount = struct { name: []const u8, count: i64 };
+
+fn lessCount(_: void, a: TableCount, b: TableCount) bool {
+    return std.mem.order(u8, a.name, b.name) == .lt;
+}
+
+fn joinCapped(a: std.mem.Allocator, errs: []const []const u8) ![]const u8 {
+    var aw = std.Io.Writer.Allocating.init(a);
+    const shown = @min(errs.len, 10);
+    for (errs[0..shown], 0..) |e, i| {
+        if (i > 0) try aw.writer.writeAll("; ");
+        try aw.writer.writeAll(e);
+    }
+    if (errs.len > shown) try aw.writer.print(" (+{d} more)", .{errs.len - shown});
+    return aw.written();
+}
+
+fn columnSet(s: *Store, a: std.mem.Allocator, table: []const u8) !std.StringHashMap(void) {
+    var set = std.StringHashMap(void).init(a);
+    var q = try s.db.prepare("SELECT name FROM pragma_table_info(?)");
+    defer q.finalize();
+    try q.bindText(1, table);
+    while (try q.step()) try set.put(try dup(a, q.text(0)), {});
+    return set;
+}
+
+fn insertExportRow(s: *Store, a: std.mem.Allocator, table: []const u8, cols: std.StringHashMap(void), row: std.json.Value) !void {
+    if (row != .object or row.object.count() == 0) {
+        return errors.fail(.unsupported_format, "table {s} contains an empty row object", .{table});
+    }
+    var names: std.ArrayList([]const u8) = .empty;
+    var it = row.object.iterator();
+    while (it.next()) |entry| {
+        if (!cols.contains(entry.key_ptr.*)) {
+            return errors.fail(.unsupported_format, "table {s} has no column \"{s}\"", .{ table, entry.key_ptr.* });
+        }
+        try names.append(a, entry.key_ptr.*);
+    }
+    std.mem.sort([]const u8, names.items, {}, lessStr);
+
+    var aw = std.Io.Writer.Allocating.init(a);
+    try aw.writer.print("INSERT INTO {s} (", .{table});
+    for (names.items, 0..) |n, i| {
+        if (i > 0) try aw.writer.writeAll(", ");
+        try aw.writer.writeAll(n);
+    }
+    try aw.writer.print(") VALUES ({s})", .{try scopeFilter(a, names.items.len)});
+
+    var stmt = try s.db.prepare(aw.written());
+    defer stmt.finalize();
+    for (names.items, 0..) |n, i| {
+        const idx: c_int = @intCast(i + 1);
+        switch (row.object.get(n).?) {
+            .null => try stmt.bindNull(idx),
+            .string => |v| try stmt.bindText(idx, v),
+            .bool => |v| try stmt.bindInt(idx, if (v) 1 else 0),
+            .integer => |v| try stmt.bindInt(idx, v),
+            .float => |v| try stmt.bindDouble(idx, v),
+            else => return errors.fail(.unsupported_format, "table {s} column {s}: unsupported JSON value", .{ table, n }),
+        }
+    }
+    _ = stmt.step() catch {
+        return errors.fail(.unsupported_format, "restore table {s}: {s}", .{ table, s.db.errmsg() });
+    };
+}
+
+fn knownTable(name: []const u8) bool {
+    for (canonical_tables) |def| if (std.mem.eql(u8, def.name, name)) return true;
+    return false;
+}
+
+pub fn restoreFrom(s: *Store, a: std.mem.Allocator, io: std.Io, from: []const u8) ![]const TableCount {
+    if (trimmed(from).len == 0) return errors.invalid("restore source is required", .{});
+    const raw = std.Io.Dir.cwd().readFileAlloc(io, from, a, .limited(1 << 31)) catch |e|
+        return errors.fail(.io_error, "read export: {s}", .{@errorName(e)});
+    const parsed = std.json.parseFromSlice(std.json.Value, a, raw, .{}) catch
+        return errors.fail(.unsupported_format, "input is not a valid export document: invalid JSON", .{});
+    const doc = parsed.value;
+    if (doc != .object) {
+        return errors.fail(.unsupported_format, "input is not a valid export document: not an object", .{});
+    }
+    const format = jsonw.strField(doc, "format") orelse "";
+    const version = jsonw.intField(doc, "version") orelse 0;
+    if (!std.mem.eql(u8, format, "ztd-export") or version != 1) {
+        return errors.fail(
+            .unsupported_format,
+            "unsupported export format \"{s}\" version {d} (want ztd-export version 1)",
+            .{ format, version },
+        );
+    }
+    const empty_tables = std.json.ObjectMap.init(a, &.{}, &.{}) catch return errors.fail(.io_error, "out of memory", .{});
+    const tables_val = jsonw.field(doc, "tables") orelse std.json.Value{ .object = empty_tables };
+    const tables_obj = if (tables_val == .object) tables_val.object else empty_tables;
+    for (canonical_tables) |def| {
+        if (!tables_obj.contains(def.name)) {
+            return errors.fail(.unsupported_format, "export is missing table {s}", .{def.name});
+        }
+    }
+    var kit = tables_obj.iterator();
+    while (kit.next()) |entry| {
+        if (!knownTable(entry.key_ptr.*)) {
+            return errors.fail(.unsupported_format, "export contains unknown table {s}", .{entry.key_ptr.*});
+        }
+    }
+
+    try s.begin();
+    errdefer s.rollback();
+    for (canonical_tables) |def| {
+        const sql = try std.fmt.allocPrint(a, "SELECT count(*) FROM {s}", .{def.name});
+        var q = try s.db.prepare(sql);
+        defer q.finalize();
+        _ = try q.step();
+        if (q.int(0) > 0) {
+            return errors.fail(.destination_not_empty, "restore target already contains rows in {s}", .{def.name});
+        }
+    }
+    try s.db.exec("PRAGMA defer_foreign_keys = ON");
+    var counts: std.ArrayList(TableCount) = .empty;
+    for (canonical_tables) |def| {
+        const cols = try columnSet(s, a, def.name);
+        var n: i64 = 0;
+        if (tables_obj.get(def.name)) |rows_val| {
+            if (rows_val == .array) {
+                for (rows_val.array.items) |row| {
+                    try insertExportRow(s, a, def.name, cols, row);
+                    n += 1;
+                }
+            }
+        }
+        try counts.append(a, .{ .name = def.name, .count = n });
+    }
+    const report = try runCheck(s, a);
+    if (!report.ok) {
+        const joined = try joinCapped(a, report.errors);
+        return errors.invalid("restored data failed validation: {s}", .{joined});
+    }
+    try s.commit();
+    return counts.items;
+}
+
+pub fn snapshot(s: *Store, a: std.mem.Allocator, io: std.Io, out: []const u8) ![]const u8 {
+    if (trimmed(out).len == 0) return errors.invalid("snapshot path is required", .{});
+    const cwd = try std.process.currentPathAlloc(io, a);
+    const abs = try std.fs.path.resolveAlloc(a, &.{ cwd, out });
+    if (std.Io.Dir.cwd().access(io, abs, .{})) |_| {
+        return errors.fail(.destination_not_empty, "snapshot destination {s} already exists", .{abs});
+    } else |e| switch (e) {
+        error.FileNotFound => {},
+        else => return errors.fail(.io_error, "inspect snapshot destination: {s}", .{@errorName(e)}),
+    }
+    var stmt = try s.db.prepare("VACUUM INTO ?");
+    defer stmt.finalize();
+    try stmt.bindText(1, abs);
+    _ = stmt.step() catch {
+        const msg = s.db.errmsg();
+        if (std.mem.indexOf(u8, msg, "already exists") != null) {
+            return errors.fail(.destination_not_empty, "snapshot destination {s} already exists", .{abs});
+        }
+        if (isBusyMessage(msg)) return errors.fail(.db_busy, "{s}", .{msg});
+        return errors.fail(.io_error, "snapshot: {s}", .{msg});
+    };
+    return abs;
+}

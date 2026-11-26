@@ -251,6 +251,10 @@ fn dispatch(c: *Cli, init: std.process.Init, command: []const u8, args: []const 
     }
     if (std.mem.eql(u8, command, "check")) return cmdCheck(c, args);
     if (std.mem.eql(u8, command, "doc")) return cmdDoc(c, args);
+    if (std.mem.eql(u8, command, "export")) return cmdExport(c, args);
+    if (std.mem.eql(u8, command, "restore")) return cmdRestore(c, args);
+    if (std.mem.eql(u8, command, "snapshot")) return cmdSnapshot(c, args);
+    if (std.mem.eql(u8, command, "recover")) return cmdRecover(c, args);
     if (std.mem.eql(u8, command, "scope")) return cmdScope(c, args);
     if (std.mem.eql(u8, command, "context")) return cmdContext(c, args);
     if (std.mem.eql(u8, command, "project")) return cmdProject(c, args);
@@ -1941,4 +1945,68 @@ fn sourceApply(c: *Cli, args: []const []const u8) !void {
     }
     try arr.end();
     try succeedData(c, "source apply", aw.written());
+}
+
+// -------------------------------------------------------------- durability
+
+fn pathEnvelope(c: *Cli, command: []const u8, path: []const u8) !void {
+    var aw = Io.Writer.Allocating.init(c.arena);
+    var o = try jsonw.Obj.init(&aw.writer);
+    try o.str("path", path);
+    try o.end();
+    try succeedData(c, command, aw.written());
+}
+
+fn cmdExport(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{.{ .name = "out", .value = true }};
+    const p = try parseFlags(c.arena, args, &specs);
+    const out = p.get("out", "");
+    if (out.len == 0) return errors.invalid("--out is required", .{});
+    var st = try openStore(c);
+    defer st.close();
+    try core.exportTo(&st, c.arena, c.io, out);
+    try pathEnvelope(c, "export", out);
+}
+
+fn lessCount(_: void, x: core.TableCount, y: core.TableCount) bool {
+    return std.mem.order(u8, x.name, y.name) == .lt;
+}
+
+fn cmdRestore(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{.{ .name = "from", .value = true }};
+    const p = try parseFlags(c.arena, args, &specs);
+    const from = p.get("from", "");
+    if (from.len == 0) return errors.invalid("--from is required", .{});
+    var st = try openStore(c);
+    defer st.close();
+    const counts = try core.restoreFrom(&st, c.arena, c.io, from);
+    const sorted = try c.arena.dupe(core.TableCount, counts);
+    std.mem.sort(core.TableCount, sorted, {}, lessCount);
+    var aw = Io.Writer.Allocating.init(c.arena);
+    var o = try jsonw.Obj.init(&aw.writer);
+    var tables = try o.obj("tables");
+    for (sorted) |tc| try tables.int(tc.name, tc.count);
+    try tables.end();
+    try o.end();
+    try succeedData(c, "restore", aw.written());
+}
+
+fn cmdSnapshot(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{.{ .name = "out", .value = true }};
+    const p = try parseFlags(c.arena, args, &specs);
+    const out = p.get("out", "");
+    if (out.len == 0) return errors.invalid("--out is required", .{});
+    var st = try openStore(c);
+    defer st.close();
+    _ = try core.snapshot(&st, c.arena, c.io, out);
+    try pathEnvelope(c, "snapshot", out);
+}
+
+fn cmdRecover(c: *Cli, args: []const []const u8) !void {
+    if (args.len != 0) return errors.invalid("usage: recover", .{});
+    var aw = Io.Writer.Allocating.init(c.arena);
+    var o = try jsonw.Obj.init(&aw.writer);
+    try o.boolean("recovered", false);
+    try o.end();
+    try succeedData(c, "recover", aw.written());
 }
