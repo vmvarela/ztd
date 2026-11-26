@@ -12,6 +12,7 @@ const jsonw = @import("json.zig");
 const domain = @import("domain.zig");
 const store_mod = @import("store/store.zig");
 const core = @import("store/core.zig");
+const doc = @import("docs.zig");
 const version = @import("version.zig").version;
 
 const Store = store_mod.Store;
@@ -245,6 +246,7 @@ fn dispatch(c: *Cli, init: std.process.Init, command: []const u8, args: []const 
         return cmdRoutines(c, forwarded);
     }
     if (std.mem.eql(u8, command, "check")) return cmdCheck(c, args);
+    if (std.mem.eql(u8, command, "doc")) return cmdDoc(c, args);
     return errors.invalid("unknown command \"{s}\" (see usage)", .{command});
 }
 
@@ -1269,4 +1271,266 @@ test "scope declarations parse id and kind" {
     try std.testing.expectEqualStrings("personal", cmd.id);
     try std.testing.expectEqualStrings("personal", cmd.kind);
     try std.testing.expectError(error.Ztd, parseScopeDecl("id=Bad,kind=personal"));
+}
+
+// --------------------------------------------------------------- documents
+
+fn failWithData(c: *Cli, command: []const u8, family: errors.Family, detail: []const u8, data: []const u8) !void {
+    if (!c.json) {
+        try c.err.print("{s}: {s}\n", .{ family.text(), detail });
+        return;
+    }
+    var o = try jsonw.Obj.init(c.out);
+    try o.boolean("ok", false);
+    if (command.len > 0) try o.str("command", command);
+    try o.raw("data", data);
+    var e = try o.obj("error");
+    try e.str("family", family.text());
+    try e.str("detail", detail);
+    try e.end();
+    try o.end();
+    try c.out.writeByte('\n');
+}
+
+fn intFlag(name: []const u8, value: []const u8) !i64 {
+    return std.fmt.parseInt(i64, value, 10) catch
+        errors.invalid("invalid value \"{s}\" for flag -{s}: parse error", .{ value, name });
+}
+
+fn readBodyFile(c: *Cli, path: []const u8) ![]const u8 {
+    return Io.Dir.cwd().readFileAlloc(c.io, path, c.arena, .limited(1 << 30)) catch |e|
+        return errors.fail(.io_error, "read body file: {s}", .{@errorName(e)});
+}
+
+fn cmdDoc(c: *Cli, args: []const []const u8) !void {
+    if (args.len == 0) return errors.invalid("usage: doc put|get|list|search|related|log|lint|archive [flags]", .{});
+    const sub = args[0];
+    const rest = args[1..];
+    if (std.mem.eql(u8, sub, "put")) return docPut(c, rest);
+    if (std.mem.eql(u8, sub, "get")) return docGet(c, rest);
+    if (std.mem.eql(u8, sub, "list")) return docList(c, rest);
+    if (std.mem.eql(u8, sub, "search")) return docSearch(c, rest);
+    if (std.mem.eql(u8, sub, "related")) return docRelated(c, rest);
+    if (std.mem.eql(u8, sub, "log")) return docLog(c, rest);
+    if (std.mem.eql(u8, sub, "lint")) return docLint(c, rest);
+    if (std.mem.eql(u8, sub, "archive")) return docArchive(c, rest);
+    return errors.invalid("usage: doc put|get|list|search|related|log|lint|archive [flags]", .{});
+}
+
+fn docPut(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true },   .{ .name = "kind", .value = true },
+        .{ .name = "slug", .value = true },    .{ .name = "title", .value = true },
+        .{ .name = "body", .value = true },    .{ .name = "file", .value = true },
+        .{ .name = "status", .value = true },  .{ .name = "expected", .value = true },
+    };
+    const p = try parseFlags(c.arena, args, &specs);
+    if (p.positional.len != 0) return errors.invalid("usage: doc put --kind K --slug S [flags]", .{});
+    const kind = p.get("kind", "");
+    const slug = p.get("slug", "");
+    if (kind.len == 0) return errors.invalid("--kind is required", .{});
+    if (slug.len == 0) return errors.invalid("--slug is required", .{});
+    if (p.has("body") and p.has("file")) return errors.invalid("--body and --file are mutually exclusive", .{});
+    var body = p.get("body", "");
+    if (p.has("file")) body = try readBodyFile(c, p.get("file", ""));
+    const expected = try intFlag("expected", p.get("expected", "0"));
+    var r = try bound(c, oneScope(p.get("scope", "")));
+    defer r.st.close();
+    const out = try core.putDocument(&r.st, c.arena, .{
+        .binding = r.b,
+        .scope = p.get("scope", ""),
+        .kind = kind,
+        .slug = slug,
+        .title = p.get("title", slug),
+        .body = body,
+        .status = p.get("status", "draft"),
+        .expected = expected,
+    }, nowSeconds(c));
+    try writeJson(c, "doc put", out);
+}
+
+fn docGet(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true },
+        .{ .name = "kind", .value = true },
+        .{ .name = "slug", .value = true },
+    };
+    const p = try parseFlags(c.arena, args, &specs);
+    if (p.positional.len != 0) return errors.invalid("usage: doc get --kind K --slug S [--scope X]", .{});
+    const kind = p.get("kind", "");
+    const slug = p.get("slug", "");
+    if (kind.len == 0) return errors.invalid("--kind is required", .{});
+    if (slug.len == 0) return errors.invalid("--slug is required", .{});
+    var r = try bound(c, oneScope(p.get("scope", "")));
+    defer r.st.close();
+    const out = try core.getDocument(&r.st, c.arena, r.b, kind, slug, p.get("scope", ""));
+    try writeJson(c, "doc get", out);
+}
+
+fn writeDocuments(c: *Cli, command: []const u8, items: []const domain.Document) !void {
+    var aw = Io.Writer.Allocating.init(c.arena);
+    var arr = try jsonw.Arr.init(&aw.writer);
+    for (items) |d| {
+        var o = try arr.obj();
+        try d.write(&o);
+        try o.end();
+    }
+    try arr.end();
+    try succeedData(c, command, aw.written());
+}
+
+fn docList(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{ .{ .name = "scope", .value = true }, .{ .name = "kind", .value = true } };
+    const p = try parseFlags(c.arena, args, &specs);
+    if (p.positional.len != 0) return errors.invalid("usage: doc list [--kind K] [--scope X]", .{});
+    var r = try bound(c, oneScope(p.get("scope", "")));
+    defer r.st.close();
+    const items = try core.listDocuments(&r.st, c.arena, r.b, p.get("kind", ""));
+    try writeDocuments(c, "doc list", items);
+}
+
+fn docSearch(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true }, .{ .name = "query", .value = true },
+        .{ .name = "kind", .value = true },  .{ .name = "limit", .value = true },
+    };
+    const p = try parseFlags(c.arena, args, &specs);
+    if (p.positional.len != 0) return errors.invalid("usage: doc search --query Q [--kind K] [--scope X] [--limit N]", .{});
+    const query = std.mem.trim(u8, p.get("query", ""), " \t\n\r\x0b\x0c");
+    if (query.len == 0) return errors.invalid("--query is required", .{});
+    const limit = try intFlag("limit", p.get("limit", "10"));
+    var r = try bound(c, oneScope(p.get("scope", "")));
+    defer r.st.close();
+    const hits = try core.searchDocuments(&r.st, c.arena, r.b, query, p.get("kind", ""), limit);
+    var aw = Io.Writer.Allocating.init(c.arena);
+    var arr = try jsonw.Arr.init(&aw.writer);
+    for (hits) |h| {
+        var o = try arr.obj();
+        var inner = try o.obj("document");
+        try h.document.write(&inner);
+        try inner.end();
+        try o.float("rank", h.rank);
+        try o.str("snippet", h.snippet);
+        try o.end();
+    }
+    try arr.end();
+    try succeedData(c, "doc search", aw.written());
+}
+
+fn docRelated(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true },
+        .{ .name = "kind", .value = true },
+        .{ .name = "slug", .value = true },
+    };
+    const p = try parseFlags(c.arena, args, &specs);
+    if (p.positional.len != 0) return errors.invalid("usage: doc related --kind K --slug S [--scope X]", .{});
+    const kind = p.get("kind", "");
+    const slug = p.get("slug", "");
+    if (kind.len == 0) return errors.invalid("--kind is required", .{});
+    if (slug.len == 0) return errors.invalid("--slug is required", .{});
+    var r = try bound(c, oneScope(p.get("scope", "")));
+    defer r.st.close();
+    const source = try core.getDocument(&r.st, c.arena, r.b, kind, slug, p.get("scope", ""));
+    const all = try core.listDocuments(&r.st, c.arena, r.b, "");
+    const rel = try doc.relatedDocuments(c.arena, all, source);
+    var aw = Io.Writer.Allocating.init(c.arena);
+    var o = try jsonw.Obj.init(&aw.writer);
+    try doc.writeRelations(&o, rel);
+    try o.end();
+    try succeedData(c, "doc related", aw.written());
+}
+
+fn docLog(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true }, .{ .name = "kind", .value = true },
+        .{ .name = "slug", .value = true },  .{ .name = "limit", .value = true },
+    };
+    const p = try parseFlags(c.arena, args, &specs);
+    if (p.positional.len != 0) return errors.invalid("usage: doc log [--scope X] [--kind K] [--slug S] [--limit N]", .{});
+    const limit = try intFlag("limit", p.get("limit", "50"));
+    var r = try bound(c, oneScope(p.get("scope", "")));
+    defer r.st.close();
+    const entries = try core.listDocumentHistory(&r.st, c.arena, r.b, p.get("kind", ""), p.get("slug", ""), limit);
+    var aw = Io.Writer.Allocating.init(c.arena);
+    var arr = try jsonw.Arr.init(&aw.writer);
+    for (entries) |e| {
+        var o = try arr.obj();
+        try o.int("seq", e.seq);
+        try o.str("event", e.event);
+        try o.int("revision", e.revision);
+        try o.str("created_at", e.created_at);
+        try o.str("scope", e.scope);
+        try o.str("kind", e.kind);
+        try o.str("slug", e.slug);
+        try o.end();
+    }
+    try arr.end();
+    try succeedData(c, "doc log", aw.written());
+}
+
+fn docLint(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{ .{ .name = "scope", .value = true }, .{ .name = "strict", .value = false } };
+    const p = try parseFlags(c.arena, args, &specs);
+    if (p.positional.len != 0) return errors.invalid("usage: doc lint [--scope X] [--strict]", .{});
+    var r = try bound(c, oneScope(p.get("scope", "")));
+    defer r.st.close();
+    const all = try core.listDocuments(&r.st, c.arena, r.b, "");
+    const report = try doc.lintDocuments(c.arena, all);
+    var aw = Io.Writer.Allocating.init(c.arena);
+    var o = try jsonw.Obj.init(&aw.writer);
+    try doc.writeReport(&o, report);
+    try o.end();
+    const strict = p.has("strict");
+    if (report.errors.len > 0) {
+        const detail = try std.fmt.allocPrint(c.arena, "doc lint reported {d} error(s)", .{report.errors.len});
+        return failWithData(c, "doc lint", .conflict, detail, aw.written());
+    }
+    if (strict and report.warnings.len > 0) {
+        const detail = try std.fmt.allocPrint(c.arena, "doc lint reported {d} warning(s) in strict mode", .{report.warnings.len});
+        return failWithData(c, "doc lint", .conflict, detail, aw.written());
+    }
+    try succeedData(c, "doc lint", aw.written());
+}
+
+fn docArchive(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true },    .{ .name = "slug", .value = true },
+        .{ .name = "title", .value = true },    .{ .name = "question", .value = true },
+        .{ .name = "body", .value = true },     .{ .name = "file", .value = true },
+        .{ .name = "expected", .value = true },
+    };
+    const p = try parseFlags(c.arena, args, &specs);
+    if (p.positional.len != 0) return errors.invalid("usage: doc archive --slug S [flags]", .{});
+    const raw_slug = p.get("slug", "");
+    if (raw_slug.len == 0) return errors.invalid("--slug is required", .{});
+    if (p.has("body") and p.has("file")) return errors.invalid("--body and --file are mutually exclusive", .{});
+    var body = p.get("body", "");
+    if (p.has("file")) body = try readBodyFile(c, p.get("file", ""));
+    const bare = if (std.mem.startsWith(u8, raw_slug, "answers/")) raw_slug["answers/".len..] else raw_slug;
+    const slug = try std.fmt.allocPrint(c.arena, "answers/{s}", .{bare});
+    var title = p.get("title", "");
+    if (title.len == 0) title = slug;
+    const question = std.mem.trim(u8, p.get("question", ""), " \t\n\r\x0b\x0c");
+    if (question.len > 0) {
+        const buf: [10]u8 = undefined;
+        var day_buf = buf;
+        body = try std.fmt.allocPrint(c.arena, "# {s}\n\nQuestion: {s}\nArchived: {s}\n\n{s}", .{
+            title, question, timeutil.date(nowSeconds(c), &day_buf), body,
+        });
+    }
+    const expected = try intFlag("expected", p.get("expected", "0"));
+    var r = try bound(c, oneScope(p.get("scope", "")));
+    defer r.st.close();
+    const out = try core.putDocument(&r.st, c.arena, .{
+        .binding = r.b,
+        .scope = p.get("scope", ""),
+        .kind = "knowledge",
+        .slug = slug,
+        .title = title,
+        .body = body,
+        .status = "draft",
+        .expected = expected,
+    }, nowSeconds(c));
+    try writeJson(c, "doc archive", out);
 }

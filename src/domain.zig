@@ -194,6 +194,33 @@ pub const ConfigEntry = struct {
     existed: bool,
 };
 
+/// One Markdown-shaped record identified by (scope, kind, slug).
+pub const Document = struct {
+    id: []const u8,
+    scope: []const u8,
+    kind: []const u8,
+    slug: []const u8,
+    title: []const u8,
+    body: []const u8,
+    status: []const u8,
+    revision: i64,
+    created_at: []const u8,
+    updated_at: []const u8,
+
+    pub fn write(self: Document, o: *json.Obj) !void {
+        try o.str("id", self.id);
+        try o.str("scope", self.scope);
+        try o.str("kind", self.kind);
+        try o.str("slug", self.slug);
+        try o.str("title", self.title);
+        try o.str("body", self.body);
+        try o.str("status", self.status);
+        try o.int("revision", self.revision);
+        try o.str("created_at", self.created_at);
+        try o.str("updated_at", self.updated_at);
+    }
+};
+
 pub const Goal = struct {
     id: []const u8,
     profile_id: []const u8,

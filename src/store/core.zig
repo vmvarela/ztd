@@ -26,11 +26,11 @@ const lifecycle_order = "ORDER BY CASE lifecycle " ++
 
 // ---------------------------------------------------------------- helpers
 
-fn dup(a: std.mem.Allocator, s: []const u8) ![]const u8 {
+pub fn dup(a: std.mem.Allocator, s: []const u8) ![]const u8 {
     return a.dupe(u8, s) catch errors.fail(.io_error, "out of memory", .{});
 }
 
-fn dupOpt(a: std.mem.Allocator, s: ?[]const u8) !?[]const u8 {
+pub fn dupOpt(a: std.mem.Allocator, s: ?[]const u8) !?[]const u8 {
     const v = s orelse return null;
     return try dup(a, v);
 }
@@ -59,12 +59,12 @@ fn requireKey(key: []const u8) !void {
     if (trimmed(key).len == 0) return errors.invalid("idempotency key is required", .{});
 }
 
-fn scopeFilter(a: std.mem.Allocator, n: usize) ![]const u8 {
+pub fn scopeFilter(a: std.mem.Allocator, n: usize) ![]const u8 {
     const buf = a.alloc(u8, n * 2) catch return errors.fail(.io_error, "out of memory", .{});
     return store.scopeFilter(buf, n);
 }
 
-fn scopeArgs(stmt: sqlite.Statement, start: c_int, b: domain.Binding) !c_int {
+pub fn scopeArgs(stmt: sqlite.Statement, start: c_int, b: domain.Binding) !c_int {
     var idx = start;
     for (b.scopes) |s| {
         try stmt.bindText(idx, s);
@@ -296,7 +296,7 @@ pub fn listScopes(s: *Store, a: std.mem.Allocator) ![]domain.Scope {
     return list.items;
 }
 
-fn reformat(a: std.mem.Allocator, stored: []const u8, column: []const u8) ![]const u8 {
+pub fn reformat(a: std.mem.Allocator, stored: []const u8, column: []const u8) ![]const u8 {
     const t = timeutil.parseTime(stored) catch
         return errors.fail(.io_error, "invalid timestamp in {s}: \"{s}\"", .{ column, stored });
     return try fmtTs(a, t);
@@ -449,7 +449,7 @@ pub fn capture(s: *Store, a: std.mem.Allocator, cmd: CaptureCmd, now: Timestamp)
     return cap;
 }
 
-const HistoryPayload = union(enum) {
+pub const HistoryPayload = union(enum) {
     capture: domain.Capture,
     outcome: domain.Capture,
     work_item: domain.WorkItem,
@@ -460,6 +460,7 @@ const HistoryPayload = union(enum) {
     focus_start: FocusStartResult,
     checkpoint: domain.Checkpoint,
     review: domain.Review,
+    document: domain.Document,
 };
 
 fn writeHistoryPayload(w: *std.Io.Writer, payload: HistoryPayload) !void {
@@ -494,11 +495,12 @@ fn writeHistoryPayload(w: *std.Io.Writer, payload: HistoryPayload) !void {
         },
         .checkpoint => |cp| try cp.write(&o),
         .review => |r| try r.write(&o),
+        .document => |d| try d.write(&o),
     }
     try o.end();
 }
 
-fn insertHistory(
+pub fn insertHistory(
     s: *Store,
     a: std.mem.Allocator,
     entity: []const u8,
@@ -531,7 +533,7 @@ fn insertHistory(
 
 /// Returns the stored result JSON when the key replays, null when the key is
 /// new, and a conflict when the payload hash differs.
-fn lookupIdemStmt(
+pub fn lookupIdemStmt(
     s: *Store,
     a: std.mem.Allocator,
     command: []const u8,
@@ -551,7 +553,7 @@ fn lookupIdemStmt(
     return try dup(a, stmt.text(1));
 }
 
-fn writeIdem(
+pub fn writeIdem(
     s: *Store,
     a: std.mem.Allocator,
     command: []const u8,
@@ -598,13 +600,18 @@ fn writeCaptureRequest(w: *std.Io.Writer, version: i64, cmd: CaptureCmd, source:
     try o.end();
 }
 
-fn writeBinding(o: *jsonw.Obj, b: domain.Binding) !void {
+pub fn writeBinding(o: *jsonw.Obj, b: domain.Binding) !void {
     var inner = try o.obj("Binding");
     try inner.str("profile", b.profile);
     try inner.str("actor", b.actor);
-    var a = try inner.arr("scopes");
-    for (b.scopes) |s| try a.str(s);
-    try a.end();
+    if (b.scopes.len == 0) {
+        // Go marshals a nil slice as null; hashed payloads depend on it.
+        try inner.raw("scopes", "null");
+    } else {
+        var a = try inner.arr("scopes");
+        for (b.scopes) |s| try a.str(s);
+        try a.end();
+    }
     try inner.end();
 }
 
@@ -2490,4 +2497,399 @@ pub fn runCheck(s: *Store, a: std.mem.Allocator) !CheckReport {
         ));
     }
     return .{ .ok = failures.items.len == 0, .errors = failures.items };
+}
+
+// ------------------------------------------------------------ documents
+
+pub const document_columns = "id, scope_id, kind, slug, title, body, status, revision, created_at, updated_at";
+const joined_document_columns = "documents.id, documents.scope_id, documents.kind, documents.slug, documents.title, documents.body, documents.status, documents.revision, documents.created_at, documents.updated_at";
+
+pub const document_kinds = [_][]const u8{
+    "knowledge", "knowledge_index", "project_note", "plan_daily", "plan_weekly",
+    "review",   "journal",         "calendar",      "adoption",   "passion",
+    "routine",
+};
+
+pub fn validDocumentKind(kind: []const u8) bool {
+    for (document_kinds) |k| if (std.mem.eql(u8, k, kind)) return true;
+    return false;
+}
+
+pub fn validDocumentStatus(status: []const u8) bool {
+    return std.mem.eql(u8, status, "draft") or
+        std.mem.eql(u8, status, "verified") or
+        std.mem.eql(u8, status, "superseded");
+}
+
+fn validDocumentSlug(slug: []const u8) bool {
+    if (slug.len == 0) return false;
+    for (slug) |ch| {
+        if (!(std.ascii.isAlphanumeric(ch) or ch == '.' or ch == '_' or ch == '/' or ch == '-')) return false;
+    }
+    return true;
+}
+
+fn scanDocument(a: std.mem.Allocator, stmt: sqlite.Statement) !domain.Document {
+    return .{
+        .id = try dup(a, stmt.text(0)),
+        .scope = try dup(a, stmt.text(1)),
+        .kind = try dup(a, stmt.text(2)),
+        .slug = try dup(a, stmt.text(3)),
+        .title = try dup(a, stmt.text(4)),
+        .body = try dup(a, stmt.text(5)),
+        .status = try dup(a, stmt.text(6)),
+        .revision = stmt.int(7),
+        .created_at = try reformat(a, stmt.text(8), "documents.created_at"),
+        .updated_at = try reformat(a, stmt.text(9), "documents.updated_at"),
+    };
+}
+
+fn documentFromValue(a: std.mem.Allocator, v: std.json.Value) !domain.Document {
+    return .{
+        .id = try dup(a, jsonw.strField(v, "id") orelse return errors.invalid("document result is missing id", .{})),
+        .scope = try dup(a, jsonw.strField(v, "scope") orelse ""),
+        .kind = try dup(a, jsonw.strField(v, "kind") orelse ""),
+        .slug = try dup(a, jsonw.strField(v, "slug") orelse ""),
+        .title = try dup(a, jsonw.strField(v, "title") orelse ""),
+        .body = try dup(a, jsonw.strField(v, "body") orelse ""),
+        .status = try dup(a, jsonw.strField(v, "status") orelse ""),
+        .revision = jsonw.intField(v, "revision") orelse 0,
+        .created_at = try dup(a, jsonw.strField(v, "created_at") orelse ""),
+        .updated_at = try dup(a, jsonw.strField(v, "updated_at") orelse ""),
+    };
+}
+
+fn requireScopeDeclared(s: *Store, scope: []const u8) !void {
+    var stmt = try s.db.prepare("SELECT 1 FROM scopes WHERE id = ?");
+    defer stmt.finalize();
+    try stmt.bindText(1, scope);
+    if (!try stmt.step()) return errors.invalid("unknown scope reference {s}", .{scope});
+}
+
+pub const DocumentCmd = struct {
+    binding: domain.Binding,
+    scope: []const u8 = "",
+    kind: []const u8,
+    slug: []const u8,
+    title: []const u8,
+    body: []const u8,
+    status: []const u8 = "draft",
+    expected: i64 = 0,
+    draft_only: bool = false,
+};
+
+fn validateDocumentCmd(cmd: DocumentCmd) !void {
+    try validateBinding(cmd.binding);
+    if (cmd.scope.len > 0 and !cmd.binding.allows(cmd.scope)) {
+        return errors.fail(.scope_denied, "document scope is outside this binding", .{});
+    }
+    if (!validDocumentKind(cmd.kind)) {
+        return errors.invalid("unknown document kind \"{s}\"", .{cmd.kind});
+    }
+    if (!validDocumentStatus(cmd.status)) {
+        return errors.invalid("unknown document status \"{s}\" (want draft, verified or superseded)", .{cmd.status});
+    }
+    if (!validDocumentSlug(cmd.slug)) {
+        return errors.invalid("document slug must be non-empty and use only letters, digits, -, _, / and .", .{});
+    }
+    if (trimmed(cmd.title).len == 0) return errors.invalid("document title is required", .{});
+    if (trimmed(cmd.body).len == 0) return errors.invalid("document body is required", .{});
+    if (cmd.expected < 0) return errors.invalid("expected revision cannot be negative", .{});
+    if (cmd.draft_only and !std.mem.eql(u8, cmd.status, "draft")) {
+        return errors.invalid("draft-only write cannot set status \"{s}\" (want draft)", .{cmd.status});
+    }
+}
+
+fn writeDocumentRequest(w: *std.Io.Writer, cmd: DocumentCmd) !void {
+    var o = try jsonw.Obj.init(w);
+    try writeBinding(&o, .{ .profile = "", .actor = "", .scopes = &.{} });
+    try o.str("Kind", cmd.kind);
+    try o.str("Slug", cmd.slug);
+    try o.str("Title", cmd.title);
+    try o.str("Body", cmd.body);
+    try o.str("Status", cmd.status);
+    try o.int("Expected", cmd.expected);
+    try o.end();
+}
+
+pub fn putDocument(s: *Store, a: std.mem.Allocator, cmd: DocumentCmd, now: Timestamp) !domain.Document {
+    try validateDocumentCmd(cmd);
+    const scope = if (cmd.scope.len > 0) cmd.scope else cmd.binding.scopes[0];
+    const key = try std.fmt.allocPrint(a, "{s}|{s}|{s}|{d}", .{ scope, cmd.kind, cmd.slug, cmd.expected });
+
+    var aw = std.Io.Writer.Allocating.init(a);
+    try writeDocumentRequest(&aw.writer, cmd);
+    const hash = sha256hex(aw.written());
+
+    try s.begin();
+    errdefer s.rollback();
+    if (try lookupIdemStmt(s, a, "doc put", key, &hash)) |stored| {
+        const doc = try docFromStored(a, stored);
+        try s.commit();
+        return doc;
+    }
+    try requireScopeDeclared(s, scope);
+
+    var existing: ?domain.Document = null;
+    {
+        var q = try s.db.prepare("SELECT " ++ document_columns ++ " FROM documents WHERE scope_id = ? AND kind = ? AND slug = ?");
+        defer q.finalize();
+        try q.bindText(1, scope);
+        try q.bindText(2, cmd.kind);
+        try q.bindText(3, cmd.slug);
+        if (try q.step()) existing = try scanDocument(a, q);
+    }
+
+    const now_s = try fmtTs(a, now);
+    const event: []const u8 = if (existing) |e| blk: {
+        if (cmd.draft_only and cmd.expected == 0) {
+            return errors.fail(
+                .stale_revision,
+                "document {s}/{s} already exists at revision {d} in scope {s}, so expected must be its current revision",
+                .{ cmd.kind, cmd.slug, e.revision, scope },
+            );
+        }
+        if (cmd.expected != 0 and cmd.expected != e.revision) {
+            return errors.fail(.stale_revision, "document {s}/{s} is at revision {d}, expected {d}", .{ cmd.kind, cmd.slug, e.revision, cmd.expected });
+        }
+        if (cmd.draft_only and !std.mem.eql(u8, e.status, "draft")) {
+            return errors.fail(.invalid_transition, "document {s}/{s} is {s}, so a draft-only write cannot update it", .{ cmd.kind, cmd.slug, e.status });
+        }
+        break :blk "updated";
+    } else blk: {
+        if (cmd.expected != 0) {
+            return errors.fail(.stale_revision, "no document {s}/{s} exists in scope {s}, so expected must be 0", .{ cmd.kind, cmd.slug, scope });
+        }
+        break :blk "created";
+    };
+
+    var out: domain.Document = undefined;
+    if (existing) |e| {
+        out = .{
+            .id = e.id,
+            .scope = e.scope,
+            .kind = e.kind,
+            .slug = e.slug,
+            .title = try dup(a, cmd.title),
+            .body = try dup(a, cmd.body),
+            .status = try dup(a, cmd.status),
+            .revision = e.revision + 1,
+            .created_at = e.created_at,
+            .updated_at = now_s,
+        };
+        var up = try s.db.prepare(
+            "UPDATE documents SET title = ?, body = ?, status = ?, revision = ?, updated_at = ? " ++
+                "WHERE id = ? AND scope_id = ? AND kind = ? AND slug = ?",
+        );
+        defer up.finalize();
+        try up.bindText(1, out.title);
+        try up.bindText(2, out.body);
+        try up.bindText(3, out.status);
+        try up.bindInt(4, out.revision);
+        try up.bindText(5, out.updated_at);
+        try up.bindText(6, out.id);
+        try up.bindText(7, scope);
+        try up.bindText(8, cmd.kind);
+        try up.bindText(9, cmd.slug);
+        _ = try up.step();
+    } else {
+        const id = try std.fmt.allocPrint(a, "doc:{s}:{s}:{s}", .{ scope, cmd.kind, cmd.slug });
+        out = .{
+            .id = id,
+            .scope = try dup(a, scope),
+            .kind = try dup(a, cmd.kind),
+            .slug = try dup(a, cmd.slug),
+            .title = try dup(a, cmd.title),
+            .body = try dup(a, cmd.body),
+            .status = try dup(a, cmd.status),
+            .revision = 1,
+            .created_at = now_s,
+            .updated_at = now_s,
+        };
+        var ins = try s.db.prepare(
+            "INSERT INTO documents (id, scope_id, kind, slug, title, body, status, revision, created_at, updated_at) " ++
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        );
+        defer ins.finalize();
+        try ins.bindText(1, out.id);
+        try ins.bindText(2, out.scope);
+        try ins.bindText(3, out.kind);
+        try ins.bindText(4, out.slug);
+        try ins.bindText(5, out.title);
+        try ins.bindText(6, out.body);
+        try ins.bindText(7, out.status);
+        try ins.bindInt(8, out.revision);
+        try ins.bindText(9, out.created_at);
+        try ins.bindText(10, out.updated_at);
+        _ = try ins.step();
+    }
+
+    try insertHistory(s, a, "document", out.id, event, scope, "", out.revision, .{ .document = out }, now);
+    try writeIdem(s, a, "doc put", key, &hash, .{ .document = out }, now);
+    try s.commit();
+    return out;
+}
+
+fn docFromStored(a: std.mem.Allocator, stored: []const u8) !domain.Document {
+    const parsed = std.json.parseFromSlice(std.json.Value, a, stored, .{}) catch
+        return errors.invalid("stored document result is not valid JSON", .{});
+    return try documentFromValue(a, parsed.value);
+}
+
+pub fn getDocument(s: *Store, a: std.mem.Allocator, b: domain.Binding, kind: []const u8, slug: []const u8, scope: []const u8) !domain.Document {
+    try validateBinding(b);
+    var sql_buf = std.Io.Writer.Allocating.init(a);
+    try sql_buf.writer.writeAll("SELECT " ++ document_columns ++ " FROM documents WHERE scope_id ");
+    if (scope.len > 0) {
+        if (!b.allows(scope)) return errors.fail(.scope_denied, "document scope is outside this binding", .{});
+        try sql_buf.writer.writeAll("= ?");
+    } else {
+        try sql_buf.writer.print("IN ({s})", .{try scopeFilter(a, b.scopes.len)});
+    }
+    try sql_buf.writer.writeAll(" AND kind = ? AND slug = ? ORDER BY scope_id LIMIT 2");
+    var q = try s.db.prepare(sql_buf.written());
+    defer q.finalize();
+    var idx: c_int = 1;
+    if (scope.len > 0) {
+        try q.bindText(idx, scope);
+        idx += 1;
+    } else {
+        idx = try scopeArgs(q, idx, b);
+    }
+    try q.bindText(idx, kind);
+    try q.bindText(idx + 1, slug);
+    if (!try q.step()) return errors.fail(.not_found, "document {s}/{s} not found", .{ kind, slug });
+    const doc = try scanDocument(a, q);
+    if (try q.step()) {
+        return errors.fail(.conflict, "document {s}/{s} exists in multiple bound scopes; specify scope", .{ kind, slug });
+    }
+    return doc;
+}
+
+pub fn listDocuments(s: *Store, a: std.mem.Allocator, b: domain.Binding, kind: []const u8) ![]const domain.Document {
+    try validateBinding(b);
+    var sql_buf = std.Io.Writer.Allocating.init(a);
+    try sql_buf.writer.print("SELECT " ++ document_columns ++ " FROM documents WHERE scope_id IN ({s})", .{try scopeFilter(a, b.scopes.len)});
+    if (kind.len > 0) try sql_buf.writer.writeAll(" AND kind = ?");
+    try sql_buf.writer.writeAll(" ORDER BY kind, slug");
+    var q = try s.db.prepare(sql_buf.written());
+    defer q.finalize();
+    var idx = try scopeArgs(q, 1, b);
+    if (kind.len > 0) {
+        try q.bindText(idx, kind);
+        idx += 1;
+    }
+    var out: std.ArrayList(domain.Document) = .empty;
+    while (try q.step()) try out.append(a, try scanDocument(a, q));
+    return out.items;
+}
+
+pub const DocumentSearchHit = struct {
+    document: domain.Document,
+    rank: f64,
+    snippet: []const u8,
+};
+
+fn ftsQuery(a: std.mem.Allocator, query: []const u8) ![]const u8 {
+    var aw = std.Io.Writer.Allocating.init(a);
+    var it = std.mem.tokenizeAny(u8, query, " \t\n\r\x0b\x0c");
+    var first = true;
+    while (it.next()) |token| {
+        if (!first) try aw.writer.writeAll(" AND ");
+        first = false;
+        try aw.writer.writeByte('"');
+        for (token) |ch| {
+            if (ch == '"') try aw.writer.writeByte('"');
+            try aw.writer.writeByte(ch);
+        }
+        try aw.writer.writeByte('"');
+    }
+    return aw.written();
+}
+
+pub fn searchDocuments(s: *Store, a: std.mem.Allocator, b: domain.Binding, query: []const u8, kind: []const u8, limit: i64) ![]const DocumentSearchHit {
+    try validateBinding(b);
+    const match = try ftsQuery(a, query);
+    if (match.len == 0) return errors.invalid("search query is required", .{});
+    if (kind.len > 0 and !validDocumentKind(kind)) return errors.invalid("unknown document kind \"{s}\"", .{kind});
+    const n: i64 = if (limit <= 0) 10 else if (limit > 50) 50 else limit;
+
+    var sql_buf = std.Io.Writer.Allocating.init(a);
+    try sql_buf.writer.print(
+        "SELECT " ++ joined_document_columns ++ ", bm25(documents_fts), snippet(documents_fts, 5, '[', ']', '…', 20) " ++
+            "FROM documents_fts JOIN documents ON documents.id = documents_fts.doc_id " ++
+            "WHERE documents_fts MATCH ? AND documents_fts.scope_id IN ({s})",
+        .{try scopeFilter(a, b.scopes.len)},
+    );
+    if (kind.len > 0) try sql_buf.writer.writeAll(" AND documents_fts.kind = ?");
+    try sql_buf.writer.writeAll(" ORDER BY bm25(documents_fts) ASC, documents.kind, documents.slug LIMIT ?");
+    var q = try s.db.prepare(sql_buf.written());
+    defer q.finalize();
+    try q.bindText(1, match);
+    var idx = try scopeArgs(q, 2, b);
+    if (kind.len > 0) {
+        try q.bindText(idx, kind);
+        idx += 1;
+    }
+    try q.bindInt(idx, n);
+    var out: std.ArrayList(DocumentSearchHit) = .empty;
+    while (try q.step()) {
+        try out.append(a, .{
+            .document = try scanDocument(a, q),
+            .rank = q.real(10),
+            .snippet = try dup(a, q.text(11)),
+        });
+    }
+    return out.items;
+}
+
+pub const DocumentLogEntry = struct {
+    seq: i64,
+    event: []const u8,
+    revision: i64,
+    created_at: []const u8,
+    scope: []const u8,
+    kind: []const u8,
+    slug: []const u8,
+};
+
+pub fn listDocumentHistory(s: *Store, a: std.mem.Allocator, b: domain.Binding, kind: []const u8, slug: []const u8, limit: i64) ![]const DocumentLogEntry {
+    try validateBinding(b);
+    if (kind.len > 0 and !validDocumentKind(kind)) return errors.invalid("unknown document kind \"{s}\"", .{kind});
+    const n: i64 = if (limit <= 0) 50 else if (limit > 500) 500 else limit;
+    var sql_buf = std.Io.Writer.Allocating.init(a);
+    try sql_buf.writer.print(
+        "SELECT h.seq, h.event, h.revision, h.created_at, d.scope_id, d.kind, d.slug " ++
+            "FROM history_events h JOIN documents d ON d.id = h.entity_id " ++
+            "WHERE h.entity_type = 'document' AND d.scope_id IN ({s})",
+        .{try scopeFilter(a, b.scopes.len)},
+    );
+    if (kind.len > 0) try sql_buf.writer.writeAll(" AND d.kind = ?");
+    if (slug.len > 0) try sql_buf.writer.writeAll(" AND d.slug = ?");
+    try sql_buf.writer.writeAll(" ORDER BY h.seq DESC LIMIT ?");
+    var q = try s.db.prepare(sql_buf.written());
+    defer q.finalize();
+    var idx = try scopeArgs(q, 1, b);
+    if (kind.len > 0) {
+        try q.bindText(idx, kind);
+        idx += 1;
+    }
+    if (slug.len > 0) {
+        try q.bindText(idx, slug);
+        idx += 1;
+    }
+    try q.bindInt(idx, n);
+    var out: std.ArrayList(DocumentLogEntry) = .empty;
+    while (try q.step()) {
+        try out.append(a, .{
+            .seq = q.int(0),
+            .event = try dup(a, q.text(1)),
+            .revision = q.int(2),
+            .created_at = try reformat(a, q.text(3), "history_events.created_at"),
+            .scope = try dup(a, q.text(4)),
+            .kind = try dup(a, q.text(5)),
+            .slug = try dup(a, q.text(6)),
+        });
+    }
+    return out.items;
 }

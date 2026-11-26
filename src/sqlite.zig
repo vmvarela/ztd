@@ -186,6 +186,11 @@ pub const Statement = struct {
     pub fn int(self: Statement, col: c_int) i64 {
         return c.sqlite3_column_int64(self.stmt, col);
     }
+
+    /// Reads a REAL column (bm25 ranks, ratios) as Go's database/sql does.
+    pub fn real(self: Statement, col: c_int) f64 {
+        return c.sqlite3_column_double(self.stmt, col);
+    }
 };
 
 /// Rejects nonempty files that are not SQLite before the library touches them.

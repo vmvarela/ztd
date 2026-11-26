@@ -65,6 +65,66 @@ pub fn writeString(w: *Io.Writer, s: []const u8) !void {
     try w.writeByte('"');
 }
 
+/// Writes a float64 the way encoding/json does, so bm25 ranks compare equal
+/// to the Go binary's bytes.
+pub fn writeFloat(w: *Io.Writer, v: f64) !void {
+    const abs: f64 = @abs(v);
+    if (abs != 0 and (abs < 1e-6 or abs >= 1e21)) {
+        var buf: [512]u8 = undefined;
+        const dec = std.fmt.bufPrint(&buf, "{d}", .{v}) catch return w.print("{d}", .{v});
+        return writeExponential(w, dec);
+    }
+    return w.print("{d}", .{v});
+}
+
+/// Re-renders a shortest decimal such as "-0.0000015" or "1000000000000000000000"
+/// as Go's exponential form: mantissa digits, then e, the sign and the
+/// unpadded exponent.
+fn writeExponential(w: *Io.Writer, dec: []const u8) !void {
+    var body = dec;
+    if (body.len > 0 and body[0] == '-') {
+        try w.writeByte('-');
+        body = body[1..];
+    }
+    const dot = std.mem.indexOfScalar(u8, body, '.');
+    const ip = if (dot) |d| body[0..d] else body;
+    const fp = if (dot) |d| body[d + 1 ..] else body[0..0];
+
+    var digits_buf: [512]u8 = undefined;
+    if (ip.len + fp.len > digits_buf.len) return w.writeAll(dec);
+    @memcpy(digits_buf[0..ip.len], ip);
+    @memcpy(digits_buf[ip.len .. ip.len + fp.len], fp);
+    var digits = digits_buf[0 .. ip.len + fp.len];
+    var start: usize = 0;
+    while (start < digits.len and digits[start] == '0') start += 1;
+    if (start == digits.len) return w.writeAll(if (dec[0] == '-') "-0" else "0");
+    digits = digits[start..];
+    // The exponent is the decimal point's offset from the first digit, which
+    // trailing zeros cancel out: compute it before stripping them.
+    const exp: i64 = @as(i64, @intCast(digits.len)) - @as(i64, @intCast(fp.len)) - 1;
+    var end = digits.len;
+    while (end > 1 and digits[end - 1] == '0') end -= 1;
+    const mant = digits[0..end];
+
+    try w.writeByte(mant[0]);
+    if (mant.len > 1) {
+        try w.writeByte('.');
+        try w.writeAll(mant[1..]);
+    }
+    try w.writeByte('e');
+    try w.writeByte(if (exp < 0) '-' else '+');
+    var e: u64 = @intCast(if (exp < 0) -exp else exp);
+    var ebuf: [4]u8 = undefined;
+    var n = ebuf.len;
+    while (true) {
+        n -= 1;
+        ebuf[n] = @intCast('0' + @as(u8, @intCast(e % 10)));
+        e /= 10;
+        if (e == 0) break;
+    }
+    try w.writeAll(ebuf[n..]);
+}
+
 pub const Obj = struct {
     w: *Io.Writer,
     first: bool = true,
@@ -98,6 +158,14 @@ pub const Obj = struct {
     pub fn int(self: *Obj, name: []const u8, value: i64) !void {
         try self.key(name);
         try self.w.print("{d}", .{value});
+    }
+
+    /// Emits a float64 exactly like Go's encoding/json: the shortest
+    /// round-trip decimal, switching to exponential form when |v| < 1e-6 or
+    /// |v| >= 1e21, with the exponent unpadded (Go rewrites e-09 to e-9).
+    pub fn float(self: *Obj, name: []const u8, value: f64) !void {
+        try self.key(name);
+        try writeFloat(self.w, value);
     }
 
     pub fn boolean(self: *Obj, name: []const u8, value: bool) !void {
@@ -214,6 +282,22 @@ test "object writer keeps field order and escapes strings" {
     try o.end();
     try std.testing.expectEqualStrings(
         "{\"id\":\"C-1\",\"n\":2,\"ok\":true,\"nested\":{\"text\":\"a\\\"b\"}}",
+        bw.written(),
+    );
+}
+
+test "floats use Go's decimal or exponential form" {
+    var bw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer bw.deinit();
+    var o = try Obj.init(&bw.writer);
+    try o.float("rank", -0.000001);
+    try o.float("tiny", -1.5e-7);
+    try o.float("big", 1e21);
+    try o.float("plain", 12.5);
+    try o.float("zero", 0);
+    try o.end();
+    try std.testing.expectEqualStrings(
+        "{\"rank\":-0.000001,\"tiny\":-1.5e-7,\"big\":1e+21,\"plain\":12.5,\"zero\":0}",
         bw.written(),
     );
 }
