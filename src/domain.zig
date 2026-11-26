@@ -479,3 +479,68 @@ test "capture emits Go field order and omits empty optionals" {
         aw.written(),
     );
 }
+
+pub const SourceRetrieval = struct {
+    window: []const u8 = "",
+    cursor: []const u8 = "",
+    requested_limit: i64 = 0,
+    provider_returned_limit: i64 = 0,
+    complete_window: bool = false,
+    truncated: bool = false,
+    failures: ?[]const []const u8 = null,
+
+    pub fn write(self: SourceRetrieval, o: *json.Obj) !void {
+        try o.str("window", self.window);
+        try o.str("cursor", self.cursor);
+        try o.int("requested_limit", self.requested_limit);
+        try o.int("provider_returned_limit", self.provider_returned_limit);
+        try o.boolean("complete_window", self.complete_window);
+        try o.boolean("truncated", self.truncated);
+        if (self.failures) |list| {
+            var arr = try o.arr("failures");
+            for (list) |f| try arr.str(f);
+            try arr.end();
+        } else {
+            try o.raw("failures", "null");
+        }
+    }
+};
+
+pub const SourceItem = struct {
+    external_id: []const u8 = "",
+    external_revision: []const u8 = "",
+    original_text: []const u8 = "",
+    source_uri: ?[]const u8 = null,
+    occurred_at: ?[]const u8 = null,
+    provider_metadata_summary: ?[]const u8 = null,
+};
+
+pub const SourceReview = struct {
+    id: []const u8,
+    source_id: []const u8,
+    batch_id: []const u8,
+    result_kind: []const u8,
+    coverage: []const u8,
+    retrieval: SourceRetrieval,
+    capture_ids: ?[]const []const u8 = null,
+    created_at: []const u8,
+
+    pub fn write(self: SourceReview, o: *json.Obj) !void {
+        try o.str("id", self.id);
+        try o.str("source_id", self.source_id);
+        try o.str("batch_id", self.batch_id);
+        try o.str("result_kind", self.result_kind);
+        try o.str("coverage", self.coverage);
+        var inner = try o.obj("retrieval");
+        try self.retrieval.write(&inner);
+        try inner.end();
+        if (self.capture_ids) |list| {
+            var arr = try o.arr("capture_ids");
+            for (list) |id| try arr.str(id);
+            try arr.end();
+        } else {
+            try o.raw("capture_ids", "null");
+        }
+        try o.str("created_at", self.created_at);
+    }
+};

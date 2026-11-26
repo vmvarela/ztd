@@ -247,6 +247,7 @@ fn dispatch(c: *Cli, init: std.process.Init, command: []const u8, args: []const 
     }
     if (std.mem.eql(u8, command, "check")) return cmdCheck(c, args);
     if (std.mem.eql(u8, command, "doc")) return cmdDoc(c, args);
+    if (std.mem.eql(u8, command, "source")) return cmdSource(c, args);
     return errors.invalid("unknown command \"{s}\" (see usage)", .{command});
 }
 
@@ -539,9 +540,13 @@ fn bound(c: *Cli, explicit: []const []const u8) !struct { st: Store, b: domain.B
     return .{ .st = st, .b = .{ .profile = "personal", .actor = c.actor, .scopes = ids } };
 }
 
+// Storage for the single-scope binding; a stack literal dangles in release builds.
+var one_scope_buf: [1][]const u8 = undefined;
+
 fn oneScope(scope: []const u8) []const []const u8 {
     if (scope.len == 0) return &.{};
-    return &.{scope};
+    one_scope_buf[0] = scope;
+    return one_scope_buf[0..1];
 }
 
 // ------------------------------------------------------------------ capture
@@ -1533,4 +1538,188 @@ fn docArchive(c: *Cli, args: []const []const u8) !void {
         .expected = expected,
     }, nowSeconds(c));
     try writeJson(c, "doc archive", out);
+}
+
+// ----------------------------------------------------------------- sources
+
+fn boundOperator(c: *Cli, scopes: []const []const u8) !struct { st: Store, b: domain.Binding } {
+    const st = try openStore(c);
+    return .{ .st = st, .b = .{ .profile = "operator", .actor = c.actor, .scopes = scopes } };
+}
+
+fn declaredScopes(c: *Cli, st: *Store) ![]const []const u8 {
+    const all = try core.listScopes(st, c.arena);
+    const out = try c.arena.alloc([]const u8, all.len);
+    for (all, 0..) |sc, i| out[i] = sc.id;
+    return out;
+}
+
+fn cmdSource(c: *Cli, args: []const []const u8) !void {
+    if (args.len == 0) return errors.invalid("usage: source add|apply|list|review|delete [flags]", .{});
+    const sub = args[0];
+    const rest = args[1..];
+    if (std.mem.eql(u8, sub, "add")) return sourceAdd(c, rest);
+    if (std.mem.eql(u8, sub, "list")) return sourceList(c, rest);
+    if (std.mem.eql(u8, sub, "review")) return sourceReview(c, rest);
+    if (std.mem.eql(u8, sub, "delete")) return sourceDelete(c, rest);
+    if (std.mem.eql(u8, sub, "apply")) return errors.invalid("source apply is not ported yet", .{});
+    return errors.invalid("usage: source add|apply|list|review|delete [flags]", .{});
+}
+
+fn sourceAdd(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{
+        .{ .name = "id", .value = true },        .{ .name = "name", .value = true },
+        .{ .name = "scope", .value = true },     .{ .name = "kind", .value = true },
+        .{ .name = "connector", .value = true }, .{ .name = "provider", .value = true },
+        .{ .name = "connection-ref", .value = true },
+        .{ .name = "query", .value = true },     .{ .name = "cadence", .value = true },
+    };
+    const p = try parseFlags(c.arena, args, &specs);
+    const scope = p.get("scope", "");
+    if (scope.len == 0) return errors.invalid("--scope is required", .{});
+    var r = try boundOperator(c, oneScope(scope));
+    defer r.st.close();
+    const src = try core.addSource(&r.st, c.arena, .{
+        .binding = r.b,
+        .id = p.get("id", ""),
+        .name = p.get("name", ""),
+        .scope = scope,
+        .kind = p.get("kind", ""),
+        .connector = p.get("connector", ""),
+        .provider = p.get("provider", ""),
+        .connection_ref = p.get("connection-ref", ""),
+        .non_secret_query = p.get("query", ""),
+        .cadence = p.get("cadence", ""),
+    }, nowSeconds(c));
+    try writeJson(c, "source add", src);
+}
+
+fn sourceList(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{ .{ .name = "all", .value = false }, .{ .name = "scope", .value = true, .multi = true } };
+    const p = try parseFlags(c.arena, args, &specs);
+    const explicit = p.multi.get("scope");
+    if (p.has("all") and explicit != null) {
+        return errors.invalid("source list takes either --all or --scope, not both", .{});
+    }
+    var r = try boundOperator(c, &.{});
+    defer r.st.close();
+    const scopes: []const []const u8 = if (explicit) |list| list.items else try declaredScopes(c, &r.st);
+    const b = domain.Binding{ .profile = "operator", .actor = c.actor, .scopes = scopes };
+    const list = try core.listSources(&r.st, c.arena, b);
+    var aw = Io.Writer.Allocating.init(c.arena);
+    if (list.len == 0) {
+        try aw.writer.writeAll("null");
+    } else {
+        var arr = try jsonw.Arr.init(&aw.writer);
+        for (list) |src| {
+            var o = try arr.obj();
+            try src.write(&o);
+            try o.end();
+        }
+        try arr.end();
+    }
+    try succeedData(c, "source list", aw.written());
+}
+
+fn parseRetrieval(v: ?std.json.Value) domain.SourceRetrieval {
+    var r = domain.SourceRetrieval{};
+    const value = v orelse return r;
+    if (jsonw.strField(value, "window")) |s| r.window = s;
+    if (jsonw.strField(value, "cursor")) |s| r.cursor = s;
+    if (jsonw.intField(value, "requested_limit")) |n| r.requested_limit = n;
+    if (jsonw.intField(value, "provider_returned_limit")) |n| r.provider_returned_limit = n;
+    if (jsonw.boolField(value, "complete_window")) |b| r.complete_window = b;
+    if (jsonw.boolField(value, "truncated")) |b| r.truncated = b;
+    if (jsonw.arrField(value, "failures")) |arr| {
+        const list = std.heap.page_allocator.alloc([]const u8, arr.len) catch unreachable;
+        for (arr, 0..) |f, i| list[i] = if (f == .string) f.string else "";
+        r.failures = list;
+    }
+    return r;
+}
+
+fn sourceReview(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true }, .{ .name = "source", .value = true },
+        .{ .name = "batch", .value = true }, .{ .name = "key", .value = true },
+        .{ .name = "file", .value = true },
+    };
+    const p = try parseFlags(c.arena, args, &specs);
+    const file = p.get("file", "");
+    if (file.len == 0) return errors.invalid("--file is required", .{});
+    const raw = Io.Dir.cwd().readFileAlloc(c.io, file, c.arena, .limited(1 << 30)) catch |e|
+        return errors.fail(.io_error, "read batch file: {s}", .{@errorName(e)});
+    const parsed = std.json.parseFromSlice(std.json.Value, c.arena, raw, .{}) catch
+        return errors.invalid("parse batch file: invalid JSON", .{});
+    const batch = parsed.value;
+    var source_id = p.get("source", "");
+    if (source_id.len == 0) source_id = jsonw.strField(batch, "source_id") orelse "";
+    var batch_id = p.get("batch", "");
+    if (batch_id.len == 0) batch_id = jsonw.strField(batch, "batch_id") orelse "";
+    var key = p.get("key", "");
+    if (key.len == 0) key = jsonw.strField(batch, "idempotency_key") orelse "";
+    if (source_id.len == 0) return errors.invalid("--source is required", .{});
+    if (batch_id.len == 0) return errors.invalid("--batch is required", .{});
+    if (key.len == 0) key = try newKey(c, "source-review");
+    var result_kind = jsonw.strField(batch, "result_kind") orelse "";
+    if (result_kind.len == 0) result_kind = "reported";
+    const retrieval = parseRetrieval(jsonw.field(batch, "retrieval"));
+    var items: std.ArrayList(domain.SourceItem) = .empty;
+    if (jsonw.arrField(batch, "items")) |list| {
+        for (list) |it| {
+            var occurred: ?[]const u8 = null;
+            if (jsonw.strField(it, "occurred_at")) |s| {
+                const ts = timeutil.parseTime(s) catch return errors.invalid("source item occurred_at must be RFC3339", .{});
+                var buf: [20]u8 = undefined;
+                occurred = try c.arena.dupe(u8, timeutil.fmtTime(ts, &buf));
+            }
+            try items.append(c.arena, .{
+                .external_id = jsonw.strField(it, "external_id") orelse "",
+                .external_revision = jsonw.strField(it, "external_revision") orelse "",
+                .original_text = jsonw.strField(it, "original_text") orelse "",
+                .source_uri = jsonw.strField(it, "source_uri"),
+                .occurred_at = occurred,
+                .provider_metadata_summary = jsonw.strField(it, "provider_metadata_summary"),
+            });
+        }
+    }
+    var r = try bound(c, oneScope(p.get("scope", "")));
+    defer r.st.close();
+    const out = try core.recordSourceReview(&r.st, c.arena, .{
+        .binding = r.b,
+        .source_id = source_id,
+        .batch_id = batch_id,
+        .key = key,
+        .result_kind = result_kind,
+        .retrieval = retrieval,
+        .items = items.items,
+    }, nowSeconds(c));
+    var aw = Io.Writer.Allocating.init(c.arena);
+    var o = try jsonw.Obj.init(&aw.writer);
+    var arr = try o.arr("captures");
+    for (out.captures) |cap| {
+        var item = try arr.obj();
+        try cap.write(&item);
+        try item.end();
+    }
+    try arr.end();
+    var rev = try o.obj("review");
+    try out.review.write(&rev);
+    try rev.end();
+    try o.end();
+    try succeedData(c, "source review", aw.written());
+}
+
+fn sourceDelete(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{ .{ .name = "id", .value = true } };
+    const p = try parseFlags(c.arena, args, &specs);
+    if (p.positional.len != 0) return errors.invalid("usage: source delete --id ID", .{});
+    const id = p.get("id", "");
+    if (id.len == 0) return errors.invalid("--id is required", .{});
+    var r = try boundOperator(c, &.{});
+    defer r.st.close();
+    const scopes = try declaredScopes(c, &r.st);
+    const b = domain.Binding{ .profile = "operator", .actor = c.actor, .scopes = scopes };
+    const src = try core.deleteSource(&r.st, c.arena, b, id, "", nowSeconds(c));
+    try writeJson(c, "source delete", src);
 }

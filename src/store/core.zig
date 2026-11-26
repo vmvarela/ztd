@@ -461,6 +461,10 @@ pub const HistoryPayload = union(enum) {
     checkpoint: domain.Checkpoint,
     review: domain.Review,
     document: domain.Document,
+    source: domain.Source,
+    source_review: domain.SourceReview,
+    process_result: ProcessResult,
+    source_review_result: SourceReviewResult,
 };
 
 fn writeHistoryPayload(w: *std.Io.Writer, payload: HistoryPayload) !void {
@@ -496,6 +500,39 @@ fn writeHistoryPayload(w: *std.Io.Writer, payload: HistoryPayload) !void {
         .checkpoint => |cp| try cp.write(&o),
         .review => |r| try r.write(&o),
         .document => |d| try d.write(&o),
+        .source => |src| try src.write(&o),
+        .source_review => |rev| try rev.write(&o),
+        // Stored result: Go struct order (review, then captures).
+        .source_review_result => |r| {
+            var rev = try o.obj("review");
+            try r.review.write(&rev);
+            try rev.end();
+            if (r.captures.len == 0) {
+                try o.raw("captures", "null");
+            } else {
+                var arr = try o.arr("captures");
+                for (r.captures) |cap| {
+                    var item = try arr.obj();
+                    try cap.write(&item);
+                    try item.end();
+                }
+                try arr.end();
+            }
+        },
+        .process_result => |r| {
+            var capo = try o.obj("capture");
+            try r.capture.write(&capo);
+            try capo.end();
+            if (r.work_items.len > 0) {
+                var arr = try o.arr("work_items");
+                for (r.work_items) |item| {
+                    var inner = try arr.obj();
+                    try item.write(&inner);
+                    try inner.end();
+                }
+                try arr.end();
+            }
+        },
     }
     try o.end();
 }
@@ -854,7 +891,7 @@ pub fn process(s: *Store, a: std.mem.Allocator, cmd: ProcessCmd, now: Timestamp)
     updated.outcome = out_copy;
     try insertHistory(s, a, "capture", cap.id, "processed", cap.scope, "", updated.revision, .{ .capture = updated }, now);
     const result = ProcessResult{ .capture = updated, .work_items = items.items };
-    try writeIdem(s, a, "process", cmd.key, &hash, .{ .capture = updated }, now);
+    try writeIdem(s, a, "process", cmd.key, &hash, .{ .process_result = result }, now);
     try s.commit();
     return result;
 }
@@ -2892,4 +2929,493 @@ pub fn listDocumentHistory(s: *Store, a: std.mem.Allocator, b: domain.Binding, k
         });
     }
     return out.items;
+}
+
+// -------------------------------------------------------------- sources
+
+fn validSourceId(id: []const u8) bool {
+    if (id.len < 2 or id.len > 64) return false;
+    if (!std.ascii.isLower(id[0])) return false;
+    for (id[1..]) |ch| {
+        if (!(std.ascii.isLower(ch) or std.ascii.isDigit(ch) or ch == '_' or ch == '-')) return false;
+    }
+    return true;
+}
+
+pub const SourceCmd = struct {
+    binding: domain.Binding,
+    id: []const u8,
+    name: []const u8,
+    scope: []const u8,
+    kind: []const u8,
+    connector: []const u8,
+    provider: []const u8 = "",
+    connection_ref: []const u8 = "",
+    non_secret_query: []const u8 = "",
+    cadence: []const u8 = "",
+};
+
+fn validateSourceCmd(cmd: SourceCmd) !void {
+    try validateBinding(cmd.binding);
+    if (!validSourceId(cmd.id)) return errors.invalid("source id must match [a-z][a-z0-9_-]{{1,63}}", .{});
+    if (trimmed(cmd.name).len == 0) return errors.invalid("source name is required", .{});
+    if (!std.mem.eql(u8, cmd.kind, "capture") and !std.mem.eql(u8, cmd.kind, "calendar")) {
+        return errors.invalid("unknown source kind \"{s}\"", .{cmd.kind});
+    }
+    if (!std.mem.eql(u8, cmd.connector, "manual") and
+        !std.mem.eql(u8, cmd.connector, "directory") and
+        !std.mem.eql(u8, cmd.connector, "host_mcp"))
+    {
+        return errors.invalid("unknown source connector \"{s}\"", .{cmd.connector});
+    }
+    if (cmd.scope.len == 0) return errors.invalid("source scope is required", .{});
+    if (!cmd.binding.allows(cmd.scope)) {
+        return errors.fail(.scope_denied, "scope {s} is outside the active scopes", .{cmd.scope});
+    }
+}
+
+fn sameSourceConfig(a: domain.Source, cmd: SourceCmd) bool {
+    return std.mem.eql(u8, a.name, cmd.name) and
+        std.mem.eql(u8, a.scope, cmd.scope) and
+        std.mem.eql(u8, a.kind, cmd.kind) and
+        std.mem.eql(u8, a.connector, cmd.connector) and
+        std.mem.eql(u8, a.provider, cmd.provider) and
+        std.mem.eql(u8, a.connection_ref, cmd.connection_ref) and
+        std.mem.eql(u8, a.non_secret_query, cmd.non_secret_query) and
+        std.mem.eql(u8, a.cadence, cmd.cadence);
+}
+
+fn loadSourceAny(s: *Store, a: std.mem.Allocator, id: []const u8) !?domain.Source {
+    var q = try s.db.prepare("SELECT " ++ source_columns ++ " FROM sources WHERE id = ?");
+    defer q.finalize();
+    try q.bindText(1, id);
+    if (!try q.step()) return null;
+    return try scanSource(a, q);
+}
+
+fn loadSourceScope(s: *Store, a: std.mem.Allocator, b: domain.Binding, id: []const u8) !domain.Source {
+    const clause = try scopeFilter(a, b.scopes.len);
+    const sql = try std.fmt.allocPrint(a, "SELECT " ++ source_columns ++ " FROM sources WHERE id = ? AND scope_id IN ({s})", .{clause});
+    var q = try s.db.prepare(sql);
+    defer q.finalize();
+    try q.bindText(1, id);
+    _ = try scopeArgs(q, 2, b);
+    if (!try q.step()) return rowAccessError(s, "sources", "source", id);
+    return try scanSource(a, q);
+}
+
+fn refuseReusedSourceId(s: *Store, id: []const u8) !void {
+    var q = try s.db.prepare("SELECT 1 FROM history_events WHERE entity_type = 'source' AND entity_id = ? AND event = 'deleted' LIMIT 1");
+    defer q.finalize();
+    try q.bindText(1, id);
+    if (try q.step()) {
+        return errors.fail(.conflict, "source id {s} was deleted and cannot be reused; choose another id", .{id});
+    }
+}
+
+
+pub fn addSource(s: *Store, a: std.mem.Allocator, cmd: SourceCmd, now: Timestamp) !domain.Source {
+    try validateSourceCmd(cmd);
+    const now_s = try fmtTs(a, now);
+
+    try s.begin();
+    errdefer s.rollback();
+    try requireScopeDeclared(s, cmd.scope);
+    if (try loadSourceAny(s, a, cmd.id)) |existing| {
+        try s.commit();
+        if (sameSourceConfig(existing, cmd)) return existing;
+        return errors.fail(.conflict, "source id {s} is already registered; choose another id", .{cmd.id});
+    }
+    try refuseReusedSourceId(s, cmd.id);
+    const src = domain.Source{
+        .id = try dup(a, cmd.id),
+        .name = try dup(a, cmd.name),
+        .scope = try dup(a, cmd.scope),
+        .kind = try dup(a, cmd.kind),
+        .connector = try dup(a, cmd.connector),
+        .provider = try dup(a, cmd.provider),
+        .connection_ref = try dup(a, cmd.connection_ref),
+        .non_secret_query = try dup(a, cmd.non_secret_query),
+        .cadence = try dup(a, cmd.cadence),
+        .auth_state = "unknown",
+        .coverage = "unknown",
+        .cursor = "",
+        .created_at = now_s,
+        .updated_at = now_s,
+    };
+    var ins = try s.db.prepare(
+        "INSERT INTO sources (id, name, scope_id, kind, connector, provider, connection_ref, non_secret_query, cadence, " ++
+            "auth_state, coverage_state, cursor, last_attempt_at, last_success_at, created_at, updated_at) " ++
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', NULL, NULL, ?, ?)",
+    );
+    defer ins.finalize();
+    try ins.bindText(1, src.id);
+    try ins.bindText(2, src.name);
+    try ins.bindText(3, src.scope);
+    try ins.bindText(4, src.kind);
+    try ins.bindText(5, src.connector);
+    try ins.bindText(6, src.provider);
+    try ins.bindText(7, src.connection_ref);
+    try ins.bindText(8, src.non_secret_query);
+    try ins.bindText(9, src.cadence);
+    try ins.bindText(10, src.auth_state);
+    try ins.bindText(11, src.coverage);
+    try ins.bindText(12, src.created_at);
+    try ins.bindText(13, src.updated_at);
+    _ = try ins.step();
+    try insertHistory(s, a, "source", src.id, "created", src.scope, "", 1, .{ .source = src }, now);
+    try s.commit();
+    return src;
+}
+
+fn lessStr(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
+}
+
+fn sourceDeleteCommand(a: std.mem.Allocator, b: domain.Binding) ![64]u8 {
+    const scopes = try a.dupe([]const u8, b.scopes);
+    std.mem.sort([]const u8, scopes, {}, lessStr);
+    var aw = std.Io.Writer.Allocating.init(a);
+    try aw.writer.print("source_delete:{s}\x00", .{b.profile});
+    try aw.writer.print("{s}\x00", .{b.actor});
+    var first = true;
+    for (scopes) |sc| {
+        if (!first) try aw.writer.writeByte(0);
+        first = false;
+        try aw.writer.writeAll(sc);
+    }
+    return sha256hex(aw.written());
+}
+
+fn sourceFromValue(a: std.mem.Allocator, v: std.json.Value) !domain.Source {
+    return .{
+        .id = try dup(a, jsonw.strField(v, "id") orelse ""),
+        .name = try dup(a, jsonw.strField(v, "name") orelse ""),
+        .scope = try dup(a, jsonw.strField(v, "scope") orelse ""),
+        .kind = try dup(a, jsonw.strField(v, "kind") orelse ""),
+        .connector = try dup(a, jsonw.strField(v, "connector") orelse ""),
+        .provider = try dup(a, jsonw.strField(v, "provider") orelse ""),
+        .connection_ref = try dup(a, jsonw.strField(v, "connection_ref") orelse ""),
+        .non_secret_query = try dup(a, jsonw.strField(v, "non_secret_query") orelse ""),
+        .cadence = try dup(a, jsonw.strField(v, "cadence") orelse ""),
+        .auth_state = try dup(a, jsonw.strField(v, "auth_state") orelse "unknown"),
+        .coverage = try dup(a, jsonw.strField(v, "coverage") orelse "unknown"),
+        .cursor = try dup(a, jsonw.strField(v, "cursor") orelse ""),
+        .last_attempt_at = try dupOpt(a, jsonw.strField(v, "last_attempt_at")),
+        .last_success_at = try dupOpt(a, jsonw.strField(v, "last_success_at")),
+        .created_at = try dup(a, jsonw.strField(v, "created_at") orelse ""),
+        .updated_at = try dup(a, jsonw.strField(v, "updated_at") orelse ""),
+    };
+}
+
+pub fn deleteSource(s: *Store, a: std.mem.Allocator, b: domain.Binding, id: []const u8, key: []const u8, now: Timestamp) !domain.Source {
+    try validateBinding(b);
+    if (!validSourceId(id)) return errors.invalid("source id must match [a-z][a-z0-9_-]{{1,63}}", .{});
+    const command = try sourceDeleteCommand(a, b);
+    var req = std.Io.Writer.Allocating.init(a);
+    var ro = try jsonw.Obj.init(&req.writer);
+    try ro.str("command", &command);
+    try ro.str("id", id);
+    try ro.end();
+    const hash = sha256hex(req.written());
+
+    try s.begin();
+    errdefer s.rollback();
+    if (key.len > 0) {
+        if (try lookupIdemStmt(s, a, "source_delete", key, &hash)) |stored| {
+            const parsed = std.json.parseFromSlice(std.json.Value, a, stored, .{}) catch
+                return errors.invalid("stored source result is not valid JSON", .{});
+            const out = try sourceFromValue(a, parsed.value);
+            try s.commit();
+            return out;
+        }
+    }
+    const src = try loadSourceScope(s, a, b, id);
+    const sql = try std.fmt.allocPrint(a,
+        "SELECT " ++
+            "(SELECT count(*) FROM captures c WHERE c.source_id = ? AND c.scope_id = ? AND NOT " ++
+            "(c.source_id = 'legacy' AND EXISTS (SELECT 1 FROM history_events h WHERE h.entity_type = 'capture' AND h.entity_id = c.id AND h.scope_id = c.scope_id AND h.event = 'imported'))), " ++
+            "(SELECT count(*) FROM source_reviews WHERE source_id = ?)", .{});
+    var q = try s.db.prepare(sql);
+    defer q.finalize();
+    try q.bindText(1, id);
+    try q.bindText(2, src.scope);
+    try q.bindText(3, id);
+    _ = try q.step();
+    const captures = q.int(0);
+    const reviews = q.int(1);
+    if (captures > 0 or reviews > 0) {
+        return errors.fail(.conflict, "source {s} is referenced by {d} captures and {d} reviews; it cannot be deleted", .{ id, captures, reviews });
+    }
+    var del = try s.db.prepare("DELETE FROM sources WHERE id = ? AND scope_id = ?");
+    defer del.finalize();
+    try del.bindText(1, id);
+    try del.bindText(2, src.scope);
+    _ = try del.step();
+    try insertHistory(s, a, "source", src.id, "deleted", src.scope, "", 1, .{ .source = src }, now);
+    if (key.len > 0) try writeIdem(s, a, "source_delete", key, &hash, .{ .source = src }, now);
+    try s.commit();
+    return src;
+}
+
+pub const SourceReviewCmd = struct {
+    binding: domain.Binding,
+    source_id: []const u8,
+    batch_id: []const u8,
+    key: []const u8,
+    result_kind: []const u8 = "reported",
+    retrieval: domain.SourceRetrieval = .{},
+    items: []const domain.SourceItem = &.{},
+};
+
+fn validateSourceItem(item: domain.SourceItem) !void {
+    if (trimmed(item.original_text).len == 0) return errors.invalid("source item text is required", .{});
+    if (item.original_text.len > 64 * 1024) return errors.invalid("source item text exceeds {d} bytes", .{64 * 1024});
+    if (!std.unicode.utf8ValidateSlice(item.original_text)) return errors.invalid("source item text must be valid UTF-8", .{});
+    const has_id = item.external_id.len > 0;
+    const has_rev = item.external_revision.len > 0;
+    if (has_id != has_rev) return errors.invalid("external id and external revision must be provided together", .{});
+}
+
+fn validateSourceReviewCmd(cmd: SourceReviewCmd) !void {
+    try validateBinding(cmd.binding);
+    if (!validSourceId(cmd.source_id)) return errors.invalid("source id must match [a-z][a-z0-9_-]{{1,63}}", .{});
+    if (trimmed(cmd.batch_id).len == 0) return errors.invalid("batch id is required", .{});
+    try requireKey(cmd.key);
+    if (!std.mem.eql(u8, cmd.result_kind, "observed") and !std.mem.eql(u8, cmd.result_kind, "reported")) {
+        return errors.invalid("unknown result kind \"{s}\"", .{cmd.result_kind});
+    }
+    if (cmd.items.len > 500) return errors.invalid("source batch exceeds 500 items", .{});
+    for (cmd.items, 0..) |item, i| {
+        validateSourceItem(item) catch |e| {
+            if (e == error.Ztd) return errors.invalid("source item {d}: {s}", .{ i, errors.detail() });
+            return e;
+        };
+    }
+}
+
+fn sourceReviewCoverage(cmd: SourceReviewCmd) []const u8 {
+    const failures = if (cmd.retrieval.failures) |f| f.len else 0;
+    if (std.mem.eql(u8, cmd.result_kind, "observed")) {
+        if (cmd.retrieval.complete_window and !cmd.retrieval.truncated and failures == 0) return "complete";
+        return "partial";
+    }
+    if (cmd.items.len == 0 and failures > 0) return "failed";
+    if (failures > 0 or cmd.retrieval.truncated) return "partial";
+    return "unverified";
+}
+
+fn writeSourceReviewRequest(w: *std.Io.Writer, cmd: SourceReviewCmd) !void {
+    var o = try jsonw.Obj.init(w);
+    try writeBinding(&o, cmd.binding);
+    try o.str("SourceID", cmd.source_id);
+    try o.str("BatchID", cmd.batch_id);
+    try o.str("Key", cmd.key);
+    try o.str("ResultKind", cmd.result_kind);
+    var r = try o.obj("Retrieval");
+    try cmd.retrieval.write(&r);
+    try r.end();
+    var items = try o.arr("Items");
+    for (cmd.items) |item| {
+        var it = try items.obj();
+        try it.str("external_id", item.external_id);
+        try it.str("external_revision", item.external_revision);
+        try it.str("original_text", item.original_text);
+        if (item.source_uri) |v| try it.str("source_uri", v);
+        if (item.occurred_at) |v| try it.str("occurred_at", v);
+        if (item.provider_metadata_summary) |v| try it.str("provider_metadata_summary", v);
+        try it.end();
+    }
+    try items.end();
+    try o.end();
+}
+
+pub const SourceReviewResult = struct {
+    review: domain.SourceReview,
+    captures: []const domain.Capture,
+};
+
+fn writeSourceReviewResult(w: *std.Io.Writer, r: SourceReviewResult) !void {
+    var o = try jsonw.Obj.init(w);
+    // The CLI result is a Go map: sorted keys, and a nil slice becomes [].
+    var arr = try o.arr("captures");
+    for (r.captures) |cap| {
+        var item = try arr.obj();
+        try cap.write(&item);
+        try item.end();
+    }
+    try arr.end();
+    var rev = try o.obj("review");
+    try r.review.write(&rev);
+    try rev.end();
+    try o.end();
+}
+
+pub fn recordSourceReview(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd, now: Timestamp) !SourceReviewResult {
+    try validateSourceReviewCmd(cmd);
+    var req = std.Io.Writer.Allocating.init(a);
+    try writeSourceReviewRequest(&req.writer, cmd);
+    const hash = sha256hex(req.written());
+    const now_s = try fmtTs(a, now);
+    const date = try idDate(a, now);
+
+    try s.begin();
+    errdefer s.rollback();
+    if (try lookupIdemStmt(s, a, "source_review", cmd.key, &hash)) |stored| {
+        const parsed = std.json.parseFromSlice(std.json.Value, a, stored, .{}) catch
+            return errors.invalid("stored source review result is not valid JSON", .{});
+        const out = try sourceReviewResultFromValue(a, parsed.value);
+        try s.commit();
+        return out;
+    }
+    const src = try loadSourceScope(s, a, cmd.binding, cmd.source_id);
+    const coverage = sourceReviewCoverage(cmd);
+
+    const failure_count = if (cmd.retrieval.failures) |f| f.len else 0;
+    var cursor = src.cursor;
+    if (std.mem.eql(u8, cmd.result_kind, "observed") and cmd.retrieval.complete_window and
+        !cmd.retrieval.truncated and failure_count == 0)
+    {
+        cursor = try dup(a, cmd.retrieval.cursor);
+    }
+    var last_success = src.last_success_at;
+    if (std.mem.eql(u8, cmd.result_kind, "observed") and failure_count == 0) {
+        last_success = try dup(a, now_s);
+    }
+
+    var rid = std.Io.Writer.Allocating.init(a);
+    try rid.writer.print("SR-{s}-{d:0>3}", .{ date, @as(u32, @intCast(try store.nextDailySeq(s.db, "source_reviews", try std.fmt.allocPrint(a, "SR-{s}-", .{date})))) });
+
+    var review = domain.SourceReview{
+        .id = rid.written(),
+        .source_id = src.id,
+        .batch_id = try dup(a, cmd.batch_id),
+        .result_kind = try dup(a, cmd.result_kind),
+        .coverage = coverage,
+        .retrieval = cmd.retrieval,
+        .capture_ids = null,
+        .created_at = now_s,
+    };
+
+    var ins = try s.db.prepare(
+        "INSERT INTO source_reviews (id, source_id, batch_id, idempotency_key, request_hash, result_kind, coverage_state, retrieval_json, created_at) " ++
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    defer ins.finalize();
+    try ins.bindText(1, review.id);
+    try ins.bindText(2, review.source_id);
+    try ins.bindText(3, review.batch_id);
+    try ins.bindText(4, cmd.key);
+    try ins.bindText(5, &hash);
+    try ins.bindText(6, review.result_kind);
+    try ins.bindText(7, review.coverage);
+    var rj = std.Io.Writer.Allocating.init(a);
+    var rjo = try jsonw.Obj.init(&rj.writer);
+    try cmd.retrieval.write(&rjo);
+    try rjo.end();
+    try ins.bindText(8, rj.written());
+    try ins.bindText(9, review.created_at);
+    _ = ins.step() catch |e| {
+        if (e == error.Ztd) {
+            const msg = errors.detail();
+            if (std.mem.indexOf(u8, msg, "source_reviews.batch_id") != null) {
+                return errors.fail(.conflict, "batch {s} was already recorded for source {s}", .{ cmd.batch_id, cmd.source_id });
+            }
+            if (std.mem.indexOf(u8, msg, "source_reviews.idempotency_key") != null) {
+                return errors.fail(.conflict, "idempotency key was already recorded for source {s}", .{ cmd.source_id });
+            }
+        }
+        return e;
+    };
+
+    var captures: std.ArrayList(domain.Capture) = .empty;
+    var capture_ids: std.ArrayList([]const u8) = .empty;
+    for (cmd.items) |item| {
+        if (item.external_id.len > 0) {
+            var q = try s.db.prepare(
+                "SELECT 1 FROM captures WHERE scope_id = ? AND source_id = ? AND external_id = ? AND external_revision = ?",
+            );
+            defer q.finalize();
+            try q.bindText(1, src.scope);
+            try q.bindText(2, src.id);
+            try q.bindText(3, item.external_id);
+            try q.bindText(4, item.external_revision);
+            if (try q.step()) continue;
+        }
+        const cap_id = try std.fmt.allocPrint(a, "C-{s}-{d:0>3}", .{
+            date, @as(u32, @intCast(try store.nextDailySeq(s.db, "captures", try std.fmt.allocPrint(a, "C-{s}-", .{date})))),
+        });
+        const content_hash = sha256hex(item.original_text);
+        const ext_id: ?[]const u8 = if (item.external_id.len > 0) item.external_id else null;
+        const ext_rev: ?[]const u8 = if (item.external_id.len > 0) item.external_revision else null;
+        const cap = domain.Capture{
+            .id = cap_id,
+            .scope = src.scope,
+            .source_id = src.id,
+            .external_id = ext_id,
+            .external_revision = ext_rev,
+            .original_text = item.original_text,
+            .content_hash = &content_hash,
+            .source_uri = item.source_uri,
+            .occurred_at = item.occurred_at,
+            .captured_at = now_s,
+            .state = "pending",
+            .outcome = null,
+            .review_after = null,
+            .revision = 1,
+        };
+        var ci = try s.db.prepare(
+            "INSERT INTO captures (id, scope_id, source_id, external_id, external_revision, original_text, content_hash, source_uri, occurred_at, captured_at, processing_state, processing_outcome, review_after, revision) " ++
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, 1)",
+        );
+        defer ci.finalize();
+        try ci.bindText(1, cap.id);
+        try ci.bindText(2, cap.scope);
+        try ci.bindText(3, cap.source_id);
+        try ci.bindOptText(4, cap.external_id);
+        try ci.bindOptText(5, cap.external_revision);
+        try ci.bindText(6, cap.original_text);
+        try ci.bindText(7, cap.content_hash);
+        try ci.bindOptText(8, cap.source_uri);
+        try ci.bindOptText(9, cap.occurred_at);
+        try ci.bindText(10, cap.captured_at);
+        _ = try ci.step();
+        try insertHistory(s, a, "capture", cap.id, "captured", cap.scope, "", 1, .{ .capture = cap }, now);
+        try captures.append(a, cap);
+        try capture_ids.append(a, cap.id);
+    }
+    if (capture_ids.items.len > 0) review.capture_ids = capture_ids.items;
+
+    var up = try s.db.prepare(
+        "UPDATE sources SET coverage_state = ?, last_attempt_at = ?, last_success_at = ?, cursor = ?, updated_at = ? WHERE id = ?",
+    );
+    defer up.finalize();
+    try up.bindText(1, coverage);
+    try up.bindText(2, now_s);
+    try up.bindOptText(3, last_success);
+    try up.bindText(4, cursor);
+    try up.bindText(5, now_s);
+    try up.bindText(6, src.id);
+    _ = try up.step();
+
+    try insertHistory(s, a, "source_review", review.id, "recorded", src.scope, "", 1, .{ .source_review = review }, now);
+    const out = SourceReviewResult{ .review = review, .captures = captures.items };
+    try writeIdem(s, a, "source_review", cmd.key, &hash, .{ .source_review_result = out }, now);
+    try s.commit();
+    return out;
+}
+
+fn sourceReviewResultFromValue(a: std.mem.Allocator, v: std.json.Value) !SourceReviewResult {
+    const rev_value = jsonw.field(v, "review") orelse return errors.invalid("stored source review is missing review", .{});
+    const review = domain.SourceReview{
+        .id = try dup(a, jsonw.strField(rev_value, "id") orelse ""),
+        .source_id = try dup(a, jsonw.strField(rev_value, "source_id") orelse ""),
+        .batch_id = try dup(a, jsonw.strField(rev_value, "batch_id") orelse ""),
+        .result_kind = try dup(a, jsonw.strField(rev_value, "result_kind") orelse ""),
+        .coverage = try dup(a, jsonw.strField(rev_value, "coverage") orelse ""),
+        .retrieval = .{},
+        .capture_ids = null,
+        .created_at = try dup(a, jsonw.strField(rev_value, "created_at") orelse ""),
+    };
+    return .{ .review = review, .captures = &.{} };
 }
