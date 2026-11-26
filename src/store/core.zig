@@ -3689,3 +3689,109 @@ pub fn getProject(s: *Store, a: std.mem.Allocator, b: domain.Binding, id: []cons
     if (!try q.step()) return errors.fail(.not_found, "project {s} not found", .{id});
     return try scanProjectRow(a, q);
 }
+
+/// Synchronizes a user-owned source configuration: inserts new sources and
+/// updates changed ones, keeping coverage, cursor and auth state.
+pub fn applySources(s: *Store, a: std.mem.Allocator, cmds: []const SourceCmd, now: Timestamp) ![]const domain.Source {
+    if (cmds.len == 0) return errors.invalid("source configuration is empty", .{});
+    if (cmds.len > 200) return errors.invalid("source configuration exceeds 200 entries", .{});
+    for (cmds, 0..) |cmd, i| {
+        try validateSourceCmd(cmd);
+        for (cmds[0..i]) |prev| {
+            if (std.mem.eql(u8, prev.id, cmd.id)) return errors.invalid("duplicate source id {s}", .{cmd.id});
+        }
+    }
+    const now_s = try fmtTs(a, now);
+    try s.begin();
+    errdefer s.rollback();
+    var out: std.ArrayList(domain.Source) = .empty;
+    for (cmds) |cmd| {
+        try requireScopeDeclared(s, cmd.scope);
+        if (try loadSourceAny(s, a, cmd.id)) |existing| {
+            if (!std.mem.eql(u8, existing.scope, cmd.scope)) {
+                return errors.fail(.conflict, "source id {s} is already registered; choose another id", .{cmd.id});
+            }
+            if (sameSourceConfig(existing, cmd)) {
+                try out.append(a, existing);
+                continue;
+            }
+            var upd = try s.db.prepare(
+                "UPDATE sources SET name = ?, kind = ?, connector = ?, provider = ?, connection_ref = ?, " ++
+                    "non_secret_query = ?, cadence = ?, updated_at = ? WHERE id = ?",
+            );
+            defer upd.finalize();
+            try upd.bindText(1, cmd.name);
+            try upd.bindText(2, cmd.kind);
+            try upd.bindText(3, cmd.connector);
+            try upd.bindText(4, cmd.provider);
+            try upd.bindText(5, cmd.connection_ref);
+            try upd.bindText(6, cmd.non_secret_query);
+            try upd.bindText(7, cmd.cadence);
+            try upd.bindText(8, now_s);
+            try upd.bindText(9, cmd.id);
+            _ = try upd.step();
+            const updated = domain.Source{
+                .id = existing.id,
+                .name = try dup(a, cmd.name),
+                .scope = existing.scope,
+                .kind = try dup(a, cmd.kind),
+                .connector = try dup(a, cmd.connector),
+                .provider = try dup(a, cmd.provider),
+                .connection_ref = try dup(a, cmd.connection_ref),
+                .non_secret_query = try dup(a, cmd.non_secret_query),
+                .cadence = try dup(a, cmd.cadence),
+                .auth_state = existing.auth_state,
+                .coverage = existing.coverage,
+                .cursor = existing.cursor,
+                .last_attempt_at = existing.last_attempt_at,
+                .last_success_at = existing.last_success_at,
+                .created_at = existing.created_at,
+                .updated_at = now_s,
+            };
+            try insertHistory(s, a, "source", updated.id, "updated", updated.scope, "", 1, .{ .source = updated }, now);
+            try out.append(a, updated);
+            continue;
+        }
+        try refuseReusedSourceId(s, cmd.id);
+        const src = domain.Source{
+            .id = try dup(a, cmd.id),
+            .name = try dup(a, cmd.name),
+            .scope = try dup(a, cmd.scope),
+            .kind = try dup(a, cmd.kind),
+            .connector = try dup(a, cmd.connector),
+            .provider = try dup(a, cmd.provider),
+            .connection_ref = try dup(a, cmd.connection_ref),
+            .non_secret_query = try dup(a, cmd.non_secret_query),
+            .cadence = try dup(a, cmd.cadence),
+            .auth_state = "unknown",
+            .coverage = "unknown",
+            .cursor = "",
+            .created_at = now_s,
+            .updated_at = now_s,
+        };
+        var ins = try s.db.prepare(
+            "INSERT INTO sources (id, name, scope_id, kind, connector, provider, connection_ref, non_secret_query, cadence, " ++
+                "auth_state, coverage_state, cursor, last_attempt_at, last_success_at, created_at, updated_at) " ++
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', NULL, NULL, ?, ?)",
+        );
+        defer ins.finalize();
+        try ins.bindText(1, src.id);
+        try ins.bindText(2, src.name);
+        try ins.bindText(3, src.scope);
+        try ins.bindText(4, src.kind);
+        try ins.bindText(5, src.connector);
+        try ins.bindText(6, src.provider);
+        try ins.bindText(7, src.connection_ref);
+        try ins.bindText(8, src.non_secret_query);
+        try ins.bindText(9, src.cadence);
+        try ins.bindText(10, src.auth_state);
+        try ins.bindText(11, src.coverage);
+        try ins.bindText(12, src.created_at);
+        try ins.bindText(13, src.updated_at);
+        _ = try ins.step();
+        try insertHistory(s, a, "source", src.id, "created", src.scope, "", 1, .{ .source = src }, now);
+        try out.append(a, src);
+    }
+    try s.commit();
+    return out.items;
+}

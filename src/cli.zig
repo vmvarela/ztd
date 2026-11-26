@@ -26,6 +26,8 @@ pub const Cli = struct {
     db: []const u8 = "",
     actor: []const u8 = "",
     ztd_scopes: ?[]const u8 = null,
+    home: ?[]const u8 = null,
+    sources_path: ?[]const u8 = null,
 };
 
 fn envGet(init: std.process.Init, key: []const u8) ?[]const u8 {
@@ -154,6 +156,8 @@ pub fn run(init: std.process.Init, w: *Io.Writer, ew: *Io.Writer, args: []const 
         .err = ew,
         .actor = defaultActor(init),
         .ztd_scopes = envGet(init, "ZTD_SCOPES"),
+        .home = envGet(init, "HOME"),
+        .sources_path = envGet(init, "ZTD_SOURCES"),
     };
 
     var rest = std.ArrayList([]const u8).empty;
@@ -1565,7 +1569,7 @@ fn cmdSource(c: *Cli, args: []const []const u8) !void {
     if (std.mem.eql(u8, sub, "list")) return sourceList(c, rest);
     if (std.mem.eql(u8, sub, "review")) return sourceReview(c, rest);
     if (std.mem.eql(u8, sub, "delete")) return sourceDelete(c, rest);
-    if (std.mem.eql(u8, sub, "apply")) return errors.invalid("source apply is not ported yet", .{});
+    if (std.mem.eql(u8, sub, "apply")) return sourceApply(c, rest);
     return errors.invalid("usage: source add|apply|list|review|delete [flags]", .{});
 }
 
@@ -1610,9 +1614,7 @@ fn sourceList(c: *Cli, args: []const []const u8) !void {
     const b = domain.Binding{ .profile = "operator", .actor = c.actor, .scopes = scopes };
     const list = try core.listSources(&r.st, c.arena, b);
     var aw = Io.Writer.Allocating.init(c.arena);
-    if (list.len == 0) {
-        try aw.writer.writeAll("null");
-    } else {
+    {
         var arr = try jsonw.Arr.init(&aw.writer);
         for (list) |src| {
             var o = try arr.obj();
@@ -1866,4 +1868,77 @@ fn cmdProject(c: *Cli, args: []const []const u8) !void {
         return writeJson(c, "project show", out);
     }
     return errors.invalid(use_line, .{});
+}
+
+fn sourceApply(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{.{ .name = "file", .value = true }};
+    const p = try parseFlags(c.arena, args, &specs);
+    const path = blk: {
+        if (p.has("file")) break :blk p.get("file", "");
+        if (c.sources_path) |v| break :blk v;
+        break :blk try std.fmt.allocPrint(c.arena, "{s}/.ztd/sources.json", .{c.home orelse ""});
+    };
+    const raw = Io.Dir.cwd().readFileAlloc(c.io, path, c.arena, .limited(1 << 20)) catch |e|
+        return errors.fail(.io_error, "read source configuration: {s}", .{@errorName(e)});
+    const parsed = std.json.parseFromSlice(std.json.Value, c.arena, raw, .{}) catch
+        return errors.invalid("parse source configuration: invalid JSON", .{});
+    if (parsed.value != .object) return errors.invalid("parse source configuration: expected an object", .{});
+    const list_val = jsonw.field(parsed.value, "sources") orelse
+        return errors.invalid("parse source configuration: missing sources", .{});
+    if (list_val != .array) return errors.invalid("parse source configuration: sources must be an array", .{});
+    const entries = list_val.array.items;
+
+    var scopes: std.ArrayList([]const u8) = .empty;
+    for (entries) |e| {
+        const sc = jsonw.strField(e, "scope") orelse "";
+        if (sc.len == 0) continue;
+        var seen = false;
+        for (scopes.items) |s| {
+            if (std.mem.eql(u8, s, sc)) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) try scopes.append(c.arena, sc);
+    }
+
+    var r = try boundOperator(c, scopes.items);
+    defer r.st.close();
+    const declared = try core.listScopes(&r.st, c.arena);
+    for (scopes.items) |sc| {
+        var ok = false;
+        for (declared) |d| {
+            if (std.mem.eql(u8, d.id, sc)) {
+                ok = true;
+                break;
+            }
+        }
+        if (!ok) return errors.invalid("unknown scope reference {s}", .{sc});
+    }
+
+    var cmds: std.ArrayList(core.SourceCmd) = .empty;
+    for (entries) |e| {
+        try cmds.append(c.arena, .{
+            .binding = r.b,
+            .id = jsonw.strField(e, "id") orelse "",
+            .name = jsonw.strField(e, "name") orelse "",
+            .scope = jsonw.strField(e, "scope") orelse "",
+            .kind = jsonw.strField(e, "kind") orelse "",
+            .connector = jsonw.strField(e, "connector") orelse "",
+            .provider = jsonw.strField(e, "provider") orelse "",
+            .connection_ref = jsonw.strField(e, "connection_ref") orelse "",
+            .non_secret_query = jsonw.strField(e, "non_secret_query") orelse "",
+            .cadence = jsonw.strField(e, "cadence") orelse "",
+        });
+    }
+    const out = try core.applySources(&r.st, c.arena, cmds.items, nowSeconds(c));
+    var aw = Io.Writer.Allocating.init(c.arena);
+    var arr = try jsonw.Arr.init(&aw.writer);
+    for (out) |src| {
+        var o = try arr.obj();
+        try src.write(&o);
+        try o.end();
+    }
+    try arr.end();
+    try succeedData(c, "source apply", aw.written());
 }
