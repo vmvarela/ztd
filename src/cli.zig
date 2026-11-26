@@ -247,6 +247,9 @@ fn dispatch(c: *Cli, init: std.process.Init, command: []const u8, args: []const 
     }
     if (std.mem.eql(u8, command, "check")) return cmdCheck(c, args);
     if (std.mem.eql(u8, command, "doc")) return cmdDoc(c, args);
+    if (std.mem.eql(u8, command, "scope")) return cmdScope(c, args);
+    if (std.mem.eql(u8, command, "context")) return cmdContext(c, args);
+    if (std.mem.eql(u8, command, "project")) return cmdProject(c, args);
     if (std.mem.eql(u8, command, "source")) return cmdSource(c, args);
     return errors.invalid("unknown command \"{s}\" (see usage)", .{command});
 }
@@ -1722,4 +1725,145 @@ fn sourceDelete(c: *Cli, args: []const []const u8) !void {
     const b = domain.Binding{ .profile = "operator", .actor = c.actor, .scopes = scopes };
     const src = try core.deleteSource(&r.st, c.arena, b, id, "", nowSeconds(c));
     try writeJson(c, "source delete", src);
+}
+
+// ------------------------------------------------- scopes, contexts, projects
+
+const SplitArgs = struct { flags: []const []const u8, positional: []const []const u8 };
+
+fn splitFlagArgs(c: *Cli, args: []const []const u8, value_flags: []const []const u8) !SplitArgs {
+    var flags: std.ArrayList([]const u8) = .empty;
+    var pos: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (!(arg.len > 0 and arg[0] == '-') or std.mem.eql(u8, arg, "-")) {
+            try pos.append(c.arena, arg);
+            continue;
+        }
+        try flags.append(c.arena, arg);
+        if (std.mem.indexOfScalar(u8, arg, '=') != null) continue;
+        for (value_flags) |vf| {
+            if (std.mem.eql(u8, vf, arg) and i + 1 < args.len) {
+                i += 1;
+                try flags.append(c.arena, args[i]);
+                break;
+            }
+        }
+    }
+    return .{ .flags = flags.items, .positional = pos.items };
+}
+
+fn writeArray(c: *Cli, command: []const u8, items: anytype) !void {
+    var aw = Io.Writer.Allocating.init(c.arena);
+    var arr = try jsonw.Arr.init(&aw.writer);
+    for (items) |item| {
+        var o = try arr.obj();
+        try item.write(&o);
+        try o.end();
+    }
+    try arr.end();
+    try succeedData(c, command, aw.written());
+}
+
+fn cmdScope(c: *Cli, args: []const []const u8) !void {
+    const use_line = "usage: scope add --id ID --kind KIND [--name NAME] | scope list";
+    if (args.len == 0) return errors.invalid(use_line, .{});
+    const sub = args[0];
+    if (std.mem.eql(u8, sub, "add")) {
+        const specs = [_]Spec{
+            .{ .name = "id", .value = true },
+            .{ .name = "kind", .value = true },
+            .{ .name = "name", .value = true },
+        };
+        const p = try parseFlags(c.arena, args[1..], &specs);
+        if (p.positional.len != 0) return errors.invalid("usage: scope add --id ID --kind KIND [--name NAME]", .{});
+        var st = try openStore(c);
+        defer st.close();
+        const out = try core.addScope(&st, c.arena, .{
+            .id = p.get("id", ""),
+            .kind = p.get("kind", ""),
+            .name = p.get("name", ""),
+        }, nowSeconds(c));
+        return writeJson(c, "scope add", out);
+    }
+    if (std.mem.eql(u8, sub, "list")) {
+        const p = try parseFlags(c.arena, args[1..], &[_]Spec{});
+        if (p.positional.len != 0) return errors.invalid("usage: scope list", .{});
+        var st = try openStore(c);
+        defer st.close();
+        const out = try core.listScopes(&st, c.arena);
+        return writeArray(c, "scope list", out);
+    }
+    return errors.invalid(use_line, .{});
+}
+
+fn cmdContext(c: *Cli, args: []const []const u8) !void {
+    const use_line = "usage: context add NAME [--scope S] | context list [--scope S]";
+    if (args.len == 0) return errors.invalid(use_line, .{});
+    const sub = args[0];
+    const split = try splitFlagArgs(c, args[1..], &.{"--scope"});
+    const specs = [_]Spec{.{ .name = "scope", .value = true }};
+    const p = try parseFlags(c.arena, split.flags, &specs);
+    if (std.mem.eql(u8, sub, "add")) {
+        if (split.positional.len != 1) return errors.invalid("usage: context add NAME [--scope S]", .{});
+        var r = try bound(c, oneScope(p.get("scope", "")));
+        defer r.st.close();
+        const out = try core.addContext(&r.st, c.arena, .{ .binding = r.b, .name = split.positional[0] }, nowSeconds(c));
+        return writeJson(c, "context add", out);
+    }
+    if (std.mem.eql(u8, sub, "list")) {
+        if (split.positional.len != 0) return errors.invalid("usage: context list [--scope S]", .{});
+        var r = try bound(c, oneScope(p.get("scope", "")));
+        defer r.st.close();
+        const out = try core.listContexts(&r.st, c.arena, r.b);
+        return writeArray(c, "context list", out);
+    }
+    return errors.invalid(use_line, .{});
+}
+
+fn cmdProject(c: *Cli, args: []const []const u8) !void {
+    const use_line = "usage: project add ID [flags] | project list [--scope S] | project show ID [--scope S]";
+    if (args.len == 0) return errors.invalid(use_line, .{});
+    const sub = args[0];
+    const split = try splitFlagArgs(c, args[1..], &.{ "--scope", "--desired-outcome", "--status", "--repo-url", "--clone-path" });
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true },
+        .{ .name = "desired-outcome", .value = true },
+        .{ .name = "status", .value = true },
+        .{ .name = "repo-url", .value = true },
+        .{ .name = "clone-path", .value = true },
+    };
+    const p = try parseFlags(c.arena, split.flags, &specs);
+    if (std.mem.eql(u8, sub, "add")) {
+        if (split.positional.len != 1) {
+            return errors.invalid("usage: project add ID [--scope S] [--desired-outcome TEXT] [--status ...] [--repo-url URL] [--clone-path PATH]", .{});
+        }
+        var r = try bound(c, oneScope(p.get("scope", "")));
+        defer r.st.close();
+        const out = try core.addProject(&r.st, c.arena, .{
+            .binding = r.b,
+            .id = split.positional[0],
+            .desired_outcome = p.get("desired-outcome", ""),
+            .status = p.get("status", "active"),
+            .repo_url = p.get("repo-url", ""),
+            .clone_path = p.get("clone-path", ""),
+        }, nowSeconds(c));
+        return writeJson(c, "project add", out);
+    }
+    if (std.mem.eql(u8, sub, "list")) {
+        if (split.positional.len != 0) return errors.invalid("usage: project list [--scope S]", .{});
+        var r = try bound(c, oneScope(p.get("scope", "")));
+        defer r.st.close();
+        const out = try core.listProjects(&r.st, c.arena, r.b);
+        return writeArray(c, "project list", out);
+    }
+    if (std.mem.eql(u8, sub, "show")) {
+        if (split.positional.len != 1) return errors.invalid("usage: project show ID [--scope S]", .{});
+        var r = try bound(c, oneScope(p.get("scope", "")));
+        defer r.st.close();
+        const out = try core.getProject(&r.st, c.arena, r.b, split.positional[0]);
+        return writeJson(c, "project show", out);
+    }
+    return errors.invalid(use_line, .{});
 }

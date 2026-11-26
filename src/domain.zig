@@ -221,6 +221,42 @@ pub const Document = struct {
     }
 };
 
+pub const Context = struct {
+    id: []const u8,
+    scope: []const u8,
+    name: []const u8,
+    revision: i64,
+
+    pub fn write(self: Context, o: *json.Obj) !void {
+        try o.str("id", self.id);
+        try o.str("scope", self.scope);
+        try o.str("name", self.name);
+        try o.int("revision", self.revision);
+    }
+};
+
+pub const Project = struct {
+    id: []const u8,
+    scope: []const u8,
+    area_id: ?[]const u8,
+    desired_outcome: []const u8,
+    status: []const u8,
+    repo_url: []const u8,
+    clone_path: []const u8,
+    revision: i64,
+
+    pub fn write(self: Project, o: *json.Obj) !void {
+        try o.str("id", self.id);
+        try o.str("scope", self.scope);
+        if (self.area_id) |area| try o.str("area_id", area);
+        try o.str("desired_outcome", self.desired_outcome);
+        try o.str("status", self.status);
+        if (self.repo_url.len > 0) try o.str("repo_url", self.repo_url);
+        if (self.clone_path.len > 0) try o.str("clone_path", self.clone_path);
+        try o.int("revision", self.revision);
+    }
+};
+
 pub const Goal = struct {
     id: []const u8,
     profile_id: []const u8,

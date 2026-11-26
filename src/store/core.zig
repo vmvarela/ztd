@@ -465,6 +465,8 @@ pub const HistoryPayload = union(enum) {
     source_review: domain.SourceReview,
     process_result: ProcessResult,
     source_review_result: SourceReviewResult,
+    context: domain.Context,
+    project: domain.Project,
 };
 
 fn writeHistoryPayload(w: *std.Io.Writer, payload: HistoryPayload) !void {
@@ -500,6 +502,8 @@ fn writeHistoryPayload(w: *std.Io.Writer, payload: HistoryPayload) !void {
         .checkpoint => |cp| try cp.write(&o),
         .review => |r| try r.write(&o),
         .document => |d| try d.write(&o),
+        .context => |ctx| try ctx.write(&o),
+        .project => |p| try p.write(&o),
         .source => |src| try src.write(&o),
         .source_review => |rev| try rev.write(&o),
         // Stored result: Go struct order (review, then captures).
@@ -3418,4 +3422,270 @@ fn sourceReviewResultFromValue(a: std.mem.Allocator, v: std.json.Value) !SourceR
         .created_at = try dup(a, jsonw.strField(rev_value, "created_at") orelse ""),
     };
     return .{ .review = review, .captures = &.{} };
+}
+
+// --------------------------------------------------- scopes, contexts, projects
+
+pub fn addScope(s: *Store, a: std.mem.Allocator, cmd: ScopeCmd, now: Timestamp) !domain.Scope {
+    if (!configIdValid(cmd.id)) return errors.invalid("scope id must start with a lowercase letter and use only a-z 0-9 _ : . - (max 64 chars, no , | or =)", .{});
+    var kind_ok = false;
+    for ([_][]const u8{ "personal", "work", "client", "opensource" }) |k| {
+        if (std.mem.eql(u8, k, cmd.kind)) kind_ok = true;
+    }
+    if (!kind_ok) return errors.invalid("unknown scope kind \"{s}\" (personal, work, client or opensource)", .{cmd.kind});
+    const name = if (cmd.name.len > 0) cmd.name else cmd.id;
+    var existing: ?domain.Scope = null;
+    {
+        var q = try s.db.prepare("SELECT id, name, kind, created_at FROM scopes WHERE id = ?");
+        defer q.finalize();
+        try q.bindText(1, cmd.id);
+        if (try q.step()) existing = .{
+            .id = try dup(a, q.text(0)),
+            .name = try dup(a, q.text(1)),
+            .kind = try dup(a, q.text(2)),
+            .created_at = try reformat(a, q.text(3), "scopes.created_at"),
+        };
+    }
+    if (existing) |e| {
+        if (!std.mem.eql(u8, e.kind, cmd.kind) or !std.mem.eql(u8, e.name, name)) {
+            return errors.fail(.conflict, "scope {s} already exists with a different kind or name", .{cmd.id});
+        }
+        return e;
+    }
+    const out: domain.Scope = .{
+        .id = try dup(a, cmd.id),
+        .name = try dup(a, name),
+        .kind = try dup(a, cmd.kind),
+        .created_at = try fmtTs(a, now),
+    };
+    var ins = try s.db.prepare("INSERT INTO scopes (id, name, kind, created_at) VALUES (?, ?, ?, ?)");
+    defer ins.finalize();
+    try ins.bindText(1, out.id);
+    try ins.bindText(2, out.name);
+    try ins.bindText(3, out.kind);
+    try ins.bindText(4, out.created_at);
+    _ = try ins.step();
+    return out;
+}
+
+pub const ContextCmd = struct { binding: domain.Binding, name: []const u8 };
+
+pub fn addContext(s: *Store, a: std.mem.Allocator, cmd: ContextCmd, now: Timestamp) !domain.Context {
+    try validateBinding(cmd.binding);
+    if (trimmed(cmd.name).len == 0) return errors.invalid("context name is required", .{});
+    const scope = cmd.binding.scopes[0];
+    try s.begin();
+    errdefer s.rollback();
+    try requireScopeDeclared(s, scope);
+    {
+        var q = try s.db.prepare("SELECT id, scope_id, name, revision FROM contexts WHERE scope_id = ? AND name = ?");
+        defer q.finalize();
+        try q.bindText(1, scope);
+        try q.bindText(2, cmd.name);
+        if (try q.step()) {
+            const existing: domain.Context = .{
+                .id = try dup(a, q.text(0)),
+                .scope = try dup(a, q.text(1)),
+                .name = try dup(a, q.text(2)),
+                .revision = q.int(3),
+            };
+            try s.commit();
+            return existing;
+        }
+    }
+    const out: domain.Context = .{
+        .id = try std.fmt.allocPrint(a, "ctx:{s}:{s}", .{ scope, cmd.name }),
+        .scope = try dup(a, scope),
+        .name = try dup(a, cmd.name),
+        .revision = 1,
+    };
+    var ins = try s.db.prepare("INSERT INTO contexts (id, scope_id, name, revision) VALUES (?, ?, ?, 1)");
+    defer ins.finalize();
+    try ins.bindText(1, out.id);
+    try ins.bindText(2, out.scope);
+    try ins.bindText(3, out.name);
+    _ = try ins.step();
+    try insertHistory(s, a, "context", out.id, "created", scope, "", 1, .{ .context = out }, now);
+    try s.commit();
+    return out;
+}
+
+pub fn listContexts(s: *Store, a: std.mem.Allocator, b: domain.Binding) ![]const domain.Context {
+    try validateBinding(b);
+    const sql = try std.fmt.allocPrint(a, "SELECT id, scope_id, name, revision FROM contexts WHERE scope_id IN ({s}) ORDER BY name", .{try scopeFilter(a, b.scopes.len)});
+    var q = try s.db.prepare(sql);
+    defer q.finalize();
+    _ = try scopeArgs(q, 1, b);
+    var out: std.ArrayList(domain.Context) = .empty;
+    while (try q.step()) {
+        try out.append(a, .{
+            .id = try dup(a, q.text(0)),
+            .scope = try dup(a, q.text(1)),
+            .name = try dup(a, q.text(2)),
+            .revision = q.int(3),
+        });
+    }
+    return out.items;
+}
+
+pub const ProjectCmd = struct {
+    binding: domain.Binding,
+    id: []const u8,
+    desired_outcome: []const u8 = "",
+    status: []const u8 = "active",
+    repo_url: []const u8 = "",
+    clone_path: []const u8 = "",
+};
+
+fn clonePathValid(p: []const u8) bool {
+    if (!(p.len > 0 and (p[0] == '/' or p[0] == '\\')) and
+        !(p.len >= 3 and p[1] == ':' and (p[2] == '/' or p[2] == '\\') and std.ascii.isAlphabetic(p[0])))
+    {
+        return false;
+    }
+    var it = std.mem.tokenizeAny(u8, p, "/\\");
+    while (it.next()) |seg| if (std.mem.eql(u8, seg, "..")) return false;
+    return true;
+}
+
+fn repoUrlHasCredentials(u: []const u8) bool {
+    const start = std.mem.indexOf(u8, u, "://") orelse return false;
+    var i = start + 3;
+    while (i < u.len) : (i += 1) {
+        const ch = u[i];
+        if (ch == '/' or ch == '?' or ch == '#') return false;
+        if (ch == '@') return true;
+    }
+    return false;
+}
+
+fn repoUrlScp(u: []const u8) bool {
+    const at = std.mem.indexOfScalar(u8, u, '@') orelse return false;
+    if (at == 0) return false;
+    for (u[0..at]) |ch| {
+        if (!(std.ascii.isAlphanumeric(ch) or ch == '.' or ch == '_' or ch == '-')) return false;
+    }
+    const rest = u[at + 1 ..];
+    const colon = std.mem.indexOfScalar(u8, rest, ':') orelse return false;
+    if (colon == 0) return false;
+    for (rest[0..colon]) |ch| {
+        if (!(std.ascii.isAlphanumeric(ch) or ch == '.' or ch == '-')) return false;
+    }
+    const path = rest[colon + 1 ..];
+    if (path.len == 0) return false;
+    for (path) |ch| if (std.ascii.isWhitespace(ch)) return false;
+    return true;
+}
+
+fn repoUrlValid(u: []const u8) bool {
+    if (repoUrlScp(u)) return true;
+    return std.mem.indexOf(u8, u, "://") != null and !repoUrlHasCredentials(u);
+}
+
+fn validateProjectCmd(cmd: ProjectCmd) !void {
+    try validateBinding(cmd.binding);
+    if (trimmed(cmd.id).len == 0) return errors.invalid("project id is required", .{});
+    var ok = false;
+    for ([_][]const u8{ "active", "paused", "completed", "cancelled" }) |st| {
+        if (std.mem.eql(u8, st, cmd.status)) ok = true;
+    }
+    if (!ok) return errors.invalid("project status must be active, paused, completed or cancelled, got \"{s}\"", .{cmd.status});
+    if (cmd.clone_path.len > 0 and !clonePathValid(cmd.clone_path)) {
+        return errors.invalid("clone path must be an absolute path without .. segments, got \"{s}\"", .{cmd.clone_path});
+    }
+    if (cmd.repo_url.len > 0 and !repoUrlValid(cmd.repo_url)) {
+        if (repoUrlHasCredentials(cmd.repo_url)) return errors.invalid("repository url must not contain credentials", .{});
+        return errors.invalid("repository url must include a scheme or use user@host:path, got \"{s}\"", .{cmd.repo_url});
+    }
+}
+
+fn sameProjectConfig(p: domain.Project, cmd: ProjectCmd, scope: []const u8) bool {
+    return std.mem.eql(u8, p.scope, scope) and
+        std.mem.eql(u8, p.desired_outcome, cmd.desired_outcome) and
+        std.mem.eql(u8, p.status, cmd.status) and
+        std.mem.eql(u8, p.repo_url, cmd.repo_url) and
+        std.mem.eql(u8, p.clone_path, cmd.clone_path);
+}
+
+fn scanProjectRow(a: std.mem.Allocator, q: sqlite.Statement) !domain.Project {
+    return .{
+        .id = try dup(a, q.text(0)),
+        .scope = try dup(a, q.text(1)),
+        .area_id = try dupOpt(a, q.optText(2)),
+        .desired_outcome = try dup(a, q.text(3)),
+        .status = try dup(a, q.text(4)),
+        .repo_url = try dup(a, q.text(5)),
+        .clone_path = try dup(a, q.text(6)),
+        .revision = q.int(7),
+    };
+}
+
+const project_columns = "id, scope_id, area_id, desired_outcome, status, repo_url, clone_path, revision";
+
+pub fn addProject(s: *Store, a: std.mem.Allocator, cmd: ProjectCmd, now: Timestamp) !domain.Project {
+    try validateProjectCmd(cmd);
+    const scope = cmd.binding.scopes[0];
+    try s.begin();
+    errdefer s.rollback();
+    try requireScopeDeclared(s, scope);
+    {
+        var q = try s.db.prepare("SELECT " ++ project_columns ++ " FROM projects WHERE id = ?");
+        defer q.finalize();
+        try q.bindText(1, cmd.id);
+        if (try q.step()) {
+            const existing = try scanProjectRow(a, q);
+            if (!sameProjectConfig(existing, cmd, scope)) {
+                return errors.fail(.conflict, "project {s} already exists with a different configuration", .{cmd.id});
+            }
+            try s.commit();
+            return existing;
+        }
+    }
+    const out: domain.Project = .{
+        .id = try dup(a, cmd.id),
+        .scope = try dup(a, scope),
+        .area_id = null,
+        .desired_outcome = try dup(a, cmd.desired_outcome),
+        .status = try dup(a, cmd.status),
+        .repo_url = try dup(a, cmd.repo_url),
+        .clone_path = try dup(a, cmd.clone_path),
+        .revision = 1,
+    };
+    var ins = try s.db.prepare(
+        "INSERT INTO projects (id, scope_id, area_id, desired_outcome, status, repo_url, clone_path, revision) " ++
+            "VALUES (?, ?, NULL, ?, ?, ?, ?, 1)",
+    );
+    defer ins.finalize();
+    try ins.bindText(1, out.id);
+    try ins.bindText(2, out.scope);
+    try ins.bindText(3, out.desired_outcome);
+    try ins.bindText(4, out.status);
+    try ins.bindText(5, out.repo_url);
+    try ins.bindText(6, out.clone_path);
+    _ = try ins.step();
+    try insertHistory(s, a, "project", out.id, "created", scope, "", 1, .{ .project = out }, now);
+    try s.commit();
+    return out;
+}
+
+pub fn listProjects(s: *Store, a: std.mem.Allocator, b: domain.Binding) ![]const domain.Project {
+    try validateBinding(b);
+    const sql = try std.fmt.allocPrint(a, "SELECT " ++ project_columns ++ " FROM projects WHERE scope_id IN ({s}) ORDER BY id", .{try scopeFilter(a, b.scopes.len)});
+    var q = try s.db.prepare(sql);
+    defer q.finalize();
+    _ = try scopeArgs(q, 1, b);
+    var out: std.ArrayList(domain.Project) = .empty;
+    while (try q.step()) try out.append(a, try scanProjectRow(a, q));
+    return out.items;
+}
+
+pub fn getProject(s: *Store, a: std.mem.Allocator, b: domain.Binding, id: []const u8) !domain.Project {
+    try validateBinding(b);
+    const sql = try std.fmt.allocPrint(a, "SELECT " ++ project_columns ++ " FROM projects WHERE id = ? AND scope_id IN ({s})", .{try scopeFilter(a, b.scopes.len)});
+    var q = try s.db.prepare(sql);
+    defer q.finalize();
+    try q.bindText(1, id);
+    _ = try scopeArgs(q, 2, b);
+    if (!try q.step()) return errors.fail(.not_found, "project {s} not found", .{id});
+    return try scanProjectRow(a, q);
 }
