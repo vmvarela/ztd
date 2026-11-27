@@ -5,8 +5,10 @@ commitments, plans and continuity in one SQLite database so an agent can resume
 work without replaying a conversation, and it keeps the Zen To Done method
 visible instead of turning into a generic issue tracker.
 
-This repository is the Go implementation: a clean rewrite of the earlier Zig
-tool. The Markdown store remains supported only as a read-only import source.
+This repository is the Zig implementation (Zig 0.17): a clean rewrite of the
+earlier Go tool, which stays available at the `v2-go-final` tag. The Markdown
+store remains supported only as a read-only import source, through that tagged
+binary (`ztd migrate import|verify|documents`).
 
 ## Attribution
 
@@ -21,6 +23,15 @@ plans, focus sessions, reviews, routines, source registration with reported
 batch ingestion, legacy import, export/restore, snapshots, integrity checks,
 knowledge search, lint and archive over the document layer, a local stdio MCP
 server and a `status` report of the environment.
+
+The v3 rewrite adds provenance: every capture records the source review that
+produced it, `trace` walks the links between a review, its captures, the work
+items and plans they feed, the focus sessions and checkpoints that followed and
+the reviews and knowledge that closed the loop. Decisions are knowledge records
+with rationale, options, evidence and a human approver; `review --derive`
+computes the period's metrics instead of asking for them; `learn propose` turns
+a review into draft knowledge cards. Reads carry byte caps so an agent session
+stays cheap, and a `directory` source can be scanned as observed input.
 
 Not built yet: provider connectors, calendars, external focus blocks and the
 LLM Wiki. Nothing contacts a network service; those are separate stages, not

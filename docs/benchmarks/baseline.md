@@ -61,3 +61,23 @@ From the spec §10, applied at Stage 5 unless noted:
 Binary, RSS and startup are already inside target at Stage 0; they are not a
 license to skip the optimization pass, because the 19 tools and the full store
 will grow them.
+
+## Stage 5 results (Zig v3, after the port)
+
+Measured with `scripts/benchmark.sh` on `defd5dd` + the usage/README commits:
+
+| metric | Go v2 | Zig v3 | target | verdict |
+|---|---|---|---|---|
+| binary | 12,853,666 B | 2,936,192 B | ≤ 3 MB | inside (4.4× smaller) |
+| startup (mean) | 4.21 ms | 1.07 ms | ≤ 8 ms | inside |
+| RSS max | 13,910,016 B | 2,080,768 B | ≤ 12 MB | inside (6.7× smaller) |
+| `tools/list` | 31,306 B | 32,035 B | no growth | **+729 B (2.3%) waiver** |
+| production LOC | 14,026 | 11,389 (all Zig, tests included) | store+app ≤ 9k, total ≤ 12k | inside total |
+
+The `tools/list` growth is the schema of `trace`, the single tool the spec
+allows the rewrite to add; everything else is folded into existing tools. The
+19 registered tools (18 with `delete_source`, 17 by default) otherwise carry v2's
+payload unchanged, so hosts see one new tool and no reshaped schemas.
+
+LOC is counted with `wc -l src/*.zig src/store/*.zig`, which includes the
+in-file unit tests; the production share is lower.
