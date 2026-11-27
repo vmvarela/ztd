@@ -13,8 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"reflect"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -89,7 +89,7 @@ type observation struct {
 }
 
 type session struct {
-	Steps []observation                 `json:"steps"`
+	Steps []observation                  `json:"steps"`
 	DB    map[string][]map[string]string `json:"db,omitempty"`
 }
 
