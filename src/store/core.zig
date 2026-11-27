@@ -2292,7 +2292,7 @@ fn reviewFromValue(a: std.mem.Allocator, v: std.json.Value) !domain.Review {
     };
 }
 
-pub fn recordReview(s: *Store, a: std.mem.Allocator, cmd: ReviewCmd, now: Timestamp) !domain.Review {
+pub fn recordReview(s: *Store, a: std.mem.Allocator, cmd: ReviewCmd, derive: bool, calendar_assert: []const u8, now: Timestamp) !domain.Review {
     try validateBinding(cmd.binding);
     try requireKey(cmd.key);
     const kind_ok = std.mem.eql(u8, cmd.kind, "daily") or std.mem.eql(u8, cmd.kind, "weekly") or
@@ -2326,6 +2326,9 @@ pub fn recordReview(s: *Store, a: std.mem.Allocator, cmd: ReviewCmd, now: Timest
         if (!found) return errors.fail(.scope_denied, "scope {s} is not part of profile {s}", .{ sc, cmd.binding.profile });
     }
     const state: []const u8 = if (cmd.complete) "complete" else "partial";
+    // Derived metrics are computed, never claimed: SQL over the period's plans,
+    // work items, captures, focus sessions and routines.
+    const metrics_json: []const u8 = if (derive) try computeMetrics(s, a, cmd.binding, cmd.kind, cmd.period) else "{}";
     var existing_id: ?[]const u8 = null;
     var rev: i64 = 1;
     var created_at: []const u8 = now_s;
@@ -2350,19 +2353,20 @@ pub fn recordReview(s: *Store, a: std.mem.Allocator, cmd: ReviewCmd, now: Timest
     };
     if (existing_id != null) {
         var upd = try s.db.prepare(
-            "UPDATE reviews SET outcomes = ?, coverage = ?, completion_state = ?, revision = ? WHERE id = ?",
+            "UPDATE reviews SET outcomes = ?, coverage = ?, completion_state = ?, revision = ?, metrics_json = ? WHERE id = ?",
         );
         defer upd.finalize();
         try upd.bindText(1, cmd.outcomes);
         try upd.bindText(2, cmd.coverage);
         try upd.bindText(3, state);
         try upd.bindInt(4, rev);
-        try upd.bindText(5, id);
+        try upd.bindText(5, metrics_json);
+        try upd.bindText(6, id);
         _ = try upd.step();
     } else {
         var ins = try s.db.prepare(
-            "INSERT INTO reviews (id, profile_id, kind, period, outcomes, coverage, completion_state, created_at, revision) " ++
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO reviews (id, profile_id, kind, period, outcomes, coverage, completion_state, created_at, revision, metrics_json) " ++
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         defer ins.finalize();
         try ins.bindText(1, id);
@@ -2374,6 +2378,7 @@ pub fn recordReview(s: *Store, a: std.mem.Allocator, cmd: ReviewCmd, now: Timest
         try ins.bindText(7, state);
         try ins.bindText(8, now_s);
         try ins.bindInt(9, rev);
+        try ins.bindText(10, metrics_json);
         _ = try ins.step();
     }
     const review = domain.Review{
@@ -2385,7 +2390,12 @@ pub fn recordReview(s: *Store, a: std.mem.Allocator, cmd: ReviewCmd, now: Timest
         .coverage = cmd.coverage,
         .completion_state = state,
         .created_at = created_at,
+        .metrics_json = metrics_json,
     };
+    if (derive) try linkMeasured(s, a, cmd.binding, cmd.kind, cmd.period, id, now);
+    if (calendar_assert.len > 0 and std.mem.eql(u8, cmd.kind, "daily")) {
+        try recordCalendarAssertion(s, a, cmd.binding, cmd.period, calendar_assert, now);
+    }
     try insertHistory(s, a, "review", id, "recorded", "", cmd.binding.profile, rev, .{ .review = review }, now);
     try writeIdem(s, a, "review", cmd.key, &hash, .{ .review = review }, now);
     try s.commit();
@@ -4649,4 +4659,293 @@ pub fn searchDocumentsBy(
         });
     }
     return out.items;
+}
+
+// ------------------------------------------------------- derived metrics
+
+fn metricsFromValue(a: std.mem.Allocator, v: std.json.Value) ![]const u8 {
+    const mv = jsonw.field(v, "metrics") orelse return "";
+    var aw = std.Io.Writer.Allocating.init(a);
+    try jsonw.writeValue(a, &aw.writer, mv);
+    return aw.written();
+}
+
+const PeriodRange = struct {
+    start: Timestamp,
+    end: Timestamp,
+    start_date: []const u8,
+    end_date: []const u8,
+};
+
+fn periodRange(a: std.mem.Allocator, kind: []const u8, period: []const u8) !PeriodRange {
+    var start_days: i64 = 0;
+    var end_days: i64 = 0;
+    if (std.mem.eql(u8, kind, "daily")) {
+        const ts = timeutil.parseDate(period) catch
+            return errors.invalid("period must be YYYY-MM-DD for daily reviews", .{});
+        start_days = @divFloor(ts, 86400);
+        end_days = start_days + 1;
+    } else if (std.mem.eql(u8, kind, "weekly")) {
+        if (period.len != 8 or period[4] != '-' or period[5] != 'W') {
+            return errors.invalid("period must be YYYY-Www for weekly reviews", .{});
+        }
+        const year = std.fmt.parseInt(i32, period[0..4], 10) catch
+            return errors.invalid("period must be YYYY-Www for weekly reviews", .{});
+        const week = std.fmt.parseInt(i64, period[6..8], 10) catch
+            return errors.invalid("period must be YYYY-Www for weekly reviews", .{});
+        // ISO week 1 is the week holding January 4th.
+        const jan4 = timeutil.daysFromCivil(year, 1, 4);
+        const monday_offset = @mod(jan4 + 3, 7);
+        start_days = jan4 - monday_offset + (week - 1) * 7;
+        end_days = start_days + 7;
+    } else if (std.mem.eql(u8, kind, "monthly")) {
+        if (period.len != 7 or period[4] != '-') return errors.invalid("period must be YYYY-MM for monthly reviews", .{});
+        const year = std.fmt.parseInt(i32, period[0..4], 10) catch
+            return errors.invalid("period must be YYYY-MM for monthly reviews", .{});
+        const month = std.fmt.parseInt(u8, period[5..7], 10) catch
+            return errors.invalid("period must be YYYY-MM for monthly reviews", .{});
+        start_days = timeutil.daysFromCivil(year, month, 1);
+        end_days = if (month == 12)
+            timeutil.daysFromCivil(year + 1, 1, 1)
+        else
+            timeutil.daysFromCivil(year, month + 1, 1);
+    } else if (std.mem.eql(u8, kind, "yearly")) {
+        const year = std.fmt.parseInt(i32, std.mem.trim(u8, period, " \t\n\r"), 10) catch
+            return errors.invalid("period must be YYYY for yearly reviews", .{});
+        start_days = timeutil.daysFromCivil(year, 1, 1);
+        end_days = timeutil.daysFromCivil(year + 1, 1, 1);
+    } else {
+        return errors.invalid("unknown review kind \"{s}\"", .{kind});
+    }
+    const start: Timestamp = start_days * 86400;
+    const end: Timestamp = end_days * 86400;
+    return .{
+        .start = start,
+        .end = end,
+        .start_date = try dateOf(a, start),
+        .end_date = try dateOf(a, end - 86400),
+    };
+}
+
+fn dateOf(a: std.mem.Allocator, ts: Timestamp) ![]const u8 {
+    var buf: [10]u8 = undefined;
+    return dup(a, timeutil.date(ts, &buf));
+}
+
+fn sumInt(stmt: sqlite.Statement, col: c_int) i64 {
+    return if (stmt.isNull(col)) 0 else stmt.int(col);
+}
+
+/// Computes `metrics_json` from the period's plans, work items, captures,
+/// focus sessions and routines. Keys are written alphabetically so the stored
+/// block has one stable shape.
+fn computeMetrics(s: *Store, a: std.mem.Allocator, b: domain.Binding, kind: []const u8, period: []const u8) ![]const u8 {
+    const range = try periodRange(a, kind, period);
+
+    var plan_items: i64 = 0;
+    var mit_planned: i64 = 0;
+    var completed_items: i64 = 0;
+    var mit_completed: i64 = 0;
+    {
+        var q = try s.db.prepare(
+            "SELECT COUNT(*), " ++
+                "COALESCE(SUM(CASE WHEN pi.role = 'mit' THEN 1 ELSE 0 END), 0), " ++
+                "COALESCE(SUM(CASE WHEN w.lifecycle = 'archived' AND w.closure_kind = 'completed' THEN 1 ELSE 0 END), 0), " ++
+                "COALESCE(SUM(CASE WHEN pi.role = 'mit' AND w.lifecycle = 'archived' AND w.closure_kind = 'completed' THEN 1 ELSE 0 END), 0) " ++
+                "FROM plan_items pi JOIN plans p ON p.id = pi.plan_id " ++
+                "JOIN work_items w ON w.id = pi.work_item_id " ++
+                "WHERE p.profile_id = ? AND p.kind = 'daily' AND p.period >= ? AND p.period <= ?",
+        );
+        defer q.finalize();
+        try q.bindText(1, b.profile);
+        try q.bindText(2, range.start_date);
+        try q.bindText(3, range.end_date);
+        if (try q.step()) {
+            plan_items = sumInt(q, 0);
+            mit_planned = sumInt(q, 1);
+            completed_items = sumInt(q, 2);
+            mit_completed = sumInt(q, 3);
+        }
+    }
+
+    var captures_received: i64 = 0;
+    var captures_processed: i64 = 0;
+    {
+        const scope_sql = try scopeFilter(a, b.scopes.len);
+        var sql_buf = std.Io.Writer.Allocating.init(a);
+        try sql_buf.writer.print(
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN processing_state IN ('processed','discarded') THEN 1 ELSE 0 END), 0) " ++
+                "FROM captures WHERE scope_id IN ({s}) AND captured_at >= ? AND captured_at < ?",
+            .{scope_sql},
+        );
+        var q = try s.db.prepare(sql_buf.written());
+        defer q.finalize();
+        const idx = try scopeArgs(q, 1, b);
+        try q.bindText(idx, try fmtTs(a, range.start));
+        try q.bindText(idx + 1, try fmtTs(a, range.end));
+        if (try q.step()) {
+            captures_received = sumInt(q, 0);
+            captures_processed = sumInt(q, 1);
+        }
+    }
+
+    var focus_sessions: i64 = 0;
+    var focus_minutes: i64 = 0;
+    {
+        var q = try s.db.prepare(
+            "SELECT started_at, ended_at FROM focus_sessions WHERE profile_id = ? AND started_at >= ? AND started_at < ?",
+        );
+        defer q.finalize();
+        try q.bindText(1, b.profile);
+        try q.bindText(2, try fmtTs(a, range.start));
+        try q.bindText(3, try fmtTs(a, range.end));
+        while (try q.step()) {
+            focus_sessions += 1;
+            if (q.optText(1)) |ended| {
+                const started_ts = timeutil.parseTime(q.text(0)) catch continue;
+                const ended_ts = timeutil.parseTime(ended) catch continue;
+                if (ended_ts > started_ts) focus_minutes += @divFloor(ended_ts - started_ts, 60);
+            }
+        }
+    }
+
+    var overdue_routines: i64 = 0;
+    {
+        const scope_sql = try scopeFilter(a, b.scopes.len);
+        var sql_buf = std.Io.Writer.Allocating.init(a);
+        try sql_buf.writer.print(
+            "SELECT cadence, last_completed_at FROM routines WHERE active = 1 AND scope_id IN ({s})",
+            .{scope_sql},
+        );
+        var q = try s.db.prepare(sql_buf.written());
+        defer q.finalize();
+        _ = try scopeArgs(q, 1, b);
+        while (try q.step()) {
+            const last: ?Timestamp = if (q.optText(1)) |text| timeutil.parseTime(text) catch null else null;
+            if (try routineDue(q.text(0), last, range.end - 86400)) overdue_routines += 1;
+        }
+    }
+
+    var aw = std.Io.Writer.Allocating.init(a);
+    var o = try jsonw.Obj.init(&aw.writer);
+    try o.int("captures_processed", captures_processed);
+    try o.int("captures_received", captures_received);
+    try o.int("completed_items", completed_items);
+    try o.int("focus_minutes", focus_minutes);
+    try o.int("focus_sessions", focus_sessions);
+    try o.int("mit_completed", mit_completed);
+    try o.int("mit_planned", mit_planned);
+    try o.int("overdue_routines", overdue_routines);
+    try o.int("plan_items", plan_items);
+    try o.end();
+    return aw.written();
+}
+
+fn linkMeasured(s: *Store, a: std.mem.Allocator, b: domain.Binding, kind: []const u8, period: []const u8, review_id: []const u8, now: Timestamp) !void {
+    const scope = b.scopes[0];
+    {
+        var q = try s.db.prepare("SELECT id FROM goals WHERE profile_id = ? AND kind = 'primary' AND status = 'active' LIMIT 1");
+        defer q.finalize();
+        try q.bindText(1, b.profile);
+        if (try q.step()) try insertLink(s, a, "review", review_id, "goal", q.text(0), "measured", scope, now);
+    }
+    const range = try periodRange(a, kind, period);
+    var q = try s.db.prepare(
+        "SELECT DISTINCT w.project_id, w.project_id FROM plan_items pi JOIN plans p ON p.id = pi.plan_id " ++
+            "JOIN work_items w ON w.id = pi.work_item_id " ++
+            "WHERE p.profile_id = ? AND p.kind = 'daily' AND p.period >= ? AND p.period <= ? AND w.project_id IS NOT NULL",
+    );
+    defer q.finalize();
+    try q.bindText(1, b.profile);
+    try q.bindText(2, range.start_date);
+    try q.bindText(3, range.end_date);
+    while (try q.step()) {
+        try insertLink(s, a, "review", review_id, "project", q.text(0), "measured", scope, now);
+    }
+}
+
+fn recordCalendarAssertion(s: *Store, a: std.mem.Allocator, b: domain.Binding, local_date: []const u8, statement: []const u8, now: Timestamp) !void {
+    if (timeutil.parseDate(local_date)) |_| {} else |_| {
+        return errors.invalid("calendar assertion requires a daily review period", .{});
+    }
+    const id = try std.fmt.allocPrint(a, "cra:{s}:{s}:{s}", .{ b.profile, b.actor, local_date });
+    var q = try s.db.prepare(
+        "INSERT INTO calendar_review_assertions (id, profile_id, actor_id, local_date, statement, created_at) " ++
+            "VALUES (?, ?, ?, ?, ?, ?) " ++
+            "ON CONFLICT(profile_id, actor_id, local_date) DO UPDATE SET statement = excluded.statement",
+    );
+    defer q.finalize();
+    try q.bindText(1, id);
+    try q.bindText(2, b.profile);
+    try q.bindText(3, b.actor);
+    try q.bindText(4, local_date);
+    try q.bindText(5, statement);
+    try q.bindText(6, try fmtTs(a, now));
+    _ = try q.step();
+}
+
+pub const ReviewMetrics = struct {
+    id: []const u8,
+    kind: []const u8,
+    period: []const u8,
+    metrics_json: []const u8,
+};
+
+pub fn reviewShow(s: *Store, a: std.mem.Allocator, b: domain.Binding, kind: []const u8, period: []const u8) !ReviewMetrics {
+    try validateBinding(b);
+    const kind_ok = std.mem.eql(u8, kind, "daily") or std.mem.eql(u8, kind, "weekly") or
+        std.mem.eql(u8, kind, "monthly") or std.mem.eql(u8, kind, "yearly");
+    if (!kind_ok) return errors.invalid("unknown review kind \"{s}\"", .{kind});
+    if (period.len == 0) return errors.invalid("period is required", .{});
+    var q = try s.db.prepare(
+        "SELECT id, metrics_json FROM reviews WHERE profile_id = ? AND kind = ? AND period = ?",
+    );
+    defer q.finalize();
+    try q.bindText(1, b.profile);
+    try q.bindText(2, kind);
+    try q.bindText(3, period);
+    if (!try q.step()) return errors.fail(.not_found, "review {s} {s} not found", .{ kind, period });
+    return .{
+        .id = try dup(a, q.text(0)),
+        .kind = kind,
+        .period = period,
+        .metrics_json = try dup(a, q.text(1)),
+    };
+}
+
+pub const OverrideRow = struct {
+    id: []const u8,
+    actor: []const u8,
+    rule: []const u8,
+    local_date: []const u8,
+    reason: []const u8,
+    created_at: []const u8,
+};
+
+pub fn addOverride(s: *Store, a: std.mem.Allocator, b: domain.Binding, rule: []const u8, date_text: []const u8, reason: []const u8, actor_in: []const u8, now: Timestamp) !OverrideRow {
+    try validateBinding(b);
+    if (!std.mem.eql(u8, rule, "mit") and !std.mem.eql(u8, rule, "focus")) {
+        return errors.invalid("override rule must be mit or focus", .{});
+    }
+    if (timeutil.parseDate(date_text)) |_| {} else |_| {
+        return errors.invalid("date must be YYYY-MM-DD", .{});
+    }
+    if (trimmed(reason).len == 0) return errors.invalid("reason is required", .{});
+    const actor = if (actor_in.len > 0) actor_in else b.actor;
+    const id = try std.fmt.allocPrint(a, "override:{s}:{s}:{s}", .{ actor, rule, date_text });
+    const created_at = try fmtTs(a, now);
+    var q = try s.db.prepare(
+        "INSERT OR REPLACE INTO daily_limit_overrides (id, actor_id, local_date, rule, reason, created_by, created_at) " ++
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+    );
+    defer q.finalize();
+    try q.bindText(1, id);
+    try q.bindText(2, actor);
+    try q.bindText(3, date_text);
+    try q.bindText(4, rule);
+    try q.bindText(5, reason);
+    try q.bindText(6, b.actor);
+    try q.bindText(7, created_at);
+    _ = try q.step();
+    return .{ .id = id, .actor = actor, .rule = rule, .local_date = date_text, .reason = reason, .created_at = created_at };
 }

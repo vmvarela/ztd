@@ -251,6 +251,7 @@ fn dispatch(c: *Cli, init: std.process.Init, command: []const u8, args: []const 
         return cmdRoutines(c, forwarded);
     }
     if (std.mem.eql(u8, command, "check")) return cmdCheck(c, args);
+    if (std.mem.eql(u8, command, "override")) return cmdOverride(c, args);
     if (std.mem.eql(u8, command, "doc")) return cmdDoc(c, args);
     if (std.mem.eql(u8, command, "trace")) return cmdTrace(c, args);
     if (std.mem.eql(u8, command, "mcp")) return cmdMcp(c, args);
@@ -1162,6 +1163,7 @@ fn cmdFocus(c: *Cli, args: []const []const u8) !void {
 
 fn cmdReview(c: *Cli, args: []const []const u8) !void {
     if (args.len == 0) return errors.invalid("usage: review daily|weekly|monthly|yearly [flags]", .{});
+    if (std.mem.eql(u8, args[0], "show")) return reviewShowCmd(c, args[1..]);
     const kind = args[0];
     const kind_ok = std.mem.eql(u8, kind, "daily") or std.mem.eql(u8, kind, "weekly") or
         std.mem.eql(u8, kind, "monthly") or std.mem.eql(u8, kind, "yearly");
@@ -1172,6 +1174,8 @@ fn cmdReview(c: *Cli, args: []const []const u8) !void {
         .{ .name = "period", .value = true },
         .{ .name = "outcomes", .value = true },
         .{ .name = "coverage", .value = true },
+        .{ .name = "derive", .value = false },
+        .{ .name = "calendar-assert", .value = true },
     };
     const parsed = try parseFlags(c.arena, args[1..], &specs);
     const key = if (parsed.get("key", "").len > 0) parsed.get("key", "") else try newKey(c, "review");
@@ -1185,8 +1189,60 @@ fn cmdReview(c: *Cli, args: []const []const u8) !void {
         .outcomes = parsed.get("outcomes", ""),
         .coverage = parsed.get("coverage", ""),
         .complete = true,
-    }, nowSeconds(c));
+    }, parsed.has("derive"), parsed.get("calendar-assert", ""), nowSeconds(c));
     return writeJson(c, "review", review);
+}
+
+fn reviewShowCmd(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true },
+        .{ .name = "kind", .value = true },
+        .{ .name = "period", .value = true },
+    };
+    const parsed = try parseFlags(c.arena, args, &specs);
+    if (parsed.positional.len != 0) return errors.invalid("usage: review show --period P [--kind K] [--scope X]", .{});
+    const period = parsed.get("period", "");
+    if (period.len == 0) return errors.invalid("--period is required", .{});
+    const kind = if (parsed.get("kind", "").len > 0) parsed.get("kind", "") else "daily";
+    var opened = try bound(c, oneScope(parsed.get("scope", "")));
+    defer opened.st.close();
+    const m = try core.reviewShow(&opened.st, c.arena, opened.b, kind, period);
+    var aw = Io.Writer.Allocating.init(c.arena);
+    var o = try jsonw.Obj.init(&aw.writer);
+    try o.str("id", m.id);
+    try o.str("kind", m.kind);
+    try o.str("period", m.period);
+    try o.raw("metrics", m.metrics_json);
+    try o.end();
+    return succeedData(c, "review show", aw.written());
+}
+
+fn cmdOverride(c: *Cli, args: []const []const u8) !void {
+    if (args.len == 0 or !std.mem.eql(u8, args[0], "add")) {
+        return errors.invalid("usage: override add --rule mit|focus --date YYYY-MM-DD --reason R [--actor A]", .{});
+    }
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true },
+        .{ .name = "rule", .value = true },
+        .{ .name = "date", .value = true },
+        .{ .name = "reason", .value = true },
+        .{ .name = "actor", .value = true },
+    };
+    const parsed = try parseFlags(c.arena, args[1..], &specs);
+    if (parsed.positional.len != 0) return errors.invalid("usage: override add --rule mit|focus --date YYYY-MM-DD --reason R [--actor A]", .{});
+    var opened = try bound(c, oneScope(parsed.get("scope", "")));
+    defer opened.st.close();
+    const row = try core.addOverride(&opened.st, c.arena, opened.b, parsed.get("rule", ""), parsed.get("date", ""), parsed.get("reason", ""), parsed.get("actor", ""), nowSeconds(c));
+    var aw = Io.Writer.Allocating.init(c.arena);
+    var o = try jsonw.Obj.init(&aw.writer);
+    try o.str("actor", row.actor);
+    try o.str("created_at", row.created_at);
+    try o.str("id", row.id);
+    try o.str("local_date", row.local_date);
+    try o.str("reason", row.reason);
+    try o.str("rule", row.rule);
+    try o.end();
+    return succeedData(c, "override add", aw.written());
 }
 
 fn cmdRoutines(c: *Cli, args: []const []const u8) !void {

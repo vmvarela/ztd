@@ -526,7 +526,7 @@ fn toolReview(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.js
         .outcomes = try core.dup(a, argStr(args, "outcomes")),
         .coverage = try core.dup(a, argStr(args, "coverage")),
         .complete = argOptBool(args, "complete") orelse true,
-    }, now);
+    }, argOptBool(args, "derive") orelse false, "", now);
     var aw = Io.Writer.Allocating.init(a);
     var o = try jsonw.Obj.init(&aw.writer);
     try r.write(&o);

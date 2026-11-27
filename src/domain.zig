@@ -439,6 +439,7 @@ pub const Review = struct {
     coverage: []const u8,
     completion_state: []const u8,
     created_at: []const u8,
+    metrics_json: []const u8 = "",
 
     pub fn write(self: Review, o: *json.Obj) !void {
         try o.str("id", self.id);
@@ -449,6 +450,11 @@ pub const Review = struct {
         try o.str("coverage", self.coverage);
         try o.str("completion_state", self.completion_state);
         try o.str("created_at", self.created_at);
+        // Derived metrics are new in v3: omit them when empty so v2 documents
+        // keep their exact JSON shape.
+        if (self.metrics_json.len > 0 and !std.mem.eql(u8, self.metrics_json, "{}")) {
+            try o.raw("metrics", self.metrics_json);
+        }
     }
 };
 
