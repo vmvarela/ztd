@@ -47,9 +47,15 @@ pub fn main(init: std.process.Init) !void {
     if (bin.len == 0) bin = "./zig-out/bin/ztd";
 
     // The suites scrub the child environment; the temp base comes from the
-    // parent TMPDIR (macOS) with a pre-approved fallback elsewhere.
-    const tmp_base = init.environ_map.get("TMPDIR") orelse
-        "/private/var/folders/lf/z5n_9g7j64v8d7gk_lqzd8k40000gn/T/opencode";
+    // parent TMPDIR, which CI leaves unset on Linux. Canonicalize it: /tmp is
+    // a read-only symlink on macOS and createDir does not follow one.
+    const env_tmp = init.environ_map.get("TMPDIR") orelse "";
+    const raw_tmp = if (env_tmp.len > 0) env_tmp else "/tmp";
+    const tmp_base = std.Io.Dir.cwd().realPathFileAlloc(
+        init.io,
+        raw_tmp,
+        init.arena.allocator(),
+    ) catch raw_tmp;
     const path = init.environ_map.get("PATH") orelse "/usr/bin:/bin";
 
     var passed: usize = 0;
