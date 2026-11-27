@@ -1,5 +1,8 @@
 # Dependency spikes (Pass 0)
 
+> Historical record from the Go era. The shipped product is Zig; these probes
+> documented the Go/MCP runtime that the rewrite used as its parity oracle.
+
 Run on 2026-11-19, macOS arm64, Go 1.27.4 (`/Users/victor/go/1.27.3/bin/go1.27.4`).
 
 ## Go

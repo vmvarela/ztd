@@ -41,12 +41,12 @@ Every release ships `sha256sums.txt` covering all binaries below.
 
 ## From source
 
-Requires Go 1.27.4. No runtime dependencies; release binaries are built with
-`CGO_ENABLED=0`.
+Requires Zig 0.17.0. No runtime dependencies; the SQLite amalgamation is
+vendored and compiled into the binary.
 
 ```bash
-go build -o ztd ./cmd/ztd
-install -m 0755 ztd ~/.local/bin/ztd
+zig build --release=fast
+install -m 0755 zig-out/bin/ztd ~/.local/bin/ztd
 ```
 
 ## Packages, npm and the man page

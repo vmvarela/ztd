@@ -11,8 +11,8 @@ unbound scope override and no provider tool.
 ## Start it
 
 ```sh
-go build -o ./ztd ./cmd/ztd
-./ztd mcp
+zig build --release=fast
+./zig-out/bin/ztd mcp
 ```
 
 The server reads the same database as the CLI: `--db`, `ZTD_DB` or
@@ -255,8 +255,7 @@ connector tools later does not change the contract above.
 ## Verify
 
 ```sh
-go test ./internal/mcpserver
-go test ./test/integration -run MCP -count=1
+ZTD_BIN=./zig-out/bin/ztd go test ./test/integration -run MCP -count=1
 ```
 
 The integration test starts the real binary over stdio, runs the capture to

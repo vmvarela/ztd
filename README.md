@@ -173,6 +173,7 @@ Run `./ztd <command> -h` for flags.
 
 ## Documentation
 
+- [Product specification](docs/spec.md)
 - [Architecture](docs/architecture.md)
 - [Using ZTD](docs/ztd.md)
 - [MCP](docs/mcp.md)
@@ -184,16 +185,16 @@ Run `./ztd <command> -h` for flags.
 ## Checks
 
 ```sh
-gofmt -l .
-go vet ./...
-go test ./...
-go test -race ./...
-go test ./test/integration -count=1
+zig fmt --check src build.zig
+zig build test
+zig build --release=fast
+ZTD_BIN=./zig-out/bin/ztd go test ./test/corpus -count=1
+go vet ./test/...
 go mod verify
-go build -o ./ztd ./cmd/ztd
 ```
 
-`scripts/check.sh` runs the same list.
+`scripts/check.sh` runs the same list. Go is only the conformance client: the
+corpus and integration suites drive the real binary as a subprocess.
 
 ## License
 

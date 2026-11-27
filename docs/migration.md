@@ -15,6 +15,10 @@ never runs a dual-write period.
 5. Export the legacy agent-continuity store as JSON v2 if you want assignments,
    checkpoints, operations and knowledge.
 
+The importer ships in the frozen Go build tagged `v2-go-final`; the Zig binary
+does not link a Markdown parser. Build it once with `git switch v2-go-final`
+there, or use the `v0.3.0` release binary.
+
 The new database lives at `~/.ztd/ztd.db` by default. The legacy Markdown
 files in that root are never read by the new binary; the import source is the
 verified copy you made above.

@@ -1,1000 +1,472 @@
-# ZTD v2 System Specification
+# ZTD v3 Product Specification — Zig, lean core, token-efficient loop
 
-**Date:** 2026-11-19
-**Status:** Proposed for implementation planning after independent review; review corrections applied. No implementation has been approved or performed.
-**Authors:** Product requirements supplied by Victor; architecture and verification contract drafted with OpenCode.
-**Implementation language:** Go 1.27.4, confirmed against https://go.dev/dl/?mode=json on 2026-11-19. The development machine currently has Go 1.27.3 and must receive the patch update before implementation.
-**Target product:** A clean Go implementation of ZTD. The existing Zig Markdown product remains operational until an explicit migration decision.
+**Date:** 2026-11-27
+**Status:** Implemented. Shipped as `ztd` 0.4.0; it supersedes the Go specification, which stays readable at the `v2-go-final` tag.
+**Implementation:** Zig 0.17.0, SQLite amalgamation vendored, no Zig package dependencies.
+**Supersedes decision:** v2 chose Go 1.27.4; v3 reimplements the product in Zig. The Go implementation was the parity oracle during the rewrite and is now frozen at `v2-go-final`; the Markdown store stays a read-only import source.
+**Language of this document:** English, matching the repository convention that product code, schemas, commands and technical docs are English while captured user content keeps its original language.
 
-Here, **v2** means the new product generation. It is unrelated to the existing Markdown store's `"format": 2`.
-
-All product code, names, commands, APIs, schemas, errors, technical documentation, fixtures, and example content are in English. Captured user content retains its original language. This document does not translate or modify user data.
+---
 
 ## 1. The big idea
 
-ZTD helps one person turn many competing inputs into a small set of deliberate commitments, then carry those commitments through focused work and regular review. The value is not a large task database. It is knowing what deserves attention now, what is still unprocessed, what can safely wait, and why a decision was made.
+ZTD turns many competing inputs into a small set of deliberate commitments, carries them through focused work, and closes the loop with review and learning. The value is not a task database; it is knowing what deserves attention now, what is unprocessed, what can wait, and **why** a decision was made.
 
-The product runs on one Mac and guides Zen To Done through an agent connected by a local MCP server. A CLI uses the same application core for automation, recovery, and structured inspection. Durable state lives in one local SQLite database. Markdown becomes an optional read-only export, never a second writable store.
+v3 adds one product-level requirement: the whole loop must be **cheap to run with an agent**. Every feature is judged by what it costs in tokens, bytes, memory and startup, not only by what it stores.
 
-The product deliberately excludes an agent runtime, a mobile service, live device synchronization, an MCP gateway, and an automatic calendar synchronizer. Those additions would hide the method behind infrastructure and would not improve the first working journey.
+The loop v3 must close:
 
-## 2. Product boundaries and success
+```
+Capture → Research → Decide → Act → Measure → Learn → Capture
+                 \        |        /
+                  Shared memory (one SQLite record, every stage linked)
+```
 
-### Confirmed decisions
+v2 implemented the six boxes. v3 implements the arrows: provenance, decisions, derived measurement and knowledge write-back, with a token budget on every read.
+
+## 2. Boundaries
+
+### Confirmed decisions (carried from v2 unless noted)
 
 | Area | Contract |
 | --- | --- |
-| Runtime | One Mac, one filesystem-local database, concurrent local CLI/MCP processes. |
-| Capture away from the Mac | Enter notes in an external source; ingest them during a later source review. No live mobile connection. |
-| Daily experience | Agent-led ZTD journeys; CLI as a reliable fallback. A TUI is optional and later. |
-| Agent autonomy | Capture and register freely; classify only without material ambiguity; proposals for priorities and commitments; confirmation for external writes. |
-| Initial input sources | Manual/local input, filesystem folders, GitHub, email, and Jira. |
-| Calendar providers | Office 365 for work and Google Calendar for personal events, through separate host-connected sources. |
-| Calendar authority | Read events and availability; link relevant work; create confirmed focus blocks only. Do not edit meetings. |
-| Trust separation | One database with mandatory logical scopes. This is not physical isolation. |
-| Backup | Consistent encrypted Restic backups after an operator chooses and approves a destination. Backup is not synchronization. |
-| Method | ZTD as a firm guide with visible exceptions and gradual habit adoption, not silent enforcement. |
-| Language | Go. MCP and SQLite must share the same application core; there is no line-by-line Zig translation. |
-| Retrieval | Structured links and FTS5 before LLM Wiki synthesis. `sqlite-vec` is explicitly deferred. |
+| Runtime | One Mac, one filesystem-local SQLite database, concurrent local CLI/MCP processes. |
+| Language | **Zig 0.17.0**, no GC, arena-per-command allocation, vendored SQLite C amalgamation. |
+| Connectors | **External to the product.** Host MCPs, host CLIs declared in `AGENTS.md`, or manual input. ZTD defines the ingestion contract, not provider code. The only built-in retrieval is an operator-approved local directory connector. |
+| Capture away from the Mac | External source; ingest during a later source review. No live mobile connection. |
+| Agent autonomy | Capture/register freely; classify only without material ambiguity; proposals for priorities; confirmation for external writes. |
+| Calendar | Read-only via host; no automatic synchronizer; confirmed focus blocks remain a later stage. |
+| Trust separation | One database, mandatory logical scopes. Not physical isolation. |
+| Backup | `ztd snapshot` to an operator-approved directory (iCloud-synced approved 2026-11-22). Restic optional. |
+| Method | ZTD as a firm guide with visible exceptions, not silent enforcement. |
+| Retrieval | Structured links + FTS5. No embeddings, no vector DB, no LLM Wiki in v3. |
+| Token policy | **First-class.** Compact responses by default, byte caps, metadata-first ingestion, SQL-derived measurement, index-then-card knowledge retrieval. |
+| Migration | **Big-bang.** Full Zig rewrite, then one cutover. Schema preserved through 0007; v3 migrations are forward-only. No dual-write. Golden corpus is the pre-cutover acceptance test, not an incremental gate. Verified snapshot before cutover; rollback = restore snapshot + reinstall Go. |
+| Knowledge store | **Consolidated into `documents`.** `knowledge_records` is dropped; its rows migrate into `documents` with a `record_kind` subtype. One prose+structured layer, linked by `links`. |
 
-### Success means
+### Non-goals
 
-- A user can capture once, process an item deliberately, choose one to three MITs and one open focus across every Profile used that day, and review incomplete coverage without data being hidden.
-- A new agent session can recover the selected objective, real result, evidence, uncertainty, and next action without the original conversation.
-- A failed input source never looks empty or fully reviewed. A calendar read only covers the calendars visible to its Profile: preparing a plan while other configured calendars exist requires a recorded human assertion that they were checked. No declaration is treated as provider evidence.
-- A scoped agent cannot read or mutate data outside its authorized scope.
-- Only a trusted host adapter can attest `observed` source coverage. Model-authored or narrated batches remain `reported` and unverified.
-- Every imported legacy item is imported or explicitly quarantined, with its original preserved. Cutover never depends on an unexplained difference.
-- Evaluation reports actual tokens, calls, latency, corrections, and successful completion. It does not infer tokens from byte counts or claim savings without controls.
+- Provider connectors inside ZTD (GitHub, Jira, email, calendar APIs). The host owns them.
+- An agent/LLM runtime inside ZTD. The host owns model execution.
+- Multi-user collaboration, live sync, mobile apps, remote API, MCP gateway.
+- Bidirectional task/event sync, automatic meeting management.
+- Vector databases, embeddings, ANN, `sqlite-vec`.
+- Direct Markdown editing or dual writes. Markdown is read-only import/export.
+- A universal connector framework or credential handling.
+- Automatic promotion of AI prose to verified knowledge.
 
-### Non-goals for this specification
+## 3. Token economy (new, normative)
 
-- Multi-user collaboration, conflict-free live synchronization, mobile apps, or a remote API.
-- A daemon required for ordinary use. Notifications and scheduled backups use host operating-system schedulers.
-- An agent/LLM runtime inside the ZTD process. The host owns model execution and external tool calls.
-- Bidirectional task/event synchronization or automatic meeting management.
-- Arbitrary MCP proxying, provider credential handling, or a universal connector framework.
-- Automatic semantic promotion of AI-generated prose to verified knowledge.
-- Vector databases, embeddings, ANN indexes, and `sqlite-vec` in the first releases.
-- Direct Markdown editing, dual writes between Markdown and SQLite, or SQL access exposed to the model.
+Token cost lives in three places: MCP tool schemas loaded per session, tool output volume, and repeated reads. ZTD controls the second and third; the host controls the first.
 
-## 3. Vocabulary
+### Rules
 
-These names eliminate the ambiguity between authorization, human context, and task state.
+1. **Push, not pull.** ZTD never asks the host to fetch every connector each turn. It reports what is due/unknown; the host schedules ingestion.
+2. **One batch, one call.** `source review` accepts a bounded batch and returns counts, a watermark and a bounded sample of IDs. No per-item round trips.
+3. **Metadata first.** Store external ID, revision, title/excerpt, URI, occurred-at, hash and a bounded provider summary. Full bodies stay at the origin and are fetched on demand.
+4. **Dedupe at the boundary.** External triple `(scope, source, external_id, external_revision)` and content hash skip duplicates before the model sees them.
+5. **Advisory watermark.** Reported batches expose `last_reported_cursor` / `last_reported_at` so the host can query "since last time". This is a hint, never coverage.
+6. **Decision packet, not dump.** `prepare --packet` returns goal, due items, ≤3 candidates and evidence references. Never the whole inbox or history.
+7. **Measure in SQL.** Counts and durations are computed in the database; the model interprets an aggregate, not a week of rows.
+8. **Index then card.** Knowledge is found via FTS/links; only the requested card is read. Verified state prevents re-derivation.
+9. **Byte caps are contracts.** Every compact response has a maximum serialized size, enforced by tests. `--full` is an explicit opt-in for humans/debugging.
+10. **No fan-out research agent.** A loop pass must not traverse all connected MCPs and dump them into context.
 
-| Term | Meaning |
+### Budgets (targets, verified by benchmark)
+
+| Response | Cap (serialized JSON) |
 | --- | --- |
-| **Scope** | An authorization and partition domain: `personal`, `opensource`, or a configured work/client scope. Ordinary records, including Sources, Captures, and WorkItems, belong to exactly one scope. |
-| **Profile** | A human-configured planning view over an explicit set of Scopes. The personal profile may aggregate `personal` and `opensource`; every work/client profile contains exactly one client Scope. Each Profile has one stable owner actor. |
-| **ScopeBinding** | The immutable Profile/Scope allowlist supplied by an operator or host when launching a CLI/MCP session. The model cannot broaden it through a tool argument. |
-| **Area** | An ongoing responsibility inside a scope, such as family, health, or personal administration. |
-| **Context** | Optional GTD execution context such as `@home`, `@computer`, or `@calls`. It is not an authorization boundary. |
-| **Capture** | An immutable original input plus provenance and a mutable, auditable processing state. It is not yet a commitment. |
-| **WorkItem** | A processed, actionable commitment with one stable identity. Its status changes; it is not copied between lists. |
-| **Project** | A multi-action desired outcome. It is not simply a folder or an Area. |
-| **Reference** | Non-actionable material retained for later lookup. |
-| **Goal / Subgoal** | A primary goal and a shorter-term contribution to it, linked to plans and reviews. |
-| **Source** | A configured input or calendar connection, its scope, non-secret configuration, and retrieval/coverage state. |
-| **Coverage** | What a retrieval or review actually examined, including failures, truncation, unparsed entries, and unexamined windows. |
-| **Evidence** | An identified result from a command, external provider, or user. An agent declaration alone is not execution evidence. |
+| `prepare --packet` | ≤ 1.5 KiB |
+| `source review` compact result | ≤ 1 KiB |
+| `trace ID` | ≤ 1 KiB |
+| `inbox next` | ≤ 1 KiB |
+| `review --derive` metrics block | ≤ 1 KiB |
+| `doc search` default page | ≤ 2 KiB |
 
-Scope selection follows this rule:
+**Truncation is normative, not best-effort.** A capped response that would exceed its cap truncates in a fixed order and adds `"truncated": true` and `"omitted": N`; it never emits invalid JSON or cuts mid-string. Per response:
 
-```text
-Trusted operator/host configuration
-  -> ScopeBinding for one session
-    -> every app query and mutation receives that binding
-      -> store constraints and queries enforce it again
+- `inbox next`: capture excerpt ≤280 chars; the full body is fetched by `show`/`read`, never inlined.
+- `prepare --packet`: ≤3 candidates, title ≤120 chars, IDs for evidence; no bodies. The **default `prepare` (v2 full brief) is intentionally uncapped** — it is the human/debug view; hosts opt into `--packet` for the compact decision view. The ≥30% journey goal assumes the host uses `--packet`.
+- `source review`: counts, watermark and at most 10 capture IDs plus a fetch hint, so a 500-item batch fits; `--full` returns the complete list.
+- `trace`: first hop from each endpoint, middle summarized as `"omitted": N`; labels are never shortened. Fan-out is bounded deterministically: neighbors ordered by `(relation, to_id)` and truncated in that order, so cap−1/cap+1 fixtures are stable.
+- `review --derive`: metrics only; narrative stays in the stored review, read explicitly.
+- `doc search`: up to 10 hits (v2 default), snippet ≤80 chars, reduced with `truncated`/`omitted` when the 2 KiB cap binds; the card body is fetched by `doc get`.
+
+Each cap has a boundary fixture at cap−1 and cap+1 bytes.
+
+Journey-level token reduction is measured against the Go baseline on the same fixtures. **Goal, not gate:** ≥30% fewer total tokens for the daily plan + process + review journey, with a written waiver if the host's own overhead makes it unattainable. The eval is a fixed script: same fixture DB, same host and model, same prompts, counting every request/response token and every tool call; the baseline run is recorded in Stage 0 and both runs are stored with the build. Language choice alone does not save tokens; the protocol does.
+
+## 4. Architecture in Zig
+
+### Modules
+
+```
+src/main.zig       entrypoint, arg dispatch, exit codes
+src/cli.zig        command table, flag parsing, JSON/text output
+src/domain.zig     entities and their JSON shapes
+src/store/core.zig use cases, validation, SQL, history, idempotency
+src/store/store.zig SQLite binding, migrations, transactions, ID sequences
+src/sqlite.zig     C wrapper over the vendored amalgamation
+src/mcp.zig        JSON-RPC 2.0 stdio server, tool/prompt registry
+src/docs.zig       document link graph and lint
+src/install.zig    embedded asset bundles and the no-clobber publish
+src/trace logic    provenance read model (in store/core.zig)
+src/metrics logic  SQL-derived review measurement (in store/core.zig)
+src/timeutil.zig   local dates, timezones, ISO weeks, cadence math
+src/errors.zig     error families and the CLI envelope
+src/json.zig       Go-compatible JSON writer and readers
 ```
 
-A `.ztd.json` or current Git repository may supply a routing hint, never authorization. Only an operator can define a Profile. A personal Profile may be explicitly authorized for `personal` and `opensource`; a work Profile is limited to its configured client and cannot include personal or another client's data. There is no unrestricted cross-client search. A Profile grants visibility to its members; it does not merge their records into one Scope.
+Dependency direction: `main → cli → store/core → domain`, `store/core → store/store → sqlite`. There is no interface layer: the CLI and the MCP server call the same functions, and validation lives with the use case that owns it. The Markdown importer is not part of this binary; it runs from the `v2-go-final` Go build.
 
-The ZTD limits are personal, not additive across Profiles. For each actor and local date, all open daily Plans together may commit one to three MITs and at most one FocusSession may be open, regardless of how many Profiles the actor uses. A primary Goal remains one per Profile because personal and client objectives are distinct planning views. Exception reasons are explicit, recorded, and never silently applied. Enforcing the daily total reads only the actor's aggregate plan/focus metadata through a trusted application check; it does not expose another Scope's task content.
+### Build and dependencies
 
-**Implementation note (2026-11-22, ztd-go).** The implementation keeps one internal profile row for planning (`personal`, created by `init` over the declared scopes) and enforces this section through the binding rather than through one profile row per Profile: with no explicit scope a command binds the profile's scopes minus `client:*` and `work`, so a personal view never returns client work, while a client scope requires an explicit selection — `--scope client:<name>`, the host-level `ZTD_SCOPES` list, or a `.ztd.json` hint that resolves to a scope the profile covers — in that precedence order, and no model argument can widen it. The rules above are unchanged: the personal Profile may aggregate `personal` and `opensource`, a `work_client` profile still stores exactly one client scope, and there is no unrestricted cross-client view. The mapping is "the profile declares the scopes, the binding chooses the view" over one shared store — the filter narrows what a command sees; it does not divide or duplicate tasks.
+- `build.zig` + `build.zig.zon`; pin Zig 0.17.0.
+- Vendor `sqlite3.c` amalgamation with `SQLITE_ENABLE_FTS5`, `SQLITE_ENABLE_JSON1`, `SQLITE_THREADSAFE=1`. Compile as C, link statically. No system SQLite dependency.
+- No third-party Zig packages. JSON: `std.json`. HTTP: none. MCP: hand-written JSON-RPC over stdio (no SDK).
+- Release build: `-Doptimize=ReleaseFast`, strip, LTO where stable, baseline CPU target for portability.
+- One binary serves CLI and `ztd mcp`.
 
-## 4. Architecture and ownership
+### SQLite durability (preserve v2 exactly)
 
-```text
-Agent -> host-owned MCP tools and procedures -> ztd MCP server (stdio)
-Human ---------------------------------------> ztd CLI
-Optional later TUI --------------------------> same application use cases
+- `PRAGMA foreign_keys = ON`
+- `PRAGMA journal_mode = WAL`
+- `PRAGMA busy_timeout = 5000`
+- `PRAGMA synchronous = FULL`
+- Every write transaction is `BEGIN IMMEDIATE`.
+- Migrations tracked by `PRAGMA user_version`; each migration in its own transaction.
+- Prepared-statement cache per connection; arena allocator per command/request; no long-lived allocations.
 
-Both transports
-  -> application commands and queries
-    -> domain invariants and ZTD policy
-      -> SQLite state, history, and derived indexes
+### Time handling (explicit module)
 
-Host, not ZTD:
-  -> executes LLM calls and remote provider tools
-  -> converts provider results into typed ZTD source envelopes
-  -> asks the user for required decisions and external-write approval
+Zig std has no timezone database, DST rules or ISO-week support, and v2 relies on Go's `time` for all of them: `profiles.timezone`, local "today", `YYYY-Www` weekly periods, weekday cadences and `review_after`. `src/timeutil` owns this through libc `localtime_r`/`mktime` on the Darwin target (the product is one Mac), with a pure ISO-week calculator tested against known boundaries. DST transitions, week 52/53 and the Sunday/Monday week-start edge are fixtures in the golden corpus. No timezone library is vendored.
 
-OS scheduler, not MCP:
-  -> invokes explicit backup, maintenance, and optional notification commands
+### MCP server
+
+Hand-rolled JSON-RPC 2.0 over stdio implementing `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `prompts/list`, `prompts/get`, `ping`, and `notifications/cancelled`. Normative behavior:
+
+- **Protocol version:** negotiate against the client's requested revision; pin one revision (2025-06-18 or the revision v2's SDK negotiates) and reject unknown versions in `initialize` with the supported list. No batching.
+- **Notifications never get a response**, including unknown notifications; requests with unknown methods get `-32601`.
+- **Cancellation:** a `notifications/cancelled` for an in-flight request aborts it and suppresses the response; a cancelled request must not leave a half-applied write (each request is one transaction).
+- **Pagination:** `tools/list` and `prompts/list` return everything in one page and omit `nextCursor`; a client-sent cursor is ignored, not an error.
+- **Errors:** JSON-RPC error codes for transport/protocol, the v2 error family inside `isError` tool results.
+
+Tool names and argument shapes stay compatible with v2 where unchanged. **New capability folds into existing tools** rather than adding schemas: `doc_put` takes `record_kind`/`rationale`/`options`/`evidence`; `record_review` takes `derive`; `prepare` takes `packet`; `doc_search` takes `record_kind`. Any new capability folds into existing tools or displaces one; `trace` is the single approved new-tool exception.
+
+**`tools/list` budget (re-baselined).** The payload must not grow over the **measured v2 baseline**, which Stage 0 pins. A dev build of repo main measures ~31 KiB (17 default tools; `delete_source` is opt-in behind `--allow-delete-source`), dominated by `outputSchema`, not descriptions (`prepare` alone ~5.3 KiB, of which ~4.8 KiB is `outputSchema`). The earlier 12 KiB aspiration is **dropped as unsatisfiable** without a breaking change. Omitting `outputSchema` from `tools/list` would shrink it dramatically but is a host-visible breaking change and is explicitly out of scope unless separately approved. The corpus and baseline pin the exposure configuration (default 17 vs 18 registered + `trace` = 19). No MCP SDK dependency. The server is a thin adapter over `app`; it contains no business logic.
+
+## 5. Data model
+
+### Existing schema (preserved verbatim, migrations 0001–0007)
+
+`scopes`, `profiles`, `profile_scopes`, `contexts`, `areas`, `projects`, `captures`, `work_items`, `plans`, `plan_items`, `routines`, `knowledge_records` (dropped by 0010), `daily_limit_overrides`, `calendar_review_assertions`, `history_events`, `idempotency_records`, `import_runs`, `legacy_records`, `focus_sessions`, `checkpoints`, `reviews`, `goals`, `sources`, `source_reviews`, `documents`, `documents_fts` (FTS5), plus `work_items.custom_fields`, `projects.repo_url`, `projects.clone_path`.
+
+The SQL migrations are language-agnostic and run unchanged in Zig. Existing databases open without conversion.
+
+**Migration runner format (extended for v3).** v2's runner executes one plain `.sql` file per migration and bumps `user_version`; it has no place for branching assertions. The v3 runner extends the format: a migration may declare SQL **plus bounded post-step assertions keyed by migration id** (row counts, field non-null checks, `PRAGMA foreign_key_check` returning no rows, FTS consistency, collision pre-checks that abort with an explicit list). 0001–0007 remain plain files; 0009/0010 use the extended form. Assertions run inside the migration transaction and roll back on failure.
+
+### New migrations (v3)
+
+**0008 — provenance on captures and sources**
+
+```sql
+ALTER TABLE captures ADD COLUMN source_review_id TEXT REFERENCES source_reviews(id);
+ALTER TABLE captures ADD COLUMN batch_id TEXT;
+ALTER TABLE captures ADD COLUMN provider_metadata TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE sources ADD COLUMN reported_cursor TEXT NOT NULL DEFAULT '';
+ALTER TABLE sources ADD COLUMN last_reported_at TEXT;
 ```
 
-No database transaction may remain open during an LLM or network call. Side effects outside SQLite are coordinated by explicit operation records, not held locks or distributed transaction promises.
+`provider_metadata` is a bounded JSON summary (≤2 KiB), not a raw payload. `reported_cursor`/`last_reported_at` are advisory; the trusted `cursor` still moves only on `observed`.
 
-### Repository layout
+**0009 — connector enum rebuild**
 
-Directories are created with their first meaningful implementation; empty scaffolding is not a goal.
+SQLite cannot alter a CHECK constraint in place. Rebuild `sources` with `connector IN ('manual','directory','host_mcp','host_cli')`, preserving rows and indexes. `host_cli` represents a CLI declared in the host's `AGENTS.md`; it is still `reported` unless a trusted adapter attests otherwise.
 
-```text
-ztd/
-  go.mod
-  go.sum
-  cmd/ztd/main.go
+**Ordering and FK safety (mandatory).** `source_reviews.source_id` references `sources(id)`, so `DROP TABLE sources` with `foreign_keys=ON` fails as soon as one review exists. `PRAGMA foreign_keys=OFF` is a no-op inside a transaction. Therefore 0009 starts with `PRAGMA defer_foreign_keys = ON` (valid inside the transaction), **stages the existing rows into a temp backup table before any DROP**, drops `sources`, recreates it with the **full post-0008 column set** including `reported_cursor` and `last_reported_at`, copies the staged rows back, recreates indexes, drops the temp table, and ends by asserting `PRAGMA foreign_key_check` returns no rows. The migration runner aborts and rolls back on any violation. (The drop/recreate-same-name pattern with deferred FKs is verified sound against SQLite; the staging step is what preserves the rows.)
 
-  internal/domain/
-    identity.go       # IDs, revisions, provenance, typed references
-    work.go           # WorkItem, Project, Area, Context, transitions
-    capture.go        # immutable input and typed processing outcomes
-    planning.go       # Goal, Plan, PlanItem, Routine, FocusSession
-    scope.go          # Profile, ScopeBinding, and authorization invariants
-    source.go         # Source kinds, capabilities, and coverage vocabulary
-    knowledge.go      # typed knowledge; optional Wiki types arrive later
+**0010 — knowledge consolidation and links**
 
-  internal/app/
-    ports.go          # only the required repositories, clock, and ID generator
-    collect.go
-    process.go
-    plan.go
-    focus.go
-    review.go
-    simplify.go
-    routines.go
-    passion.go
-    sources.go
-    migrate.go
-    backup.go
+`documents` becomes the single knowledge layer. Add nullable structured columns (no table rebuild needed):
 
-  internal/store/
-    sqlite.go
-    migrations/       # embedded, versioned SQL migrations
-    work.go
-    captures.go
-    plans.go
-    sources.go
-    knowledge.go
-    snapshots.go
-    exports.go
-
-  internal/cli/
-    root.go           # process composition and output mode
-    commands.go
-    operator.go       # migration, backup, restore, configuration, checks
-
-  internal/mcp/
-    server.go         # stdio transport and schema exposure
-    tools.go
-    prompts.go
-    errors.go
-
-  internal/tui/        # only if structured UI earns its place
-
-  internal/legacy/
-    markdown.go       # read-only parser for the legacy Markdown format
-    agent_export.go   # read-only legacy agent-continuity export importer
-    compare.go
-
-  internal/platform/
-    paths.go
-    process.go
-    secrets.go        # references and OS integrations; no secret logging
-
-  test/
-    integration/      # processes, concurrency, recovery, migration, backup
-    fixtures/         # synthetic data only
-
-  assets/
-    procedures/       # versioned English ZTD procedures and forms
-    export/           # optional read-only Markdown rendering templates
-
-  docs/
-    architecture.md
-    ztd.md
-    data-model.md
-    sources.md
-    migration.md
-    backup.md
-    specs/            # pre/postconditions and verification obligations
+```sql
+ALTER TABLE documents ADD COLUMN record_kind TEXT
+    CHECK (record_kind IS NULL OR record_kind IN ('fact','decision','constraint','procedure','reference'));
+ALTER TABLE documents ADD COLUMN rationale TEXT;
+ALTER TABLE documents ADD COLUMN options_json TEXT;
+ALTER TABLE documents ADD COLUMN approved_by TEXT;
+ALTER TABLE documents ADD COLUMN approved_at TEXT;
+ALTER TABLE documents ADD COLUMN valid_from TEXT;
+ALTER TABLE documents ADD COLUMN source_refs TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE documents ADD COLUMN supersedes_id TEXT REFERENCES documents(id);
 ```
 
-Dependency direction is one-way: transports depend on `app`; `app` depends on `domain` and narrow ports; `store` implements ports and depends on `domain`; composition happens in `main`. Domain code never imports SQLite, MCP, CLI, TUI, or host packages.
+**Row mapping (normative — nothing is lost).**
 
-Go code uses English identifiers and `internal/` boundaries rather than generic public plugin APIs. No provider-specific Python, Node, or TypeScript wiki service is embedded.
-
-### Toolchain and dependency policy
-
-Pin development and CI to Go **1.27.4**, including the `go` directive and tested CI toolchain. Later language updates are deliberate changes with fresh checks.
-
-The intended dependencies are:
-
-- `modernc.org/sqlite` after proving FTS5, concurrency, backup, and supported-target behavior without CGo.
-- The maintained official Go MCP SDK, after verifying its current API against Go 1.27.4.
-- The Go standard library for strict CLI and JSON handling where practical.
-
-Each dependency needs a focused spike before it becomes architectural. Do not add a TUI toolkit, embedding SDK, ORM, generic migration framework, or wiki application preemptively. A working workaround for an immature dependency does not justify building a custom protocol stack.
-
-## 5. Logical data model
-
-The following is the logical model, not permission to create every table before the journey that needs it. The schema is introduced incrementally and migrated with `PRAGMA user_version`.
-
-### Identity and provenance
-
-Every entity has a stable typed ID, revision, creation timestamp, and provenance. IDs are never reused. Imported legacy `T-YYYYMMDD-NNN` IDs remain unchanged and unique.
-
-Every ordinary record carries `scope_id`, including indirect references. Its linked ordinary records must belong to the same Scope. The exceptions are Profile, Goal, Plan, Review, daily-limit metadata, and calendar-review assertions: they carry `profile_id` or `actor_id` and may link records from different Scopes only when the operator-defined Profile explicitly contains those Scopes. Profiles cannot combine personal and work/client Scopes. The focused WorkItem retains its own Scope.
-
-A single identity never duplicates task text across inbox, next, waiting, project, and archived lists. Lists are queries over status and links.
-
-### Capture and outcomes
-
-```text
-Capture
-  id, scope_id, source_id, external_id?, external_revision?
-  original_text utf8, content_hash, source_uri?, occurred_at?
-  captured_at, processing_state, processing_outcome?, review_after?, revision
-
-  processing_state = pending | processed | discarded | deferred
-  processing_outcome = work_items | reference | immediate | discard | defer
-```
-
-- `original_text` is immutable. Reformatting creates a WorkItem title or summary, not a replacement of the original input.
-- A capture can produce several WorkItems. One typed processing operation commits all of them atomically.
-- `deferred` requires a visible `review_after`; it is not permanent suppression or evidence of empty inbox.
-- `immediate` records a real result and evidence. Claims that an action occurred without identified execution evidence are marked as user/agent declarations.
-- Discard preserves the original and an explicit reason; durable storage does not mean every item is mandatory forever.
-- Initial text ingestion accepts valid UTF-8 within a configured, bounded request size. Unsupported binary files are reported as not ingested, never silently discarded. Source size limits and the exact constants are fixed before implementation and recorded in coverage errors.
-
-`processing_state` changes only through explicit operations:
-
-```text
-pending   -> processed | discarded | deferred
-deferred  -> pending when review_after is due, or by explicit reopen
-processed -> pending only by explicit reopen with a reason (history retained)
-discarded -> pending only by explicit reopen with a reason (history retained)
-```
-
-Reopening clears the active processing result but never erases prior history. A deferred item becoming due is a query-visible transition, not a hidden side effect.
-
-For external data, `(source_id, external_id, external_revision)` is unique when `external_id` is present. Manual records use a null `external_id` and are excluded by a partial unique index. An empty external identifier is not overloaded as the manual marker. A path/content-hash pair allows a changed local file revision to be captured without duplicating retries of the same bytes. Manual duplicate text is legitimate unless its idempotency key repeats; global text similarity is not deduplication. A changed `external_revision` creates a new immutable Capture linked to the same external identity; it never mutates the previous Capture, and an unchanged revision is deduplicated.
-
-### Work and plans
-
-```text
-Context(id, scope_id, name, revision)
-Area(id, scope_id, name, revision)
-Project(id, scope_id, area_id?, desired_outcome, status, revision)
-WorkItem(id, scope_id, area_id?, project_id?, context_id?,
-         title, origin_capture_id?, lifecycle,
-         waiting_on?, due_at?, closure_kind?, closed_at?, resolution?, revision)
-
-lifecycle = next | waiting | someday | archived
-closure_kind = completed | cancelled | unspecified
-```
-
-- `waiting` requires `waiting_on`; `archived` requires `closed_at` and a preserved resolution. A legacy archive lacking a classifiable reason imports as `unspecified`, never as a guessed completion.
-- `due_at` represents a real deadline. A time reserved for focus is a calendar link, not a fabricated deadline.
-- Completion, cancellation, explicit reopening, and other state changes are distinct application operations, not arbitrary field updates.
-- Deleting a WorkItem or Project means cancelling/archiving it while preserving its identity and history. There is no ordinary hard delete. A discarded Capture that never produced a linked record may be purged only by an explicit operator command, with a content-free tombstone recording its ID, reason, and time; sensitive content may not remain in history after such a purge. No automatic purge exists.
-- Every mutation writes current state and an append-only history event in one transaction. History is evidence, not event sourcing; tables remain directly queryable.
-
-```text
-Profile(id, name, kind = personal | work_client, owner_actor_id, timezone, status)
-ProfileScope(profile_id, scope_id)
-
-Goal(id, profile_id, kind = primary | subgoal, start_on, end_on, statement, status)
-Plan(id, profile_id, kind = daily | weekly, period, status = open | committed, revision)
-PlanItem(plan_id, work_item_id, role = mit | big_rock | batch, position)
-DailyLimitOverride(id, actor_id, local_date, rule = mit | focus,
-                   reason, created_by, created_at)
-Routine(id, scope_id, kind, cadence, last_completed_at?, active)
-FocusSession(id, profile_id, actor_id, work_item_id, started_at, ended_at?, outcome?)
-Checkpoint(id, scope_id, work_item_id, result, evidence_refs,
-           uncertainties, next_action, created_at, revision)
-Review(id, profile_id, kind = daily | weekly | monthly | yearly,
-       period, outcomes, coverage, completion_state, created_at)
-CalendarLink(id, scope_id, source_id, work_item_id?, plan_item_id?,
-             provider_event_id, relation, provider_version?, last_seen_at)
-CalendarReviewAssertion(id, profile_id, actor_id, local_date, statement,
-                        created_at)
-IdempotencyRecord(command, idempotency_key, request_hash, result_json,
-                  created_at)
-ExternalOperation(id, scope_id, kind, idempotency_key, request_hash,
-                  state = prepared | succeeded | failed | outcome_unknown | reconciled,
-                  provider_reference?, result_evidence?, revision)
-```
-
-Plans and reviews link IDs. They do not clone WorkItems. Changing a WorkItem updates every relevant view automatically. The `Plan` Profile determines which WorkItem Scopes its items may reference; a Plan is unique per `(profile_id, kind, period)`. The MIT limit is evaluated across all open daily Plans for the same actor and local date, not once per Scope or Profile.
-
-`FocusSession.actor_id` comes from the trusted host/Profile owner and remains stable across restarts; it is not an arbitrary model argument. At most one FocusSession may be open per actor across all Profiles. A partial unique index on open sessions enforces this invariant at the store boundary. Starting elsewhere never silently closes the first focus.
-
-A Goal can have a configured grace/override policy. Plans may be incomplete while open. A committed plan with zero MITs or a daily total above three requires a recorded `DailyLimitOverride`, so an intentional day off or exceptional day is not confused with an invalid plan. One active primary Goal remains per Profile.
-
-Idempotency records are retained for the life of the store by default. An operator may prune records older than 90 days only after resolving every related ExternalOperation; the tombstone of the command and result remains queryable through ordinary history. External operations remain distinguishable from evidence classification:
-
-```text
-ExternalOperation.state   prepared | succeeded | failed | outcome_unknown | reconciled
-source result_kind        observed | reported
-evidence freshness        current | stale | unknown
-```
-
-`reconciled` is an operation lifecycle state, not a claim that the provider observed the intended outcome. An external provider remains authoritative for its own data.
-
-### Knowledge
-
-```text
-KnowledgeRecord
-  id, scope_id, kind = fact | decision | constraint | procedure | reference
-  text, state = current | superseded, review_state = draft | verified
-  source_refs, valid_from?, reviewed_at?, supersedes_id?, revision
-
-KnowledgeLink(record_id, entity_type, entity_id, relation)
-```
-
-- Original evidence, a generated summary, and an agent interpretation remain distinguishable.
-- A linked constraint is retrieved by its mandatory relation, not only by text ranking.
-- `superseded` knowledge stays in history and cannot silently masquerade as current.
-- ZTD procedures are versioned product assets, not mutable LLM-generated knowledge.
-
-## 6. The ten habits as product journeys
-
-All ten habits are part of the functional contract. They are designed completely, delivered incrementally, and adopted gradually. A feature being available does not force the user to practice every habit immediately.
-
-| Habit | Product journey | Required safeguards |
-| --- | --- | --- |
-| **1. Collect** | Quick text capture; configured manual, directory, GitHub, email, and Jira sources feeding one pending-inbox view. | Capture immediately before interpretation. Preserve original and provenance. Acknowledge only after durable commit. Multiple sources do not imply multiple canonical items. |
-| **2. Process** | Return one pending Capture at a time. Choose discard, delegate/wait, do now when practical, defer as WorkItem, save Reference, or consciously postpone review. | Process each item exactly once per accepted operation. No implicit archive, deletion, priority, or commitment from a failed/ambiguous interpretation. Deferred items become visible again. |
-| **3. Plan** | Weekly review selects Big Rocks from a Project/Goal; daily preparation chooses one to three MITs across Profiles and batches minor work. | Calendar queries are explicit and scoped. Preserve sources of time constraints and require a human cross-calendar assertion when the Profile does not see every configured calendar. Firm-rule violations require an acknowledged reason; the method never hides remaining commitments. |
-| **4. Do** | Open one FocusSession, inspect its latest Checkpoint, capture interruptions, and finish with paused/completed result and next action. | One open focus per actor across all Profiles. Starting another never closes the first silently. Agent statements do not prove external completion. |
-| **5. Simple trusted system** | A few stable views: inbox, next, waiting, someday, projects, reference, archive, and routine/review queues. | No tags framework, arbitrary workflow DSL, or generic cross-provider synchronization. Add structure only for a demonstrated need. |
-| **6. Organize** | Every Capture ends as an actionable item, Reference, explicit discard, immediate result, or dated defer; WorkItems have a scope, optional Area/Project, and provenance. | One place per entity. Linked references replace copied task state. External originals remain owned by their provider unless explicitly stored. |
-| **7. Review** | Guided daily and weekly reviews; monthly/yearly procedures for goals; source coverage and routine debt are first-class. | Review unfinished/partial work and external failures. Never turn missing data into an empty list. A completed review must have evidence for its declared coverage. |
-| **8. Simplify** | Generate candidates for elimination, stale commitments, excessive sources, repeated small tasks, and consciously approved simplification batches. | Do not bulk-delete or cancel automatically. Separate eliminating commitments from merely hiding them. Preserve history. |
-| **9. Routine** | Morning/end-of-day and weekly routines, personal/work inventories, batching, cadences, and visible overdue runs. | Local schedulers can remind; an inactive MCP server cannot send reminders. Evaluate and adjust routines without losing execution history. |
-| **10. Find your passion** | Guided reflection, discoveries, experiments, obstacles, and a chosen daily next action linked to personal goals. | This is coaching and material for reflection, not a deterministic status transition. Keep it personal and outside work profiles. |
-
-The initial guided experience is Minimal ZTD: **Collect, Process, Plan, Do**, with Review introduced early. Procedures for the other habits remain in the specification and become individually activatable journeys, not an invisible automated program.
-
-## 7. Rules and autonomy
-
-Rules are visible application policy, not vague prompt advice.
-
-```text
-Default daily MIT count        1..3 across all Profiles for the actor and date
-Default primary goals          one active primary per Profile
-Focus                          one open FocusSession per actor across Profiles
-Inbox retrieval                one item by default; pagination never means processed
-Weekly planning                Big Rocks before minor work
-Rule override                  explicit reason, author, and timestamp
-```
-
-```text
-Class A: local record
-  capture, source cursor, checkpoint, coverage record
-  -> allowed inside an authorized flow
-
-Class B: guided local decision
-  unambiguous Capture outcome or next-action text
-  -> allowed by the selected flow; ambiguous cases return human_decision_required.
-     It never changes due_at, priority, MIT/Big Rock role, lifecycle closure,
-     scope, or ownership.
-
-Class C: human commitment
-  MIT/Big Rock commitment, priority, goal, cancellation, purge,
-  material scope/ownership changes
-  -> explicit user decision or host approval gate
-
-Class D: external side effect
-  focus-block creation in the first release
-  -> exact bounded proposal, explicit human confirmation, durable operation,
-     execution by host, recorded result, and reconciliation when uncertain
-```
-
-A model-supplied `confirmed: true`, explanatory prose, or prior assistant message is not proof of user approval. Approval must come from a trusted interactive command or host permission boundary. Auto-approval configured only to reduce prompts cannot satisfy Class C or D. Before Stage 3 claims an approval gate, it must document the required host tool permissions and demonstrate that the flow is rejected when gating is absent. ZTD does not invent a generic roles framework for these four classes.
-
-## 8. Sources and calendars
-
-### Shared registry, different capabilities
-
-Every Source has common metadata:
-
-```text
-Source
-  id, name, scope_id, kind = capture | calendar
-  connector = manual | directory | host_mcp
-  provider, connection_ref, non_secret_query, cadence
-  auth_state, coverage_state, last_attempt_at, last_success_at
-```
-
-Secrets are not stored in this table, exports, ordinary logs, or agent-visible configuration. A `connection_ref` identifies provider configuration held by the OS or the authenticated host.
-
-Common identity, scope, read-only defaults, and coverage do not imply one universal response schema:
-
-```text
-CaptureSource capability:
-  Enumerate(query, cursor, limits) -> captures, next_cursor, coverage
-
-CalendarSource capability:
-  Events(window, calendar_selection) -> observations, coverage
-  Availability(window, constraints) -> observations, coverage
-  Optionally CreateFocusBlock(exact proposal) -> provider reference and evidence
-```
-
-### Manual and directory sources
-
-- Manual capture creates the Capture directly, with an automatic source such as `manual-personal`.
-- A directory source has operator-approved roots, file-selection rules, size bounds, and scope. First-release ingestion handles text files only.
-- The CLI reads directory files itself rather than sending file contents through an LLM. It does not follow symlinks by default, escape approved roots, execute file content, or overwrite source files.
-- A file capture records its path, byte hash, and captured text. The source file is not automatically included in ZTD backups. That limitation is visible in provenance and backup documentation.
-- Unsupported or changing files produce partial coverage. They never disappear silently because parsing failed.
-
-### GitHub, Jira, and email through the host
-
-ZTD does not embed OAuth flows or provider SDKs in its first connected release. The already authenticated host invokes the relevant MCP/provider tools, then calls one typed ZTD ingestion boundary.
-
-Starting configurations, adjustable without a schema change:
-
-- **GitHub:** triage inputs such as notifications, mentions, and requested reviews, depending on the verified provider capability.
-- **Jira:** an operator-defined read-only JQL/query with explicit project/client scope.
-- **Email:** operator-defined read-only folders or labels. No “mark read,” deletion, or reply action is implied by capture.
-
-Remote folders, mailboxes, repositories, Jira projects, and tool access are not discovered by the model at write time. An operator registers the source and its scope beforehand.
-
-### Source retrieval contract
-
-A host-supplied source batch contains:
-
-```text
-source_id, batch_id, idempotency_key, provider_execution_ref?, result_kind = observed | reported
-retrieval: window?, cursor?, requested_limit, provider_returned_limit,
-           complete_window, truncated, failures[]
-items[]:
-  external_id, external_revision, original_text,
-  occurred_at?, source_uri?, provider_metadata_summary?
-```
-
-Two ingestion paths share this schema, but not their trust level:
-
-- An operator-configured trusted host adapter may submit `result_kind = observed` and complete coverage only when its identity is installed outside model-controlled arguments, is not exposed as a model-facing tool, and records the actual provider exchange. A model cannot impersonate this path.
-- The model-facing `record_source_review` call accepts at most a `reported` batch with unverified or explicitly partial coverage. A `provider_execution_ref`, identifier, or other evidence-like field generated by the model does not upgrade its trust level.
-
-For every supplied item, ZTD applies Capture validation, scope checks, immutability, and idempotent storage. It does not trust the host-supplied scope over the registered Source scope. Plain assistant prose claiming retrieval success cannot establish complete coverage. When no trusted adapter is available, complete `observed` coverage is unavailable and the host must present the batch as unverified rather than weakening the claim.
-
-- Cursor advancement occurs only after its corresponding, contiguous retrieval page is committed.
-- After a partial page, previously committed captures remain durable, the incomplete region stays pending, and cursor advancement cannot skip it.
-- A retry reuses the same external identity and cannot duplicate captures.
-- Unknown, partial, malformed, or unauthorized coverage is surfaced in `prepare`, source views, and reviews. Empty with errors is not treated as complete and empty.
-- Provider rates, exact page sizing, largest supported input, and whether the source can prove a complete window are integration facts that must be tested, not assumed.
-
-ZTD can promise that a **successfully committed Capture remains recoverable**. It cannot promise that a remote event or file was captured before it disappeared or that a provider returned everything. The product states this limit instead of claiming absolute losslessness.
-
-### Calendar behavior
-
-Calendar sources are ordinary configured Sources with calendar capabilities, not a separate general synchronization subsystem.
-
-- `calendar-work` and `calendar-personal` are separate identities with non-overlapping scopes and provider configuration.
-- Microsoft/Google-specific availability, recurrence, timezone, and OAuth behavior belong to the host connector. ZTD queries bounded UTC windows and preserves the returned source reference, relevant timezone, retrieval timestamp, and coverage.
-- A calendar is authoritative for events, times, attendees, and recurrence. ZTD is authoritative for Goals, Projects, WorkItems, Plans, and focus intent.
-- ZTD stores links and bounded observations needed for planning, not a second authoritative calendar mirror.
-- Ordinary meetings never automatically enter the inbox. Only an identified action becomes a Capture or WorkItem.
-
-Daily planning is a three-step process:
-
-1. `prepare` returns Goals, current commitments, candidate MITs/Big Rocks, existing links, constraints, and the calendar windows needed.
-2. The host retrieves calendar observations and presents a plan with proposed focus blocks. Missing or partial free/busy data is displayed as uncertainty, never as free availability.
-3. The user commits the local Plan and confirms each external focus block. Only then does the host call the calendar provider and record its result.
-
-Focus-block creation includes a stable operation identifier in the provider description or other supported client reference. A lost response records `outcome_unknown`; the host must locate/reconcile the provider operation before another create is attempted. No blind duplicate retry is allowed.
-
-When the actor has configured calendar Sources outside the active Profile, availability and conflict-free planning are **not** implied by the Profile's own calendar reads. Before `prepare` may present day availability or a Plan may be committed, a `CalendarReviewAssertion` for that Profile, actor, and local date must record that the human checked the other configured calendars. The assertion stores only its statement, Profile, actor, local date, and timestamp; it contains no foreign event details. It is evidence of a human declaration, not provider evidence.
-
-Until that assertion exists, `prepare` returns `human_decision_required` and marks cross-calendar coverage incomplete. The model cannot create or infer the assertion from prose, and the host must obtain it through a trusted interactive confirmation. When no calendar Source exists outside the active Profile, no cross-calendar assertion is required.
-
-First release does **not** update meetings, move recurring series, accept invitations, mirror tasks to events, or synchronize task status to calendar completion.
-
-## 9. Interfaces
-
-### CLI
-
-The CLI is both an agent-safe technical interface and an operator recovery path. Human output is concise English; every agent-facing command supports strict JSON with stable errors.
-
-```text
-ztd capture TEXT
-ztd inbox next
-ztd process CAPTURE_ID
-ztd prepare [--date DATE | --item WORK_ITEM_ID]
-ztd plan commit ...
-ztd focus start WORK_ITEM_ID
-ztd checkpoint WORK_ITEM_ID ...
-ztd focus finish ...
-ztd review daily|weekly|monthly|yearly
-ztd source list|review|check
-ztd find|show|check
-
-Operator-only:
-ztd init|config|export|backup|restore
-ztd migrate import|verify
-ztd install opencode
-```
-
-Every mutating domain command supports an expected revision and an idempotency key. An identical retry returns the original result; a reused key with different canonical request bytes returns `idempotency_conflict`.
-
-### MCP
-
-The first transport is local **stdio**, launched by the client as a child process. stdout/stdin carry JSON-RPC only; logs go to stderr. No network listener or always-running server is needed.
-
-```sh
-opencode mcp add ztd -- ztd mcp --profile personal
-```
-
-The exact host registration syntax is revalidated before release. The profile is configured by a human outside model-controlled arguments. Other hosts use equivalent stdio registration and their own approved profiles.
-
-A plain MCP connection requires no plugin. Optional host procedure installation supplies ZTD guidance where client prompt/resources behavior is insufficient. Those assets use portable content, never absolute paths from the creator's workspace.
-
-The initial model-facing tools are intentionally finite and typed:
-
-| Tool | Effect |
+| `knowledge_records` | `documents` |
 | --- | --- |
-| `capture` | Commit a manual Capture and return its ID/revision. |
-| `sources` | Return configured source identities, due state, and coverage, not provider contents. |
-| `record_source_review` | Ingest a typed model-reported source batch as `reported/unverified`; never as observed execution. |
-| `inbox_next` | Return one pending Capture, by default, plus remaining/coverage counts. |
-| `process_capture` | Apply one typed Capture outcome with revision and idempotency checks. |
-| `prepare` | Read a bounded daily or WorkItem brief, latest checkpoints, constraints, and needed external queries. |
-| `commit_plan` | Commit PlanItem references, not copied tasks; require host-gated human approval and rule acknowledgements. |
-| `focus_start` | Open the sole focus for this actor across all Profiles or return a conflict. |
-| `checkpoint` | Record real result/evidence, uncertainty, and next action without claiming completion. |
-| `focus_finish` | Pause or complete the focus with the relevant result, next action, and resolution. |
-| `record_review` | Record outcomes and explicit coverage, including an intentionally partial review. |
-| `find` | Return a bounded list of IDs, titles, scope-allowed status, provenance, and freshness. |
-| `read` | Expand a small set of authorized IDs into body, evidence, links, required constraints, and the latest checkpoint for each WorkItem when present. |
-| `doc_search` | Full-text search over the bound scopes' documents: document, rank and snippet, best match first. |
-| `doc_get` | Read one document by kind and slug, body included; optionally select a bound scope; ambiguous matches require scope. |
-| `doc_related` | Return a document's outlinks and backlinks, resolved inside its own scope; optionally select a bound scope. |
-| `doc_put` | Create or update one knowledge draft in an explicitly selected bound scope from `slug`, `title`, `body` and `expected_revision`; never another kind or status; combined input capped at 512 KiB. |
+| `id` | `id` (same value, so `supersedes_id` and links stay valid) |
+| `scope_id` | `scope_id` |
+| `kind` | `record_kind`; document `kind='knowledge'` |
+| `text` | `body` |
+| — | `title`: first non-empty line with Markdown heading markers stripped, trimmed to 80 chars; fallback `id` |
+| — | `slug`: `kr/<id>` (namespaced, cannot collide with legacy importer slugs) |
+| `state` + `review_state` | `status` per truth table below |
+| `source_refs` | `source_refs` |
+| `valid_from` | `valid_from` |
+| `reviewed_at` | `approved_at` (`approved_by` stays NULL: unknown) |
+| `supersedes_id` | `supersedes_id` |
+| `revision` | `revision` |
+| `created_at` | `created_at` |
+| — | `updated_at = COALESCE(reviewed_at, created_at)` |
 
-> **Note (2026-11-20):** These are the current tool names. The redundant
-> `ztd_` tool prefix was removed; the MCP server itself is still named `ztd`,
-> so host permission keys read `ztd_<tool>` (e.g. `ztd_capture`). The old
-> `ztd_*` tool names were removed with no aliases.
+Status truth table: `state='superseded'` → `superseded` regardless of review state; otherwise `review_state='verified'` → `verified`; otherwise `draft`. (A superseded verified row stays superseded.)
 
-There is no generic `update`, arbitrary SQL/query language, unbound scope override, or raw remote-provider tool. Source registration, restore, migration, backup scheduling, and scope configuration remain operator commands. `doc_put` is the single bounded write: it addresses exactly one knowledge draft in a selected scope from the fixed binding, so it is not a generic document update.
+**Ordering and FK safety.** 0010 starts with `PRAGMA defer_foreign_keys = ON`: `supersedes_id` is self-referential, so rows can arrive in any order, and the constraint is checked at commit. It ends with `PRAGMA foreign_key_check` returning no rows.
 
-Every mutating MCP tool requires an idempotency key supplied by the trusted host or SDK and a canonical request hash. A model-generated fresh key cannot prove retry uniqueness; the CLI therefore generates and prints keys and requires explicit confirmation to reuse one. External captures are additionally deduplicated by external identity. `doc_put` derives its key from scope, kind, slug and expected revision instead of asking the caller for one; the replay and conflict rules are unchanged.
+**Guards.** Before mutating, 0010 fails with an explicit list if a migrated `id` already exists in `documents` or if any `documents(scope_id,'knowledge','kr/<id>')` slug already exists. After the insert it asserts migrated row count equals the pre-migration `knowledge_records` count and that no migrated row has NULL `title`/`body`/`updated_at`. `documents_fts` is maintained by the 0007 triggers, so no manual rebuild; the migration asserts the FTS row count for migrated IDs matches. Only then `DROP TABLE knowledge_records`. The Zig legacy importer writes `documents` directly; it never recreates `knowledge_records`.
 
-`record_source_review` is model-facing and can attest only `reported` data with `unverified` or partial coverage. A trusted host adapter, configured by the operator and outside model-controlled arguments, may write `observed` evidence through the application layer after a real provider exchange. That adapter is not exposed as an MCP tool.
+Generic provenance edges:
 
-Class C and D actions require a real trusted human approval boundary. Host auto-approval that suppresses prompts cannot satisfy that requirement, and Stage 3 must document the host permission configuration and demonstrate rejection when gating is absent.
-
-`find` defaults to at most 8 candidates, with a hard configured maximum of 20. `read` expands an explicitly selected small batch, maximum 5, with paginated large content. These limits do not truncate mandatory linked constraints; they prompt for a separate bounded expansion if needed.
-
-MCP prompts mirror the method vocabulary: Collect, Process, Plan, Do, Review, Simplify, Routines, and Passion. Prompts guide conversation; tools enforce state and invariants. MCP availability does not prove that a host automatically loads resources, invokes prompts, schedules habits, or starts a review. A second real MCP client must be tested before portability is claimed.
-
-### Retrieval and token budget
-
-- `prepare` returns the selected Goal/Subgoal, at most three proposed MITs, one next action, mandatory constraints, latest evidence, and known coverage gaps.
-- `find` returns summaries and references; `read` performs explicit expansion.
-- Mutations return ID, new revision, state/result, and errors—not an entire list or database export.
-- Apply scope and validity predicates before text ranking and before returning top-k results.
-- Use explicit stable cursors and expose truncation; do not use line number or “first N rows” pagination as a correctness proof.
-- No resources or knowledge bases are inserted wholesale into the model context.
-- Quantitative evaluation includes Capture creation, retrieval, repeated source calls, maintenance, and human correction costs.
-
-The first retrieval implementation uses structured joins and FTS5. Embeddings and `sqlite-vec` require a separate evaluation showing failures in bilingual/paraphrase recall and a net improvement; no future generic search-backend framework is created now.
-
-## 10. Storage and consistency
-
-### SQLite contract
-
-- The database lives on a local filesystem, not a network share or a live-synced folder.
-- Enable `foreign_keys`, WAL mode, and a bounded busy timeout. Use `synchronous=FULL` for durable local commits unless a measured decision explicitly changes and documents this guarantee.
-- Write operations use short `BEGIN IMMEDIATE` transactions. Reads use normal consistent SQLite snapshots.
-- One writer exists per SQLite database at a time; multiple local CLI/MCP processes must serialize safely without mistaking inter-process contention for a Go data race.
-- Concurrent readers/writers never hold application locks during network or LLM work.
-- All schema changes are embedded, versioned, transactional migrations. A newer or unrecognized schema is rejected, never adopted speculatively.
-- A nonempty unknown SQLite file is not silently initialized as ZTD.
-- The model has no direct database file or SQL access.
-
-### Concurrency and idempotency
-
-For mutations on versioned objects:
-
-1. Compute the canonical request bytes and request hash without trusting arbitrary transport formatting.
-2. In one transaction, look up the `IdempotencyRecord` by `(command, idempotency_key)`.
-3. Replaying the same key and hash returns the original result, even if the entity subsequently changed.
-4. The same key with another hash fails without writes.
-5. For a new request, validate scope, expected revision, state transition, links, and limits.
-6. Commit current state, append-only history, derived index updates, and the `IdempotencyRecord` together.
-
-`IdempotencyRecord`s are retained for the life of the store by default. An operator may prune records older than 90 days only after every related `ExternalOperation` is resolved; a content-free tombstone stays queryable through ordinary history.
-
-Transactions are bounded and have deterministic failure behavior. `go test -race` is useful but does not replace integration tests with multiple real processes.
-
-### Errors
-
-Stable error families include:
-
-```text
-invalid_input, invalid_transition, not_found, scope_denied,
-human_decision_required, rules_acknowledgement_required,
-stale_revision, idempotency_conflict, focus_conflict,
-source_coverage_incomplete, external_outcome_unknown,
-unsupported_format, destination_not_empty, db_busy, db_incompatible, io_error
+```sql
+CREATE TABLE links (
+    from_type TEXT NOT NULL,
+    from_id   TEXT NOT NULL,
+    to_type   TEXT NOT NULL,
+    to_id     TEXT NOT NULL,
+    relation  TEXT NOT NULL CHECK (relation IN ('evidence','decided','produced','reviewed','learned','supersedes','measured')),
+    scope_id  TEXT NOT NULL REFERENCES scopes(id),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (from_type, from_id, to_type, to_id, relation)
+);
+CREATE INDEX links_to ON links(to_type, to_id);
 ```
 
-`not_found` returned to a model does not disclose the existence or contents of an out-of-scope entity. Local diagnostics may distinguish authorization failures without returning the foreign object's data. Errors do not expose raw SQL, credentials, or arbitrary provider payloads.
+Existing 1:1 FKs (`work_items.origin_capture_id`, `focus_sessions.work_item_id`, `plan_items`) remain; `links` carries the n:m edges the loop needs. `from_type`/`to_type` are validated in `app` against the entity list rather than a fragile CHECK (entity kinds grow). Deletion removes an entity's links in the same transaction; `trace` ignores dangling rows and `check` reports any it finds.
 
-## 11. Optional LLM Wiki layer
+**0011 — derived review metrics**
 
-The knowledge layer starts with typed records and explicit links. An LLM Wiki may be added only after ordinary capture, processing, planning, review, migration, and retrieval work reliably.
-
-The evaluated external options are references, not dependencies:
-
-- Karpathy supplies the raw-source/compiled-page workflow.
-- OpenWiki inspires durable page-by-page ingestion, checkpoints, and no-op updates.
-- Scrinium inspires cited revisions, evidence assessment, and freshness.
-- MindBase/wiki-memory inspire explicit proposals and human confirmation.
-
-If that phase is justified, use this internal model rather than another store or service:
-
-```text
-WikiPage(id, scope_id, title, state = draft | verified | superseded, current_revision)
-WikiRevision(page_id, revision, body, content_hash, created_at)
-WikiCitation(page_revision_id, source_entity_id, source_revision?, locator)
-WikiProposal(id, scope_id, proposed_changes, evidence_refs,
-             state = pending | approved | rejected | applied, revision)
+```sql
+ALTER TABLE reviews ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '{}';
 ```
 
-- Originals and citations stay canonical in SQLite; Markdown export is a read-only view.
-- Ingestion is explicit, selective, durable, resumable page by page, and a no-op when the meaningful source hash has not changed.
-- The host's LLM proposes typed changes. It cannot mark its own prose verified, rewrite authoritative ZTD procedures, or correct cited evidence silently.
-- A human approves promotion to verified knowledge. The expected page/proposal revision prevents lost updates.
-- Inspection is tool-assisted and reviewable. Indexes and logs are computed by the engine, not maintained from memory by the LLM.
-- Retrieval uses `find`/`read`, prioritizing constraints and decisions linked to the current item before textual candidates.
-- Procedural lint checks broken references, changed evidence hashes, orphans, and scope violations deterministically. LLM-semantic lint may propose contradictions but does not silently resolve them.
-- Cost evaluation includes ingestion, maintenance, lint, query, rereading originals, and rejected proposals—not only saved prompt tokens.
+Metrics are computed, not asserted: `mit_planned`, `mit_completed`, `plan_items`, `completed_items`, `captures_received`, `captures_processed`, `focus_sessions`, `focus_minutes`, `overdue_routines`. Human `outcomes`/`coverage` text remains required.
 
-This is deliberately a future layer. It must not delay the first trustworthy Minimal ZTD journey.
+**0012 — excerpt-first source items**
 
-## 12. Legacy migration and cutover
-
-The existing CLI/TUI continues to operate unchanged while the Go implementation proves itself. The migration does not silently rewrite the current `~/.ztd` Markdown store or its independent agent-continuity SQLite state.
-
-### Inputs and safety
-
-- Import from an operator-approved **copy** of the existing Markdown data, not an active writable store.
-- The copy must have a verified quiescent state: copying is allowed only after the legacy store passes `ztd check`. If a legacy journal is pending, run the legacy `ztd recover` under its own rules before copying; never recover or repair the copy from the new implementation.
-- Record the legacy version, converting/checking tool, `ztd check` result, and content hash of the source copy in the migration report. Import repeats that this is the verified copy; an unverified or changed copy fails before staging writes.
-- Accept only identified, supported legacy versions. Legacy Markdown `"format": 1` must first be converted to the existing identified Markdown `"format": 2` with the supported tooling. No mixed/ambiguous format is guessed.
-- Import legacy agent-continuity export version 2 explicitly, preserving its assignments, checkpoints, operations, and knowledge. The two legacy sources are related only by explicit references actually present in the data.
-- Never commit personal or client data into public fixtures. Import tests use synthetic stores; a real-data import requires a separate authorization and destination check.
-
-Commands:
-
-```text
-ztd migrate import --source COPY --agent-export EXPORT --target STAGING --report REPORT
-ztd migrate verify --source COPY --agent-export EXPORT --target STAGING --report REPORT
+```sql
+ALTER TABLE captures ADD COLUMN body_ref TEXT;
 ```
 
-The target must be empty or a recognized staging database owned by the same resumable migration run. Existing arbitrary data is never overwritten.
+`original_text` may be a bounded excerpt; `body_ref` points at the origin. `MaxSourceItemBytes` stays 64 KiB; `MaxSourceBatchItems` stays 500.
 
-### Preserving meaning without inventing history
+**Export format (breaking, versioned).** The canonical table list changes: `knowledge_records` leaves, `links` enters, and the new `documents`/`captures`/`sources` columns flow through automatically. `ztd export` writes `format: "ztd-export", version: 2`. `restore` accepts version 1 by routing `knowledge_records` rows through the 0010 mapping and rejecting duplicate `kr/<id>` slugs before writing; it rejects version 2 on a v2 binary with a clear message. **v1 table-presence exception:** v2's restore rejects any missing canonical table and any unknown table. For `version: 1` only, `links` may be absent (defaults empty) and `knowledge_records` is accepted and routed through the 0010 mapping; every other table keeps the strict both-ways check. `snapshot` is a raw SQLite copy and is unaffected. A v2 binary cannot restore a v3 export; that is expected and documented.
 
-An operator-approved mapping translates legacy routing to the new vocabulary:
+### Knowledge store decision (confirmed)
 
-```text
-legacy context/client -> Scope and, where appropriate, Area
-current task context   -> explicit optional GTD Context, only if the operator supplies it
-legacy project path   -> Project with preserved original outcome/reference material
-```
+One layer: `documents`. Prose cards and structured records share the table; `record_kind` distinguishes `fact`, `decision`, `constraint`, `procedure`, `reference` within `kind='knowledge'`. `knowledge_records` is dropped after its rows are migrated. Decisions are documents with `record_kind='decision'` plus `rationale`, `options_json`, `approved_by`, `approved_at`, `source_refs`, `supersedes_id`. The `links` table carries provenance edges to captures, work items, plans, reviews and other documents. This removes the orphaned v2 table and the dual-store ambiguity at the cost of a one-time consolidation migration.
 
-Legacy inbox lines become Captures. Active/archive lines become one WorkItem each with their original `T-...` identity. Free-text `waiting_on`, `resolution`, timestamps, projects, and unknown fields are preserved. An ambiguous archive resolution is `unspecified`, not automatically completed.
+## 6. Feature inventory
 
-Existing daily/weekly plans become Plan/PlanItem links where references resolve. Unmatched text and human documents are retained as legacy/reference documents rather than dropped or reinterpreted as commitments. Routines preserve cadence and last-run values. When source history is absent, migration creates one identified import event, not a fictional sequence of past transactions.
+### Existing features (must reach parity)
 
-Agent assignments import as WorkItems or explicitly linked legacy assignments when identity cannot be established safely; checkpoints preserve their actual results and revisions. Legacy operation keys remain distinguishable and preserved for replay safety. Knowledge retains its original IDs, scope, source, revision, and classification. Every mechanically ambiguous relation goes to the report.
+| Area | CLI | MCP tool | Notes |
+| --- | --- | --- | --- |
+| Identity/config | `init`, `scope add/list`, `install opencode/templates` | — | Scopes: personal/work/client/opensource. Profiles own scopes. |
+| Capture | `capture`, `inbox next` | `capture`, `inbox_next` | Pending/processed/discarded/deferred; deferred requires `review_after`. |
+| Process | `process --outcome K` | `process_capture` | Outcomes: `work_items` (requires titles), `reference` (free-text `--reason` pointer to a card), `immediate` (requires `--evidence`), `discard` (requires `--reason`), `defer` (requires `--review-after`); human gate for ambiguity. |
+| Work items | `show`, `find`, `list`, `move` | `find`, `read` | Lifecycles next/waiting/someday/archive; closure kinds; optimistic revision. |
+| Goal | `goal set/show/complete/cancel` | — | One active primary goal per profile. |
+| Plan | `prepare`, `plan`, `plan commit` | `prepare`, `commit_plan` | Daily/weekly; MIT/big_rock/batch; 1–3 MITs; commit requires human approval. |
+| Focus | `focus start/checkpoint/finish` | `focus_start`, `checkpoint`, `focus_finish` | One open focus per actor; checkpoints carry evidence/uncertainty/next action. |
+| Review | `review daily/weekly/monthly/yearly` | `record_review` | One per profile/kind/period; outcomes+coverage required. |
+| Routines | `routines due/done/add`, `due`, `routine` | — | Cadence daily/weekly; due reporting. |
+| Sources | `source add/apply/list/review/delete` | `sources`, `record_source_review`, `delete_source` | Registry + reported batches; `observed` rejected without trusted adapter. |
+| Contexts | `context add/list` | — | Scope-owned. |
+| Documents | `doc put/get/list/search/related/log/lint/archive` | `doc_search`, `doc_get`, `doc_related`, `doc_put` | FTS5; wikilink/Markdown link graph; MCP `doc_put` is draft-only. |
+| Projects | `project add/list/show` | — | Desired outcome, status, repo_url, clone_path. |
+| Migration | `migrate import/verify/documents` | — | Read-only legacy copy; mapping file; quarantine. |
+| Durability | `export`, `restore`, `snapshot`, `check`, `recover` | — | `check --bindings` validates `.ztd.json`; `recover` is a compatibility no-op. |
+| Environment | `status`, `version`, `mcp` | — | DB resolution `--db` > `ZTD_DB` > `~/.ztd/ztd.db`. |
+| MCP prompts | — | Collect, Process, Plan, Do, Review, Simplify, Routines, Passion | Method prompts. |
 
-### Accounting and cutover gates
+Scope binding precedence: `--scope` > `ZTD_SCOPES` > `.ztd.json` hint > profile scopes minus `client:*`/`work`. Source config: `--file` > `ZTD_SOURCES` > `~/.ztd/sources.json`.
 
-For each input entity, the report records exactly one disposition: `imported` or `quarantined` with original and reason. A quarantined item is not silently accepted as partial success; final cutover requires the operator to resolve or explicitly accept every quarantine.
+Integrations: OpenCode skills (`ztd`, `ztd-collect`, `ztd-do`, `ztd-knowledge`, `ztd-plan`, `ztd-process`, `ztd-repo`, `ztd-review`, `ztd-simplify`, `ztd-trusted-system`) and method templates (`day`, `week`, `review`, `journal`, `project`, `knowledge`). These are host-side; v3 keeps them working against the same CLI/MCP contract.
 
-The comparison covers IDs and aliases, original bytes/text, counts by legacy list/type and scope, fields, project/plan references, closures, routine cadence/run state, agent assignment/checkpoint revisions, knowledge, and idempotency records.
+**Parity matrix is generated, not hand-written.** Stage 0 derives the command/flag matrix from the Go binary's help output and the MCP schemas, and freezes it into the corpus plan. The table above is orientation, not coverage. Flags that must appear in the matrix: `plan commit --override`, `capture --stdin`, `find/list --context/--project`, `doc search --limit` (max 50), `doc log --limit` (max 500), `doc lint --strict`, and the MCP defaults (`find` 8/20, `read` ≤5, `doc_put` derived idempotency key, 512 KiB body limit).
 
-Re-running an interrupted migration does not duplicate entities. Two imports of the same source into separate empty staging databases produce equivalent logical output and discrepancy reports.
+**v2 quirks resolved in v3 (no dead schema).**
 
-**No dual-write period is allowed.** A rollback before any new Go write restores the old configuration. After new writes, rollback requires reconciliation/export of those changes; replacing the new database with an old copy would discard work.
+- `daily_limit_overrides` gains its writer: `override add --rule mit|focus --date YYYY-MM-DD --reason R [--actor A]`. `plan commit --override ID` requires a matching `rule='mit'` row for the actor and local date (narrowed to that id when supplied) and returns a validation error if absent; the row is not consumed.
+- `calendar_review_assertions` gains writer and reader: `review daily --calendar-assert S` records the row; `check` warns when a daily review for the local date exists without an assertion. A review never fails for a missing assertion.
 
-Only after explicit user acceptance does configuration select SQLite as canonical. The legacy Markdown source remains read-only until the operator separately archives it. Migration never deletes it.
+### New features (v3)
 
-## 13. Backup and restore
+#### A. Provenance edges (the arrows)
 
-**Implementation note (approved 2026-11-22):** the approved backup path is
-`ztd snapshot` to an iCloud-synced directory. Restic remains optional and
-unconfigured; the destination and policy below stay unselected.
+- `captures.source_review_id`, `batch_id`, `provider_metadata` persist the batch that produced a capture.
+- `links` table connects source review → capture → decision → work item/plan → focus/checkpoint → review → knowledge.
+- `trace ID` (CLI) / `trace` (MCP): read-only compact chain for any entity. Returns IDs, relations and short labels; never bodies. Cap ≤1 KiB.
+- `doc related` extended to follow `links` to non-document entities, still compact.
 
-A complete backup contains all scopes in the shared database. Provider choice therefore requires approval for that combination of information; an encrypted transport alone is not data-owner authorization.
+#### B. Decisions as first-class records
 
-### Backup path
+- `doc put --kind knowledge --record-kind decision --slug S --body T [--rationale R] [--options JSON] [--evidence ID...] [--scope S]` creates a draft decision linked to evidence.
+- Human verification uses the existing `doc put --status verified --expected N` gate, extended with `--approved-by A` to record `approved_by`/`approved_at`. MCP `doc_put` stays draft-only and never verifies.
+- `doc supersede OLD NEW` marks supersession (`supersedes_id`) and links it.
+- A decision may link to the work item/plan it produced (`produced`). `process` and `plan commit` accept an optional `--decision ID` to record the edge.
+- `doc search --record-kind decision` reuses FTS over `documents.body`; no new search engine.
 
-1. `ztd snapshot` uses SQLite online backup or `VACUUM INTO` to produce a consistent point-in-time database. It never copies an active DB/WAL pair naively.
-2. `ztd export` produces a versioned, complete JSON export of canonical entities, history, source registry, non-secret configuration, and citations. Derived FTS/vector indexes are rebuilt on restore.
-3. A narrow staging manifest records format/schema versions, creation time, and checksums. Exclude live locks, temporary files, credentials, OAuth tokens, and raw secrets.
-4. Restic encrypts and versions the snapshot, export, redacted configuration, and manifest to the approved destination. The Restic repository password and provider credentials live outside the store and backup staging.
-5. Restic retention, pruning, and repository checks are explicit operator policies. No automatic remote deletion is introduced by the application.
+#### C. Derived measurement
 
-Restic supports S3/B2/Azure/GCS/SFTP; Google Drive/OneDrive require an operator-approved Rclone setup. Choose one when address, cost, and data-owner requirements are known. Backup snapshots are not a substitute for device synchronization or migration rollback.
+- `review daily|weekly|monthly|yearly --derive` computes `metrics_json` from plans, work items, captures, focus sessions and routines for the period, then stores the human outcomes/coverage alongside.
+- `review show --period P` returns the metrics block compactly.
+- Metrics link to goal/project via `links` with relation `measured` (review → goal/project) when the review references them; no free-text-only outcomes.
 
-### Restore proof
+#### D. Learning write-back
 
-Restore targets must be empty. Never overwrite a nonempty live store through ordinary restore.
+- `learn propose --review ID` creates draft knowledge cards/records linked to the review and its evidence (`learned`). Draft-only. **`learn propose` is CLI-only**; over MCP the host runs the CLI command. `doc_put`'s `evidence` fold uses relation `evidence`, not `learned`, so it approximates but does not replace the `learned` edge until a later fold.
+- Human `doc put --status verified --approved-by A` (CLI) promotes. MCP stays draft-only.
+- Verified knowledge is never re-derived automatically; supersession is explicit.
+- Method templates and skills remain host-side; v3 does not port skill workflows into the binary.
 
-Verification covers both a restored SQLite snapshot and a clean import of the portable export:
+#### E. Token-efficient ingestion
 
-- schema/version compatibility and `ztd check`;
-- all entity counts and IDs, original text, state, revisions, links, and provenance;
-- source and calendar links without credential restoration;
-- repeat lookup and bounded `prepare` queries;
-- rebuilt indexes and required constraints;
-- no cross-scope disclosure in the restored database.
+- `source review` compact result by default: `{review_id, source_id, batch_id, created, deduped, captures:[≤10 ids], omitted, watermark, truncated}`. `--full` opt-in returns the complete ID list and retrieval detail.
+- `sources` / `source list` expose `reported_cursor` and `last_reported_at` as advisory hints.
+- `prepare --packet` returns the decision packet (goal, due, ≤3 candidates, evidence refs) under cap.
+- Source items may carry an excerpt + `body_ref`; full body stays at origin.
+- Built-in **directory connector** (`connector=directory`) is the only `observed` retrieval: operator-approved roots, no traversal outside roots, no network. Roots are absolute paths stored in `sources.connection_ref` and approved through `source add` (CLI only, never MCP). Symlinks are resolved before the containment check; a root that resolves outside itself is rejected. A *complete window* means the recursive listing finished with no read errors and every item's mtime/size were captured; only then does the trusted `cursor` advance, and any error keeps it unchanged. Overlapping roots dedupe by resolved `(device, inode, path)` plus content hash. Everything else is `reported`.
+- `host_cli` connector kind for host-declared CLIs; still `reported`.
 
-Schedule recurring restore drills, at least monthly once real data depends on this backup. A backup is not considered working merely because Restic reported a successful upload.
+#### F. Refactor / optimization
 
-## 14. Security and privacy
+- Single validation module in `app`; `store` calls it instead of mirroring checks.
+- Generic history + idempotency helpers; no per-entity duplication.
+- Comptime CLI command table replaces per-command flag boilerplate.
+- Arena-per-command allocation; prepared-statement cache; no reflection.
+- Target store+app ≤9k production LOC, total ≤12k with waiver (Go baseline ~14k prod / ~26.5k total). Tests are ported or replaced by golden parity, never deleted to hit a number.
 
-- Enforce ScopeBinding in both application and store queries. Test all read, search, expansion, reference, and mutation paths for isolation.
-- Do not let model arguments select an unapproved host profile, source query, path, credential, or external capability.
-- Store secrets only in OS/host credential facilities. Do not put them in ZTD exports, Markdown views, logs, issues, or public examples.
-- Treat every external Capture as untrusted data, never executable commands or system instructions. Preserve it while clearly distinguishing its trust level in source batches and procedures.
-- Markdown export renders user content as data and avoids silently interpreting embedded directives or HTML.
-- Audit human approvals and external operations without logging sensitive original contents unnecessarily.
-- Classify remote execution evidence as `executed`, `reported`, `unknown`, or `reconciled`; do not equate a hyperlink, mention, or assistant assertion with a successful command.
-- Isolate the host tooling and MCP profile per work client. Shared filesystem storage strengthens, not weakens, the need for logical isolation tests.
+## 7. Contracts
 
-## 15. Methodical specifications
+### Error taxonomy (preserve)
 
-Use `methodical-programming` for behavior where a plausible implementation can silently corrupt meaning: specify pre/postconditions, derive the program from the postcondition, state invariants and finite bounds, discharge verification obligations, then test the exposed edge cases. It is not required as ceremony for rendering or transport glue.
+`Invalid`, `NotFound`, `ScopeDenied`, `IOError`, conflict/revision errors. CLI exit codes are 0/1/2 as in v2, with the error family in the JSON envelope. Preserve the v2 behavior where a failing read still carries data (`doc lint --json` keeps its findings on a non-zero exit); losing it would break golden outputs and host skills.
 
-The following contracts are normative even where implementation details remain open.
+### Invariants (preserve)
 
-### Capture
-
-```text
-{Pre: request is valid; source/scope is authorized; text fits the input bound;
-      idempotency key identifies one canonical command payload}
-Capture(request)
-{Post: accepted request produces exactly one durable Capture identity,
-       original/provenance unchanged, in one transaction with idempotent result;
-       identical retry returns the original result;
-       same key + different payload or failed validation writes nothing}
-```
-
-Obligations: cover manual retry, external retry, two processes racing the same key, UTF-8/input boundaries, duplicate text with different identities, and crash before/after commit. A batch contains finite validated entries, so its bound is the number of entries.
-
-### Process Capture
-
-```text
-{Pre: Capture is pending/deferred and due; expected revision matches;
-      outcome has all required fields and any required human decision exists}
-ProcessCapture(id, outcome)
-{Post: exactly one typed outcome is committed with all linked records/history;
-       no other Capture is changed;
-       malformed or ambiguous outcome writes nothing;
-       deferred outcome has a visible review_after;
-       an identical retry reproduces the original result}
-```
-
-Tests: each outcome, multiple WorkItems atomically, waiting without `waiting_on`, immediate result lacking identified evidence, duplicate retries, stale revision, and a defer becoming due. Never implement Process as a generic partial field update.
-
-### Commit Plan
-
-```text
-{Pre: all PlanItem IDs exist and belong to the Plan Profile's Scopes;
-      the Profile is authorized; roles are valid for daily/weekly;
-      references are unique; required commitment approval exists}
-CommitPlan(plan, items)
-{Post: committed plan links exactly the supplied IDs in order;
-       default 1..3 MITs and one primary goal hold, or a specific override is recorded;
-       no WorkItem is copied or implicitly completed;
-       a failed validation leaves the original plan unchanged}
-```
-
-Tests: empty intentional plan, 1 and 3 MITs, 4 without acknowledgement, an item outside the Plan Profile, a permitted cross-Scope personal/opensource item, duplicate references, stale plan revision, and later WorkItem status changes.
-
-### Focus and checkpoint
-
-```text
-{Pre: authorized WorkItem is actionable, meaning lifecycle = next, visible in the
-      active Profile, and not archived or cancelled; the actor has no other open
-      focus across all Profiles, or an explicit pause operation resolved it;
-      a waiting item must first be explicitly reopened/unblocked}
-StartFocus(item)
-{Post: exactly one open FocusSession exists for the actor across Profiles;
-       its identity and latest safe next action are returned;
-       failure does not close or alter any existing focus}
-```
-
-A Checkpoint records its complete result tuple with its own revision atomically and does **not** increment the WorkItem revision. Progress during a focus session must not turn an unrelated next-action edit into a `stale_revision` failure. Unbounded history is paginated; continuation/reopen behavior must be explicitly tested rather than inherited accidentally from the legacy archive policy.
-
-### Create focus block
-
-```text
-{Pre: an exact bounded proposal identifies the Source and calendar, start/end with
-      timezone, and a title derived from an authorized WorkItem; the Source belongs
-      to the active Profile's Scopes and supports creation; a trusted human approved
-      that exact proposal; no unresolved outcome_unknown ExternalOperation exists
-      for the Source; one idempotency key identifies the canonical payload;
-      provider availability/recurrence is revalidated before the write}
-CreateFocusBlock(proposal)
-{Post: at most one event is created; one durable ExternalOperation moves from
-       prepared to succeeded or outcome_unknown; provider reference/evidence and
-       revision are recorded; identical key + payload returns that same operation
-       and result without another external write; a different payload fails before
-       writing; a new create for the Source is rejected while an unresolved
-       outcome_unknown exists}
-```
-
-Reconciliation is a separate, explicit operation. It records the observed provider outcome or leaves the operation unresolved; it is never implicit in a retry. A non-idempotent create must not be repeated merely because the local response was lost.
-
-### Source coverage
-
-```text
-{Pre: registered source scope matches the session;
-      items fit the source batch contract; cursor describes the attempted region;
-      observed authentication is established only by an operator-configured trusted
-      host adapter outside model arguments}
-RecordSourceReview(batch)
-{Post: each supplied item is captured once under its external identity;
-       observed/complete coverage is written only by the authenticated adapter path;
-       a model-facing batch remains reported/unverified at most;
-       coverage reflects complete, partial, failed, and unparsed portions;
-       cursor never skips an uncommitted region;
-       failed/empty coverage never marks pending items as processed}
-```
-
-Tests: page failure in the middle, provider-truncated page, repeated external item with unchanged revision, changed source revision, invalid item amid a page, and out-of-scope external metadata.
-
-### Migration
-
-```text
-{Pre: source is a supported, read-only copy that passed the legacy `ztd check`
-      with no pending journal; its version/check result/content hash are recorded;
-      target is an authorized empty/staging DB}
-ImportLegacy(source, target)
-{Post: every source entity is imported or quarantined exactly once;
-       every imported relation resolves or is explicitly quarantined;
-       original IDs/text/fields/provenance remain recoverable;
-       no new history or resolution is invented;
-       a rerun adds no duplicates and leaves an inspectable comparison report}
-```
-
-The invariant for resumable pagination/transactions states exactly which source units are committed and which remain unprocessed. Activation/cutover additionally requires every quarantine to be resolved or explicitly accepted.
-
-### Restore
-
-```text
-{Pre: target is empty; input has a supported complete manifest/schema}
-Restore(backup, target)
-{Post: all canonical rows and references are restored exactly once;
-       derived indexes are rebuilt; scope and validity checks remain true;
-       no credential is read from the backup;
-       a failed/partial input leaves the target without activated canonical state}
-```
-
-Tests compare logical state rather than raw SQLite bytes and exercise malformed/partial input rejection before activation.
-
-## 16. Verification evidence path
-
-The evidence must establish the claim directly, not just demonstrate that code compiled. Every external-client claim separates configuration written, connection established, and actual tool behavior observed.
-
-| Claim | Minimum evidence | Owner |
-| --- | --- | --- |
-| Correct local journey | Synthetic capture → process → plan → focus/checkpoint → daily/weekly review through the public CLI; inspect durable state after a new process starts. | Core implementer and evaluating user |
-| Atomicity and inter-process concurrency | Two processes with stale revisions; identical idempotency race; crash before/after commit; busy writer; no partial history/index state. | Core/storage implementer |
-| Scope isolation | Equivalent entities in personal/opensource/client scopes; query, search, read, references, plans, and mutations return no foreign data or influence. | Core implementer |
-| ZTD rule behavior | Boundary/override/next-iteration tests for daily MIT limits and one open focus across Profiles, one active primary goal per Profile, defer/review coverage, and all ten guided procedures. | Method/core implementer |
-| Portable Go storage | Go 1.27.4; native tests on macOS; cross-compilation and `go vet` for Linux/Windows; native smoke tests only when another OS is actually supported. Also FTS5, local concurrent processes, snapshot/export/restore. | Storage/release implementer |
-| MCP contract | Same domain cases through CLI and stdio MCP; schema limits, error shapes, stdio hygiene, permissions, interrupted process; a second real MCP client for portability claims. | Interface implementer |
-| Source coverage | Partial/error envelopes; a model-facing batch proves at most reported/unverified coverage; only the operator-configured trusted adapter proves observed complete coverage and the actual provider exchange. Then real read-only GitHub, Jira, and email retrieval using approved queries. No remote mutation in this check. | Source integrator |
-| Calendar correctness | Timezone/recurrence supplied by connector; observed availability partial failure; required cross-Profile `CalendarReviewAssertion`; confirmed focus block; lost response followed by reconciliation and no duplicate. | Calendar integrator |
-| Migration correctness | Verified quiescent legacy copy, recorded check result and hash, synthetic corpus, repeated/resumed import, relation and field comparisons, quarantine behavior, restored export; real-data copy only by explicit approval. | Migration implementer and user |
-| Restorability | Both snapshot and portable-export restore into empty directories, checks, entity/reference comparison and a scheduled restore drill. | Operator/release implementer |
-| Retrieval quality and cost | Fixed synthetic bilingual corpus, exact/paraphrase/constraint cases; actual model token/latency/tool-call measurements where host supports them; manual-note control; human correction counts. | Evaluating user |
-| Optional Wiki benefit | Comparison of linked FTS5 retrieval against cited draft/reviewed pages, including maintenance and rejected-proposal costs. Vectors are not part of this gate. | Evaluating user |
-
-The central repository checks after each relevant implementation increment are:
-
-```sh
-gofmt -l .
-go vet ./...
-go test ./...
-go test -race ./...
-go test ./test/integration -count=1
-go mod verify
-go build -o ./ztd ./cmd/ztd
-```
-
-`gofmt -l .` must print nothing. `go test -race ./...` is not evidence of inter-process locking correctness. CI uses the pinned Go version on the natively supported host, runs its tests there, cross-compiles and vets the other declared targets, and publishes neither personal data nor production credentials.
-
-Small verification affordances are justified: deterministic clock/ID test ports, a fake host source-envelope recorder, process-level crash hooks in integration tests, and `ztd check`/export comparison commands. These are retained only where they make future failures reproducible and diagnosable; they are not a generic test-only service architecture.
-
-## 17. Incremental delivery and acceptance
-
-Do not build all horizontal layers, then discover that the ZTD experience is wrong. Prove vertical journeys and the migration safety net first.
-
-### Stage 0 — Contract and feasibility
-
-- Freeze the vocabulary, command outcomes, state transitions, ScopeBinding, autonomy classes, and legacy source inventory.
-- Pin Go 1.27.4 and test `modernc.org/sqlite` plus FTS5 and the official MCP SDK with small focused spikes.
-- Inventory legacy Markdown/consumer behavior and the agent export without changing the active store.
-
-**Exit:** accepted specification, dependency evidence, scope/vocabulary mapping outline, and a reproducible migration fixture. No production database switch.
-
-### Stage 1 — Import and storage safety
-
-- Implement identity, scope, Capture/WorkItem/Project/Plan logical records, revision/history, SQLite migrations, and export/check. Create only the tables required by migration and basic storage safety in this stage; defer `FocusSession`, `Review`, `Checkpoint`, `Routine`, and other journey-only tables to the stage that uses them.
-- Implement read-only legacy import, comparison, quarantine, resumed import, and restore of the portable export.
-
-**Exit:** repeated equivalent imports and an explained comparison report on synthetic data; restore/isolation/concurrency tests pass. Existing `~/.ztd` remains untouched.
-
-### Stage 2 — Minimal ZTD through CLI
-
-- Deliver manual and directory Capture; one-at-a-time Process; Goal/Subgoal, Plan/PlanItem, and MIT/Big Rock rules; Focus and Checkpoints; daily/weekly Review; Routine due state; snapshot/export/restore.
-- Show structured state through CLI queries and optional read-only Markdown export.
-
-**Exit:** all core scoped journeys operate on copied data; backup restore and CLI restart preserve the next action. The app can guide all ten habits at contract level, while only the chosen initial habits activate by default.
-
-### Stage 3a — Agent-first MCP and local journeys
-
-- Expose the bounded MCP tools, ScopeBinding, approval boundaries, prompts, and English procedure assets. Connect through the configured OpenCode profile.
-- Evaluate Collect → Process → Plan → Do → Review with the user, including resuming without a transcript.
-
-**Exit:** measured successful completion with existing and new sessions, complete error/coverage handling, and no scope leakage. Do not call tools or prompts portable until a second client is exercised if portability is claimed.
-
-### Stage 3b–3f — Independently deliverable read-only connectors
-
-Each connector is a separate vertical slice with its own configuration, coverage tests, and exit. A connector that fails or is unavailable must not block the others or the completion of Stage 3a.
-
-- **Stage 3b — GitHub:** typed host source envelopes for the operator-approved notification/query scope.
-- **Stage 3c — Jira:** typed host source envelopes for the operator-approved read-only JQL scope.
-- **Stage 3d — Email:** typed host source envelopes for the operator-approved read-only folders.
-- **Stage 3e — Directory:** only if not already delivered by Stage 2; operator-approved paths with no traversal outside the roots.
-- **Stage 3f — Calendars read-only:** Office 365 and Google Calendar events/availability for plan preparation, including the required `CalendarReviewAssertion`.
-
-**Exit per connector:** the operator configures its scope, repeated review advances cursors without duplicates, partial/failed reads preserve honest gaps, model-facing review remains `reported/unverified` unless a trusted host adapter reports an actual exchange, and no content leaks outside its Scope.
-
-### Stage 4 — Confirmed calendar focus blocks and experience improvements
-
-- Add proposal/approval/operation/reconciliation for focus-block creation only.
-- Implement optional notifications via OS scheduler and a TUI only if the CLI/agent review proves it valuable.
-
-**Exit:** confirmed blocks are unique and recoverable after unknown responses; no general event synchronization exists.
-
-### Stage 5 — Knowledge expansion by demonstrated need
-
-- Evaluate typed knowledge and FTS5. Add the internal cited LLM Wiki only if it improves recall or continuity enough to justify its creation/review/maintenance cost.
-- Revisit vector retrieval only if fixed-corpus evaluation exposes meaningful failures not solved by structure and FTS5.
-
-**Exit:** measured benefit with original evidence still recoverable and no weakening of scope/review guarantees.
-
-### Final acceptance before real-data cutover
-
-- User accepts migration comparison and addresses every quarantine.
-- Correct minimal journey, external-source coverage, backup and both restore paths have been exercised.
-- Single shared DB and its complete backup destination have been explicitly approved for the included scopes.
-- New writes happen in exactly one canonical store; rollback/new-write reconciliation is documented and understood.
-- The existing Markdown system remains preserved and read-only until a separate archival decision.
-
-## 18. Remaining configuration, not hidden design decisions
-
-These items do not block the contract, but are explicit prerequisites before their corresponding real integrations:
-
-- Select and approve the Restic destination, retention, credentials, and policy for a backup containing all scopes.
-- Register actual GitHub source queries, Jira JQL/site access, email folders/labels, filesystem roots, and provider coverage limitations.
-- Verify availability and permission policies for the Office 365 tenant and the selected Google MCP/client configuration rather than assuming feature availability from marketing pages.
-- Configure IANA timezone, daily planning windows, focus-block defaults, notification preference, ScopeBindings, and per-habit adoption choices.
-- Decide whether a future separate client-only export/store is necessary to satisfy a client's remote-backup policy. That is an explicit architectural change, not a filter that silently removes related data from an otherwise complete backup.
-
-This specification creates only this design document. It does not change a repository, Go installation, MCP configuration, operational ZTD data, or remote provider. Implementation requires switching out of Plan mode; real migration, publication, and external writes retain their separate approval gates.
+- One open focus per actor; one active primary goal per profile; one plan per profile/kind/period; one review per profile/kind/period.
+- `waiting` requires `waiting_on`; `archived` requires `closed_at` + `resolution`.
+- `deferred` capture requires `review_after`.
+- Optimistic concurrency via `revision` / `--expected N`.
+- Idempotency via `(command, idempotency_key, request_hash)`; replay returns the stored result. **`request_hash` is byte-identical to v2:** `sha256` over Go-style canonical JSON of the request struct (fields in declaration order, HTML-escaping of `<`, `>`, `&`). Zig implements a canonical marshaller for hashed payloads so a retry issued after cutover with a pre-cutover key still replays instead of erroring on `storedHash != hash`. Where v2 already keeps a legacy hash path (`captureHashVersion` / `legacyHash` for captures), v3 preserves it. The corpus pins a pre-cutover idempotency row and asserts replay; DB diffs normalize `request_hash` only when the canonical bytes are proven equal.
+- Append-only `history_events` for every mutation.
+- Scope enforcement on every read/write; a scoped agent cannot cross scopes.
+
+### Trust and approval
+
+- `observed` coverage requires a trusted adapter (built-in directory connector). Host MCP/CLI batches are `reported`, never verified coverage.
+- Class C/D actions (external writes, commitments) require a real human approval boundary. MCP `commit_plan`, `doc put --status verified` promotion and external writes are gated by the host; ZTD records the approval provenance (`approved_by`, `approved_at`) but does not invent a roles framework.
+- A model-supplied `confirmed: true` is not proof of approval.
+
+## 8. CLI / MCP surface changes
+
+Additive only; existing commands keep their flags and JSON shape unless a compact default is introduced with `--full` escape.
+
+New CLI: `trace`, `override add`, `doc supersede`, `learn propose`, `review --derive`, `review --calendar-assert`, `review show`, `prepare --packet`, `source review --full`. Extended `doc put`: `--record-kind`, `--rationale`, `--options`, `--evidence`, `--approved-by`. Extended `doc search`: `--record-kind`.
+New MCP: `trace` only. `record_review` gains `derive`; `prepare` gains `packet`; `doc_put` gains `record_kind`/`rationale`/`options`/`evidence` and remains draft-only; `doc_search` gains a `record_kind` filter. No `record_decision`, `review_derive` or `prepare_packet` tools: those are argument shapes, not schemas. `delete_source` remains behind `--allow-delete-source`.
+
+Byte caps in §3 are tested on the serialized JSON of every compact response.
+
+## 9. Migration and cutover (big-bang, confirmed)
+
+One rewrite, one cutover. No dual-write, no incremental parity gates. The golden corpus is the acceptance test run **before** cutover; if it fails, cutover does not happen. The §12 stages are delivery order inside that single rewrite, not separate releases; a Stage-1 corpus run is partial by design and only the final run is the gate.
+
+1. **Baseline + golden corpus.** Measure Go binary size, RSS, startup, DB size, token usage and `tools/list` bytes on a fixed fixture corpus. Capture golden JSON outputs for every command and MCP tool, plus DB dumps after each journey. This corpus is the contract the Zig build must satisfy.
+2. **Full Zig rewrite.** Build system, vendored SQLite, migration runner, CLI, app/domain/store, MCP server, legacy importer, directory connector, time module. All existing features plus v3 features (migrations 0008–0012, edges, decisions, metrics, learn, token caps) land in the same rewrite. Go is frozen immediately.
+3. **Acceptance.** Run the full golden corpus against Zig: JSON diffs, DB diffs, MCP handshake/tool parity, legacy import parity, `check`/`migrate verify`. Every difference is either a bug or an intentional, documented v3 change. No silent drift.
+4. **Optimization pass.** Benchmarks against §10 targets; refactor until gates pass.
+5. **Cutover checklist.** (a) `ztd snapshot` to an approved directory; (b) restore it into a staging DB and run `ztd check` + `migrate verify`; (c) install the Zig binary **in place at the same absolute path** the hosts already reference; (d) restart the hosts so MCP registrations reload; (e) apply migrations 0008–0012; (f) update README/docs to v3 and keep Go 0.3.0 installable as a frozen tag.
+6. **Rollback.** Migrations are forward-only; Go cannot open a migrated database. Rollback = restore the pre-cutover snapshot + reinstall Go 0.3.0 **at the same path** + restart hosts. The snapshot is mandatory, not optional.
+
+**Golden corpus coverage (normative).** The generated matrix comes from the Go binary, so it cannot contain the v3-only surface. **The matrix is extended with the hand-listed v3 additions (§8)** — `trace`, `override add`, `learn propose`, `review show`, `review --derive`, `review --calendar-assert`, `prepare --packet`, `source review --full`, `doc put --record-kind/--rationale/--options/--evidence/--approved-by`, `doc search --record-kind`, and the directory-connector `observed` path — with their compact/`--full` variants and error paths, reviewed like the corpus itself. These have no Go oracle; their goldens are authored from the spec and asserted directly. A run is credible only if it covers:
+
+- every command and flag in the generated **and extended** matrix, each in JSON and text, for success **and** error paths (`Invalid`, `NotFound`, `ScopeDenied`, revision conflict);
+- idempotent replay (same key/request returns the stored result) and stale `--expected` rejection;
+- all five `process` outcomes, including `reference` and `immediate`;
+- MCP tools and 8 prompts: handshake/version negotiation, notifications, cancellation, unknown method, error results. Tool count is pinned by exposure config: 17 default (`delete_source` opt-in behind `--allow-delete-source`), 18 registered, +`trace` = 19; the Stage-0 baseline and corpus state which config they measure;
+- full journeys: capture→process→plan→focus→review; knowledge draft→verify→supersede; source reported batch→review→capture; legacy import including quarantine cases; **directory connector** (clean complete window → trusted cursor advances; read error → cursor unchanged; symlink escaping root rejected);
+- a **pre-cutover idempotency row** replayed after cutover (byte-identical `request_hash`, §7);
+- export/restore roundtrip (v1→v3 and v3→v3) and snapshot/restore;
+- migrations 0001–0012 on a fresh DB and on a v2 DB with source reviews and knowledge rows;
+- a concurrent CLI+MCP writer case (busy timeout, no lost update);
+- timezone/DST and ISO-week boundaries.
+
+Diffs normalize generated IDs, timestamps and ordering. **Legacy import parity is modulo 0010:** Go writes `knowledge_records`, Zig writes `documents`, so the diff tool maps `knowledge_records` rows to their `kr/<id>` document equivalents before comparing; a raw table diff is not the goal.
+
+Schema compatibility: existing `~/.ztd/ztd.db` opens unchanged up to 0007; 0008+ apply forward only at cutover. Export/restore is versioned (§5); snapshot is a raw copy. The consolidation migration (0010) must preserve every `knowledge_records` row in `documents` and keep `documents_fts` consistent; `migrate verify` and `check` gate it.
+
+## 10. Optimization targets and measurement
+
+Targets are goals to verify, not claims. Baseline measured first.
+
+| Metric | Go baseline | v3 target | Method |
+| --- | --- | --- | --- |
+| Binary size | 12.2 MB (Homebrew 0.3.0) | ≤ 3.0 MB stripped | `ls -l`, strip + LTO |
+| RSS (`status`, `prepare`) | measure | ≤ 12 MB | `/usr/bin/time -l`, repeated runs |
+| Startup to first output | measure | ≤ 8 ms | hyperfine, cold/warm |
+| Production LOC | ~14,026 | store+app ≤ 9,000; total ≤ 12,000 | `wc -l`, excluding tests; waiver above 12k with rationale |
+| DB size after journeys | measure | ±5% | `sqlite3 .db 'PRAGMA page_count*page_size'` |
+| Compact response bytes | n/a | caps in §3 | test assertions |
+| `tools/list` bytes | measure in Stage 0 (~31 KiB dev build, default 17 tools) | no growth over measured v2 baseline; 12 KiB aspiration dropped | serialized `tools/list` response, pinned exposure config |
+| Journey tokens | measure on fixtures | goal ≥30% reduction, waiver allowed | fixed eval script, actual tokens/calls |
+
+Binary size, RSS and startup are plausible for a static SQLite-linked ReleaseFast binary; **LOC is the least certain target** and the store is the reason (Go leans on `database/sql`; Zig has no equivalent and no std regexp). LOC is never met by deleting validation, error handling or tests. Durability is never traded for speed: `synchronous=FULL`, WAL, `BEGIN IMMEDIATE` stay. No `mmap` tricks that risk corruption. Benchmarks run on the same machine and fixtures as baseline.
+
+## 11. Verification and acceptance gates
+
+- All Go behavior covered by the golden corpus; no silent behavior drift.
+- `ztd check` and `check --bindings` pass on migrated and fresh databases.
+- `migrate verify` passes on the legacy copy; quarantine preserved.
+- Migrations 0001–0012 apply cleanly on fresh and existing DBs; `user_version` correct; `PRAGMA foreign_key_check` empty after 0009/0010.
+- 0010 preserves every `knowledge_records` row (count + field assertions) and `documents_fts` matches `documents`.
+- Export/restore roundtrips: v1→v3 mapped, v3→v3 native.
+- Byte-cap and truncation-boundary tests fail the build on regression; `tools/list` does not grow over the measured v2 baseline (pinned exposure config).
+- Benchmark gates in §10 met or explicitly waived with rationale.
+- Token eval reports actual tokens, calls, latency and corrections; the ≥30% reduction is a goal with a written waiver, not a silent pass.
+- MCP handshake/notification/cancellation/version tests pass; `observed` still rejected for host batches.
+- The binary makes no network calls; directory connector stays within approved roots and resolves symlinks before the containment check.
+
+## 12. Delivery history (big-bang)
+
+- **Stage 0:** baseline measurement + golden corpus + Zig build spike (SQLite C + FTS5 + JSON-RPC echo).
+- **Stage 1:** Zig rewrite of core + CLI + store + time module + `install`; corpus run green.
+- **Stage 2:** MCP server (18 tools, 8 prompts) + directory connector + `host_cli` kind.
+- **Stage 3:** v3 features: migrations 0008–0012, edges, decisions, metrics, learn, token caps.
+- **Stage 4:** acceptance run of the full corpus, including the v3 additions.
+- **Stage 5:** optimization pass + benchmarks (results in `docs/benchmarks/baseline.md`).
+- **Stage 6:** snapshot + cutover + docs; Go frozen at `v2-go-final`; 0.4.0 released for the twelve build targets.
+- **Later (not v3):** calendar focus blocks, external connectors beyond directory, LLM Wiki, TUI, a Zig port of the Markdown importer.
+
+## 13. Decisions and remaining risks
+
+### Resolved and implemented (2026-11-27)
+
+1. **Migration strategy: big-bang.** Full rewrite, one cutover. Mitigation: a defined golden corpus is the hard pre-cutover acceptance gate, plus a verified snapshot for rollback.
+2. **Knowledge store: consolidate into `documents`.** `knowledge_records` dropped after a field-complete migration; `record_kind` subtype avoids a CHECK rebuild. Mitigation: normative row mapping, collision pre-check, count/FTS assertions.
+3. **Toolchain: Zig 0.17.0 pinned.** Installed at `/Users/victor/bin/zig`. Mitigation: pin exactly, vendor the build, isolate std usage behind small wrappers so a future version bump is localized.
+4. **Export format breaks.** Version 2 with `links`; restore handles v1 by mapping. Documented, not silent.
+5. **Dead v2 schema revived.** `daily_limit_overrides` and `calendar_review_assertions` get writer and reader (`override add`, `review daily --calendar-assert`).
+6. **LOC target rescoped.** Store+app ≤9k, total ≤12k with waiver; correctness and validation are never cut to hit it.
+
+### Remaining risks
+
+7. **Big-bang drift.** The golden corpus is the only safety net; its coverage is the real risk, not the language. §9's coverage list is the minimum, and the corpus itself must be reviewed like code.
+8. **Rollback is restore-only.** Forward-only migrations mean Go cannot open a migrated DB. The pre-cutover snapshot (verified in staging) is the only rollback path; losing it loses rollback.
+9. **Host re-pointing.** Hosts register the MCP binary by absolute path; the swap must happen in place or the host keeps running Go. Restart hosts after cutover.
+10. **Token savings are protocol-driven.** MCP schemas are the largest per-session cost and the host controls loading them. `tools/list` is capped and new capability folds into existing tools, but a host that dumps full bodies will defeat the target.
+11. **MCP hand-rolled compliance.** Without an SDK, notifications, cancellation, version negotiation and error shapes need explicit tests against the Go SDK client.
+12. **Time correctness.** Timezone/DST and ISO weeks are new code with no std support; boundary fixtures are mandatory.
+13. **Zig std churn.** 0.17.0 may be a development line; a mid-migration stable release could force rework. Wrapper isolation limits the blast radius.
+14. **Spec location.** This file lives in the plan directory. On approval, move to `docs/spec.md` (v3) and update README/architecture.
