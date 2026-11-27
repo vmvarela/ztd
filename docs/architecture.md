@@ -7,55 +7,39 @@ layer, not a second implementation.
 ## Dependency direction
 
 ```
-cmd/ztd
-  └── internal/cli ──> internal/app ──> internal/domain
-  └── internal/mcpserver ──> internal/app
-                         ^                ^
-                         │                │
-                    internal/store ───────┘
-                    internal/legacy ──────┘
+src/main.zig ──> src/cli.zig ──> src/store/core.zig ──> src/domain.zig
+              └─> src/mcp.zig ──┘        │
+                                        ├─> src/store/store.zig (migrations, ids, history)
+                                        ├─> src/sqlite.zig (C bridge over the amalgamation)
+                                        ├─> src/timeutil.zig
+                                        ├─> src/errors.zig
+                                        └─> src/json.zig
 ```
 
-- `internal/domain` holds entities, identifiers, error families and invariants.
-  It imports no storage, transport or framework.
-- `internal/app` holds use cases and the `Repo` port. It validates
-  preconditions and orchestrates one call per user intent.
-- `internal/store` implements `Repo` on SQLite. It owns transactions, SQL,
-  migrations and the append-only history. `internal/store/sources.go` holds
-  the source registry and recorded batches; `internal/store/documents.go`
-  holds contexts, documents and projects — the document layer the Markdown
-  skills used to keep as files.
-- `internal/legacy` parses the old Markdown store and agent export. It is
-  read-only and has no dependency on the new store.
-- `internal/cli` parses flags and renders text or JSON. It contains no domain
-  rules; `cmd/ztd/main.go` only composes the CLI.
-- `internal/mcpserver` is a thin stdio adapter over `app.Service`. It fixes the
-  `ScopeBinding` at process start, maps `scope_denied` to `not_found` for model
-  callers and enforces tool-level bounds. It contains no storage rules.
+- `src/domain.zig` holds the entities and their JSON shapes. Nothing here knows
+  about SQL, flags or stdio.
+- `src/store/core.zig` is the use-case and persistence layer: it validates
+  preconditions, runs one transaction per intent, writes history and
+  idempotency records, and renders the same JSON the Go implementation did.
+- `src/store/store.zig` owns the connection, the migration runner (0001–0012,
+  each SQL plus an optional bounded assertion step) and the identifier
+  sequences.
+- `src/sqlite.zig` is the only place that touches the C API; the SQLite
+  amalgamation lives in `third_party/sqlite` and is compiled with FTS5 and
+  JSON1 into the binary.
+- `src/cli.zig` parses flags with the same semantics as Go's `flag` package and
+  renders the JSON envelope. `src/mcp.zig` is a thin stdio adapter: it embeds
+  the tool and prompt payloads, maps the same errors, and calls the same
+  `core` functions, so MCP is a second interface, not a second implementation.
+- `src/docs.zig` holds the document link graph and the lint report; `src/install.zig`
+  publishes the embedded bundles from `src/install_bundle/`.
+- `src/timeutil.zig` is the only place that reads the clock or the local
+  timezone (through libc); `src/json.zig` is the only place that escapes
+  strings, because the request hashes are computed over those exact bytes.
 
-The source layer follows the same direction: `domain.Source`,
-`SourceRetrieval`, `SourceItem` and `SourceReview` are vocabulary;
-`app.SourceCmd` and `app.SourceReviewCmd` with `AddSource`, `ListSources` and
-`RecordSourceReview` are the use cases — the service rejects `observed`
-coverage there, because no trusted host adapter exists; `store/sources.go`
-persists the registry and the batches. The CLI `source` commands and the
-`sources` / `record_source_review` tools are adapters over those
-methods, not a second implementation.
-
-`internal/legacy` may be deleted once the migration window closes. Nothing else
-depends on it.
-
-The document layer follows the same direction: `domain.Document`,
-`DocumentKind` and `DocumentStatus` are vocabulary; `app.ContextCmd`,
-`DocumentCmd` and `ProjectCmd` with `AddContext`, `PutDocument` and
-`AddProject` are the use cases — the service rejects unknown kinds, statuses,
-relative clone paths and credentialed repository URLs there; `store/documents.go`
-and `store/projects.go` persist them, with `PutDocument` idempotent by
-`(scope, kind, slug)` plus the expected revision, and a draft-only guard on the
-MCP path that keeps writes at `status=draft` and Expected 0 create-only. The CLI `context`, `doc` and
-`project` commands and `check --bindings` are adapters over those methods, not
-a second implementation. The skill workflows themselves are not ported yet:
-this layer stores the records they will read.
+The Markdown legacy importer is not part of this tree: `migrate import|verify|
+documents` lives in the Go implementation kept at the `v2-go-final` tag and runs
+against a quiescent copy when needed.
 
 ## Storage
 
