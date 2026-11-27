@@ -4475,6 +4475,30 @@ fn clip(a: std.mem.Allocator, text: []const u8, max: usize) ![]const u8 {
 }
 
 /// One hop of the provenance graph around `id`, both directions.
+/// Edges of a document that point at entities other than documents; the
+/// compact extension `doc related` uses for its `links` field.
+pub fn externalEdges(s: *Store, a: std.mem.Allocator, id: []const u8) ![]const TraceEdge {
+    var q = try s.db.prepare(
+        "SELECT relation, from_type, from_id, to_type, to_id FROM links " ++
+            "WHERE (from_id = ? AND to_type <> 'document') OR (to_id = ? AND from_type <> 'document') " ++
+            "ORDER BY relation, from_id, to_id",
+    );
+    defer q.finalize();
+    try q.bindText(1, id);
+    try q.bindText(2, id);
+    var edges: std.ArrayList(TraceEdge) = .empty;
+    while (try q.step()) {
+        try edges.append(a, .{
+            .relation = try dup(a, q.text(0)),
+            .from_type = try dup(a, q.text(1)),
+            .from_id = try dup(a, q.text(2)),
+            .to_type = try dup(a, q.text(3)),
+            .to_id = try dup(a, q.text(4)),
+        });
+    }
+    return edges.items;
+}
+
 pub fn traceEntity(s: *Store, a: std.mem.Allocator, id: []const u8) !TraceResult {
     const kind = entityKind(id) orelse return errors.invalid("unknown id \"{s}\"", .{id});
     var q = try s.db.prepare(

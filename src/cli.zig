@@ -1559,9 +1559,24 @@ fn docRelated(c: *Cli, args: []const []const u8) !void {
     const source = try core.getDocument(&r.st, c.arena, r.b, kind, slug, p.get("scope", ""));
     const all = try core.listDocuments(&r.st, c.arena, r.b, "");
     const rel = try doc.relatedDocuments(c.arena, all, source);
+    const edges = try core.externalEdges(&r.st, c.arena, source.id);
     var aw = Io.Writer.Allocating.init(c.arena);
     var o = try jsonw.Obj.init(&aw.writer);
     try doc.writeRelations(&o, rel);
+    // v3: non-document edges. Omitted when empty so v2 goldens stay identical.
+    if (edges.len > 0) {
+        var arr = try o.arr("links");
+        for (edges) |e| {
+            var item = try arr.obj();
+            try item.str("relation", e.relation);
+            try item.str("from_type", e.from_type);
+            try item.str("from_id", e.from_id);
+            try item.str("to_type", e.to_type);
+            try item.str("to_id", e.to_id);
+            try item.end();
+        }
+        try arr.end();
+    }
     try o.end();
     try succeedData(c, "doc related", aw.written());
 }

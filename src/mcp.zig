@@ -22,6 +22,7 @@ const tools_delete = @embedFile("mcp_assets/tools_delete.json");
 const prompts_json = @embedFile("mcp_assets/prompts.json");
 const prompt_texts = @embedFile("mcp_assets/prompt_texts.json");
 
+const trace_cap = 1024;
 const max_doc_put_bytes = 512 << 10;
 
 pub fn serve(arena: std.mem.Allocator, io: Io, w: *Io.Writer, st: *Store, b: domain.Binding, allow_delete: bool) !void {
@@ -324,6 +325,7 @@ fn callTool(
     if (std.mem.eql(u8, name, "doc_get")) return try toolDocGet(arena, st, b, args);
     if (std.mem.eql(u8, name, "doc_related")) return try toolDocRelated(arena, st, b, args);
     if (std.mem.eql(u8, name, "doc_put")) return try toolDocPut(arena, st, b, args, now);
+    if (std.mem.eql(u8, name, "trace")) return try toolTrace(arena, st, args);
     if (allow_delete and std.mem.eql(u8, name, "delete_source")) return try toolDeleteSource(arena, st, b, args, now);
     return errors.invalid("unknown tool \"{s}\"", .{name});
 }
@@ -678,7 +680,15 @@ fn readError(err: anyerror) anyerror {
 }
 
 fn toolDocSearch(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.json.Value) ![]const u8 {
-    const hits = try core.searchDocuments(st, a, b, try core.dup(a, argStr(args, "query")), try core.dup(a, argStr(args, "kind")), argInt(args, "limit"));
+    const hits = try core.searchDocumentsBy(
+        st,
+        a,
+        b,
+        try core.dup(a, argStr(args, "query")),
+        try core.dup(a, argStr(args, "kind")),
+        (try optArg(a, args, "record_kind")) orelse "",
+        argInt(args, "limit"),
+    );
     var aw = Io.Writer.Allocating.init(a);
     var o = try jsonw.Obj.init(&aw.writer);
     var arr = try o.arr("hits");
@@ -725,6 +735,60 @@ fn toolDocRelated(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?st
     return aw.written();
 }
 
+
+/// `options` may arrive as a JSON array (schema) or as a pre-encoded string.
+fn optionsArg(a: std.mem.Allocator, args: ?std.json.Value) ![]const u8 {
+    const v = jsonw.field(args orelse return "", "options") orelse return "";
+    return switch (v) {
+        .null => "",
+        .string => |str| try core.dup(a, str),
+        else => blk: {
+            var aw = Io.Writer.Allocating.init(a);
+            try jsonw.writeValue(a, &aw.writer, v);
+            break :blk aw.written();
+        },
+    };
+}
+
+fn toolTrace(a: std.mem.Allocator, st: *Store, args: ?std.json.Value) ![]const u8 {
+    const id = argStr(args, "id");
+    const t = try core.traceEntity(st, a, id);
+    var edges = t.edges;
+    var omitted: i64 = 0;
+    var data = try renderTrace(a, t, edges, omitted);
+    while (data.len > trace_cap and edges.len > 0) {
+        edges = edges[0 .. edges.len - 1];
+        omitted += 1;
+        data = try renderTrace(a, t, edges, omitted);
+    }
+    return data;
+}
+
+fn renderTrace(a: std.mem.Allocator, t: core.TraceResult, edges: []const core.TraceEdge, omitted: i64) ![]const u8 {
+    var aw = Io.Writer.Allocating.init(a);
+    var o = try jsonw.Obj.init(&aw.writer);
+    try o.str("id", t.id);
+    try o.str("kind", t.kind);
+    if (t.label.len > 0) try o.str("label", t.label);
+    var arr = try o.arr("edges");
+    for (edges) |e| {
+        var item = try arr.obj();
+        try item.str("relation", e.relation);
+        try item.str("from_type", e.from_type);
+        try item.str("from_id", e.from_id);
+        try item.str("to_type", e.to_type);
+        try item.str("to_id", e.to_id);
+        try item.end();
+    }
+    try arr.end();
+    if (omitted > 0) {
+        try o.int("omitted", omitted);
+        try o.boolean("truncated", true);
+    }
+    try o.end();
+    return aw.written();
+}
+
 fn toolDocPut(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.json.Value, now: timeutil.Timestamp) ![]const u8 {
     const scope = argStr(args, "scope");
     if (std.mem.trim(u8, scope, " \t\n\r\x0b\x0c").len == 0) {
@@ -736,6 +800,12 @@ fn toolDocPut(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.js
     if (slug.len + title.len + body.len > max_doc_put_bytes) {
         return errors.invalid("combined slug, title and body exceed {d} bytes", .{max_doc_put_bytes});
     }
+    var evidence: []const []const u8 = &.{};
+    if (argArr(args, "evidence")) |raw| {
+        const list = try a.alloc([]const u8, raw.len);
+        for (raw, 0..) |item, i| list[i] = try core.dup(a, item.string);
+        evidence = list;
+    }
     const d = try core.putDocument(st, a, .{
         .binding = b,
         .scope = try core.dup(a, scope),
@@ -746,6 +816,10 @@ fn toolDocPut(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.js
         .status = "draft",
         .expected = argInt(args, "expected_revision"),
         .draft_only = true,
+        .record_kind = (try optArg(a, args, "record_kind")) orelse "",
+        .rationale = (try optArg(a, args, "rationale")) orelse "",
+        .options_json = try optionsArg(a, args),
+        .evidence = evidence,
     }, now);
     var aw = Io.Writer.Allocating.init(a);
     var o = try jsonw.Obj.init(&aw.writer);
