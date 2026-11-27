@@ -782,7 +782,6 @@ fn toolDocRelated(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?st
     return aw.written();
 }
 
-
 /// `options` may arrive as a JSON array (schema) or as a pre-encoded string.
 fn optionsArg(a: std.mem.Allocator, args: ?std.json.Value) ![]const u8 {
     const v = jsonw.field(args orelse return "", "options") orelse return "";

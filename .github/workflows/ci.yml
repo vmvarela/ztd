@@ -13,41 +13,36 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Windows is covered by build-all's cross-compile job; the corpus
+        # harness runs the binary it tests, so it needs a POSIX runner.
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
 
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      # The conformance corpus is a Go harness: it drives the built binary as
+      # a subprocess and compares its JSON against the recorded goldens.
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
 
       - name: Format
-        shell: bash
-        run: |
-          out="$(gofmt -l .)"
-          if [ -n "$out" ]; then
-            echo "$out"
-            echo "::error::gofmt reported unformatted files"
-            exit 1
-          fi
-
-      - name: Vet
-        run: go vet ./...
+        run: zig fmt --check src build.zig
 
       - name: Test
-        run: go test ./...
+        run: zig build test
 
-      - name: Test (race)
-        if: runner.os != 'Windows'
-        run: go test -race ./...
+      - name: Vet harness
+        run: go vet ./test/...
 
-      - name: Integration
-        run: go test ./test/integration -count=1
-
-      - name: Build
-        run: go build -o ztd ./cmd/ztd
+      - name: Corpus
+        run: |
+          zig build --release=fast
+          ZTD_BIN=./zig-out/bin/ztd go test ./test/corpus -count=1
 
       - name: Smoke
-        shell: bash
-        run: go run ./cmd/ztd version
+        run: ./zig-out/bin/ztd version

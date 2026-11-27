@@ -21,17 +21,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v7
+      - uses: mlugg/setup-zig@v2
         with:
-          go-version: '1.27.x'
+          version: 0.17.0
 
       - name: Install scdoc
         run: sudo apt-get install -y scdoc
 
       - name: Build
-        env:
-          CGO_ENABLED: "0"
-        run: go build -trimpath -ldflags "-s -w" -o ztd ./cmd/ztd
+        run: |
+          zig build --release=fast
+          cp zig-out/bin/ztd ztd
 
       - name: Build man page
         shell: bash

@@ -57,9 +57,7 @@ pub const Store = struct {
         const version = try self.userVersion();
         const highest: i64 = migrations.len;
         if (version > highest) {
-            return errors.fail(.db_incompatible,
-                "database schema version {d} is newer than the highest supported version {d}",
-                .{ version, highest });
+            return errors.fail(.db_incompatible, "database schema version {d} is newer than the highest supported version {d}", .{ version, highest });
         }
         if (version == 0) {
             var stmt = try self.db.prepare(
@@ -68,8 +66,7 @@ pub const Store = struct {
             defer stmt.finalize();
             if (!try stmt.step()) return errors.fail(.db_incompatible, "cannot inspect schema", .{});
             if (stmt.int(0) > 0) {
-                return errors.fail(.db_incompatible,
-                    "existing SQLite file has tables but no ZTD schema version; refusing to initialize it", .{});
+                return errors.fail(.db_incompatible, "existing SQLite file has tables but no ZTD schema version; refusing to initialize it", .{});
             }
         }
         var i: usize = @intCast(version);
@@ -141,8 +138,7 @@ pub fn lookupIdem(
     // The stored JSON lives in SQLite's buffer until the statement is reset,
     // so copy it before that happens.
     if (!std.mem.eql(u8, stored_hash, hash)) {
-        return errors.fail(.idempotency_conflict,
-            "idempotency key \"{s}\" was already used with a different payload", .{key});
+        return errors.fail(.idempotency_conflict, "idempotency key \"{s}\" was already used with a different payload", .{key});
     }
     return result;
 }
@@ -173,7 +169,7 @@ pub fn scopeFilter(buf: []u8, count: usize) []const u8 {
         if (i > 0) buf[i * 2 - 1] = ',';
         buf[i * 2] = '?';
     }
-    return buf[0 .. if (count == 0) 0 else count * 2 - 1];
+    return buf[0..if (count == 0) 0 else count * 2 - 1];
 }
 
 test "migrations apply on a fresh database" {

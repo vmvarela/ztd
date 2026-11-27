@@ -3,6 +3,7 @@
 //! (only `time.Local`), so `localtime_r` is a faithful substitute.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @import("c");
 
 pub const Timestamp = i64;
@@ -147,6 +148,7 @@ pub fn fmtIsoWeek(t: Timestamp, buf: *[8]u8) []const u8 {
 
 /// Zone name from /etc/localtime's symlink target, falling back to "Local".
 pub fn localTimezone(buf: []u8) []const u8 {
+    if (builtin.os.tag == .windows) return "Local";
     const n = c.readlink("/etc/localtime", buf.ptr, buf.len);
     if (n > 0) {
         const target = buf[0..@intCast(n)];

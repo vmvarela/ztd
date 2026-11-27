@@ -2,6 +2,7 @@
 //! store, prepare/bind/step/column, and transactions.
 
 const std = @import("std");
+const builtin = @import("builtin");
 pub const c = @import("c");
 const errors = @import("errors.zig");
 
@@ -227,14 +228,14 @@ pub const Statement = struct {
 fn checkHeader(path: [:0]const u8) errors.Ztd!void {
     const fd = c.open(path, c.O_RDONLY);
     if (fd < 0) {
-        if (std.c._errno().* == @intFromEnum(std.c.E.NOENT)) return;
+        if (std.c._errno().* == @backingInt(std.c.E.NOENT)) return;
         return errors.fail(.io_error, "open database file: {s}", .{path});
     }
     defer _ = c.close(fd);
     var hdr: [sqliteMagic.len]u8 = undefined;
     var n: usize = 0;
     while (n < hdr.len) {
-        const got = c.read(fd, hdr[n..].ptr, hdr.len - n);
+        const got = c.read(fd, hdr[n..].ptr, @intCast(hdr.len - n));
         if (got < 0) return errors.fail(.io_error, "read database header: {s}", .{path});
         if (got == 0) break;
         n += @intCast(got);

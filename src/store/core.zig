@@ -2,6 +2,7 @@
 //! idempotency, history and id-sequence helpers.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const sqlite = @import("../sqlite.zig");
 const errors = @import("../errors.zig");
 const timeutil = @import("../timeutil.zig");
@@ -1765,9 +1766,8 @@ pub fn prepare(s: *Store, a: std.mem.Allocator, b: domain.Binding, date_in: []co
     var waiting = std.ArrayList(domain.WorkItem).empty;
     for ([_][]const u8{ "next", "waiting" }) |lc| {
         const clause = try scopeFilter(a, b.scopes.len);
-        const sql = try std.fmt.allocPrint(a,
-            "SELECT " ++ work_item_columns ++ " FROM work_items WHERE lifecycle = ? AND scope_id IN ({s}) " ++
-                "ORDER BY updated_at DESC, id ASC LIMIT 10", .{clause});
+        const sql = try std.fmt.allocPrint(a, "SELECT " ++ work_item_columns ++ " FROM work_items WHERE lifecycle = ? AND scope_id IN ({s}) " ++
+            "ORDER BY updated_at DESC, id ASC LIMIT 10", .{clause});
         var stmt = try s.db.prepare(sql);
         defer stmt.finalize();
         try stmt.bindText(1, lc);
@@ -1908,8 +1908,7 @@ pub fn commitPlan(s: *Store, a: std.mem.Allocator, cmd: CommitPlanCmd, decision:
     } else if (cmd.expected != 0) {
         return errors.fail(.stale_revision, "no plan exists for profile {s} {s} {s}, so expected must be 0", .{ cmd.binding.profile, cmd.kind, cmd.period });
     }
-    const plan_id = if (existing) |p| p.id else
-        try std.fmt.allocPrint(a, "P-{s}-{s}-{s}", .{ cmd.binding.profile, cmd.kind, cmd.period });
+    const plan_id = if (existing) |p| p.id else try std.fmt.allocPrint(a, "P-{s}-{s}-{s}", .{ cmd.binding.profile, cmd.kind, cmd.period });
     const next_rev: i64 = if (existing) |p| p.revision + 1 else 1;
 
     var seen = std.StringHashMap(void).init(a);
@@ -1937,8 +1936,7 @@ pub fn commitPlan(s: *Store, a: std.mem.Allocator, cmd: CommitPlanCmd, decision:
                 if (cmd.override_id.len > 0) {
                     return errors.invalid("daily limit override \"{s}\" does not apply to {s} for actor {s}", .{ cmd.override_id, cmd.period, cmd.binding.actor });
                 }
-                return errors.fail(.rules_acknowledgement_required,
-                    "daily plan has {d} MITs; 1..3 need no override, otherwise record a daily limit override", .{mit_count});
+                return errors.fail(.rules_acknowledgement_required, "daily plan has {d} MITs; 1..3 need no override, otherwise record a daily limit override", .{mit_count});
             }
         }
     }
@@ -2818,7 +2816,7 @@ const joined_document_columns = "documents.id, documents.scope_id, documents.kin
 
 pub const document_kinds = [_][]const u8{
     "knowledge", "knowledge_index", "project_note", "plan_daily", "plan_weekly",
-    "review",   "journal",         "calendar",      "adoption",   "passion",
+    "review",    "journal",         "calendar",     "adoption",   "passion",
     "routine",
 };
 
@@ -3391,7 +3389,6 @@ fn refuseReusedSourceId(s: *Store, id: []const u8) !void {
     }
 }
 
-
 pub fn addSource(s: *Store, a: std.mem.Allocator, cmd: SourceCmd, now: Timestamp) !domain.Source {
     try validateSourceCmd(a, cmd);
     const now_s = try fmtTs(a, now);
@@ -3509,11 +3506,10 @@ pub fn deleteSource(s: *Store, a: std.mem.Allocator, b: domain.Binding, id: []co
         }
     }
     const src = try loadSourceScope(s, a, b, id);
-    const sql = try std.fmt.allocPrint(a,
-        "SELECT " ++
-            "(SELECT count(*) FROM captures c WHERE c.source_id = ? AND c.scope_id = ? AND NOT " ++
-            "(c.source_id = 'legacy' AND EXISTS (SELECT 1 FROM history_events h WHERE h.entity_type = 'capture' AND h.entity_id = c.id AND h.scope_id = c.scope_id AND h.event = 'imported'))), " ++
-            "(SELECT count(*) FROM source_reviews WHERE source_id = ?)", .{});
+    const sql = try std.fmt.allocPrint(a, "SELECT " ++
+        "(SELECT count(*) FROM captures c WHERE c.source_id = ? AND c.scope_id = ? AND NOT " ++
+        "(c.source_id = 'legacy' AND EXISTS (SELECT 1 FROM history_events h WHERE h.entity_type = 'capture' AND h.entity_id = c.id AND h.scope_id = c.scope_id AND h.event = 'imported'))), " ++
+        "(SELECT count(*) FROM source_reviews WHERE source_id = ?)", .{});
     var q = try s.db.prepare(sql);
     defer q.finalize();
     try q.bindText(1, id);
@@ -3719,7 +3715,7 @@ pub fn recordSourceReview(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd,
                 return errors.fail(.conflict, "batch {s} was already recorded for source {s}", .{ cmd.batch_id, cmd.source_id });
             }
             if (std.mem.indexOf(u8, msg, "source_reviews.idempotency_key") != null) {
-                return errors.fail(.conflict, "idempotency key was already recorded for source {s}", .{ cmd.source_id });
+                return errors.fail(.conflict, "idempotency key was already recorded for source {s}", .{cmd.source_id});
             }
         }
         return e;
@@ -3883,8 +3879,13 @@ fn parseDirectoryRoots(a: std.mem.Allocator, id: []const u8, connection_ref: []c
 fn realpathAlloc(a: std.mem.Allocator, path: []const u8) ![]const u8 {
     const z = try a.dupeSentinel(u8, path, 0);
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const resolved = c.realpath(z.ptr, &buf) orelse return error.RealpathFailed;
-    return a.dupe(u8, std.mem.span(resolved));
+    // Windows has no realpath; _fullpath absolutizes without resolving links.
+    const resolved = if (builtin.os.tag == .windows)
+        c._fullpath(&buf, z.ptr, buf.len)
+    else
+        c.realpath(z.ptr, &buf);
+    if (resolved == null) return error.RealpathFailed;
+    return a.dupe(u8, std.mem.span(resolved.?));
 }
 
 fn insideRoot(path: []const u8, root: []const u8) bool {
@@ -4434,7 +4435,6 @@ fn lessTable(_: void, a: TableDef, b: TableDef) bool {
     return std.mem.order(u8, a.name, b.name) == .lt;
 }
 
-
 const ColumnIdx = struct { name: []const u8, idx: c_int };
 
 fn lessIndexByName(_: void, a: ColumnIdx, b: ColumnIdx) bool {
@@ -4669,10 +4669,9 @@ pub const InboxStats = struct { pending: i64, due: i64, remaining: i64 };
 
 pub fn inboxStats(s: *Store, a: std.mem.Allocator, b: domain.Binding, now: Timestamp) !InboxStats {
     try validateBinding(b);
-    const sql = try std.fmt.allocPrint(a,
-        "SELECT COALESCE(SUM(CASE WHEN processing_state = 'pending' THEN 1 ELSE 0 END), 0), " ++
-            "COALESCE(SUM(CASE WHEN processing_state = 'deferred' AND review_after <= ? THEN 1 ELSE 0 END), 0) " ++
-            "FROM captures WHERE scope_id IN ({s})", .{try scopeFilter(a, b.scopes.len)});
+    const sql = try std.fmt.allocPrint(a, "SELECT COALESCE(SUM(CASE WHEN processing_state = 'pending' THEN 1 ELSE 0 END), 0), " ++
+        "COALESCE(SUM(CASE WHEN processing_state = 'deferred' AND review_after <= ? THEN 1 ELSE 0 END), 0) " ++
+        "FROM captures WHERE scope_id IN ({s})", .{try scopeFilter(a, b.scopes.len)});
     var stmt = try s.db.prepare(sql);
     defer stmt.finalize();
     try stmt.bindText(1, try fmtTs(a, now));

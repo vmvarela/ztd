@@ -1558,10 +1558,10 @@ fn cmdDoc(c: *Cli, args: []const []const u8) !void {
 
 fn docPut(c: *Cli, args: []const []const u8) !void {
     const specs = [_]Spec{
-        .{ .name = "scope", .value = true },   .{ .name = "kind", .value = true },
-        .{ .name = "slug", .value = true },    .{ .name = "title", .value = true },
-        .{ .name = "body", .value = true },    .{ .name = "file", .value = true },
-        .{ .name = "status", .value = true },  .{ .name = "expected", .value = true },
+        .{ .name = "scope", .value = true },       .{ .name = "kind", .value = true },
+        .{ .name = "slug", .value = true },        .{ .name = "title", .value = true },
+        .{ .name = "body", .value = true },        .{ .name = "file", .value = true },
+        .{ .name = "status", .value = true },      .{ .name = "expected", .value = true },
         .{ .name = "record-kind", .value = true }, .{ .name = "rationale", .value = true },
         .{ .name = "options", .value = true },     .{ .name = "evidence", .value = true, .multi = true },
         .{ .name = "approved-by", .value = true }, .{ .name = "valid-from", .value = true },
@@ -1639,8 +1639,8 @@ fn docList(c: *Cli, args: []const []const u8) !void {
 
 fn docSearch(c: *Cli, args: []const []const u8) !void {
     const specs = [_]Spec{
-        .{ .name = "scope", .value = true }, .{ .name = "query", .value = true },
-        .{ .name = "kind", .value = true },  .{ .name = "limit", .value = true },
+        .{ .name = "scope", .value = true },       .{ .name = "query", .value = true },
+        .{ .name = "kind", .value = true },        .{ .name = "limit", .value = true },
         .{ .name = "record-kind", .value = true },
     };
     const p = try parseFlags(c.arena, args, &specs);
@@ -1840,11 +1840,11 @@ fn cmdSource(c: *Cli, args: []const []const u8) !void {
 
 fn sourceAdd(c: *Cli, args: []const []const u8) !void {
     const specs = [_]Spec{
-        .{ .name = "id", .value = true },        .{ .name = "name", .value = true },
-        .{ .name = "scope", .value = true },     .{ .name = "kind", .value = true },
-        .{ .name = "connector", .value = true }, .{ .name = "provider", .value = true },
-        .{ .name = "connection-ref", .value = true },
-        .{ .name = "query", .value = true },     .{ .name = "cadence", .value = true },
+        .{ .name = "id", .value = true },             .{ .name = "name", .value = true },
+        .{ .name = "scope", .value = true },          .{ .name = "kind", .value = true },
+        .{ .name = "connector", .value = true },      .{ .name = "provider", .value = true },
+        .{ .name = "connection-ref", .value = true }, .{ .name = "query", .value = true },
+        .{ .name = "cadence", .value = true },
     };
     const p = try parseFlags(c.arena, args, &specs);
     const scope = p.get("scope", "");
@@ -2029,7 +2029,7 @@ fn renderSourceReview(w: *Io.Writer, out: core.SourceReviewResult, shown: usize)
 }
 
 fn sourceDelete(c: *Cli, args: []const []const u8) !void {
-    const specs = [_]Spec{ .{ .name = "id", .value = true } };
+    const specs = [_]Spec{.{ .name = "id", .value = true }};
     const p = try parseFlags(c.arena, args, &specs);
     if (p.positional.len != 0) return errors.invalid("usage: source delete --id ID", .{});
     const id = p.get("id", "");
@@ -2353,7 +2353,7 @@ fn cmdInstall(c: *Cli, args: []const []const u8) !void {
     if (!c.json) {
         var buf: [128]u8 = undefined;
         const summary = try std.fmt.bufPrint(&buf, "installed {d}, updated {d}, unchanged {d}{s}", .{
-            report.installed, report.updated, report.unchanged,
+            report.installed,                                       report.updated, report.unchanged,
             if (cfg.dry_run) " (dry run, nothing written)" else "",
         });
         return succeedData(c, "install", try quoteJson(c.arena, summary));
