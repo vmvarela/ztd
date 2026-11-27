@@ -65,11 +65,11 @@ later releases publish from CI), a Homebrew formula, Scoop, WinGet, AUR,
 Nix and the APT/RPM/APK channels — see
 [packaging/README.md](packaging/README.md).
 
-Or build from source (requires Go 1.27.4):
+Or build from source (requires Zig 0.17):
 
 ```sh
-go build -o ztd ./cmd/ztd
-./ztd version
+zig build --release=fast
+./zig-out/bin/ztd version
 ```
 
 Then publish the embedded assets — the OpenCode skills to

@@ -1,10 +1,12 @@
 #!/bin/sh
+# Full check for the Zig product plus the Go conformance harness.
 set -eu
-gofmt -l .
-test -z "$(gofmt -l .)"
-go vet ./...
-go test ./...
-go test -race ./...
-go test ./test/integration -count=1
-go mod verify
-go build -o ./ztd ./cmd/ztd
+zig=${ZIG:-/Users/victor/bin/zig}
+go=${GO:-/opt/homebrew/bin/go}
+
+"$zig" build --release=fast
+"$zig" build test
+ZTD_BIN=./zig-out/bin/ztd "$go" test ./test/corpus -count=1
+"$go" vet ./test/...
+test -z "$("$go" fmt ./test/... 2>&1 | head -1)"
+"$go" mod verify
