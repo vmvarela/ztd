@@ -1475,6 +1475,27 @@ pub const usage =
     \\  find        search work item titles
     \\  list        list work items or the inbox
     \\  move        move a work item between lifecycles
+    \\  goal        set, show, complete or cancel the primary goal
+    \\  prepare     build the daily brief (--packet for a compact decision packet)
+    \\  plan        read the plan or commit one (plan commit)
+    \\  focus       start, checkpoint or finish a focus session
+    \\  review      record a review (--derive for metrics) or show its metrics
+    \\  override    record a daily limit override
+    \\  learn       propose draft knowledge from a review
+    \\  routines    list due routines and mark them done
+    \\  due         alias for routines due
+    \\  trace       show the provenance edges of one entity
+    \\  doc         put, get, list, search, relate, log, lint, archive, supersede
+    \\  source      add, apply, list, review, scan or delete an ingestion source
+    \\  scope       add or list scopes
+    \\  context     add or list contexts
+    \\  project     add, list or show projects
+    \\  check       verify database integrity
+    \\  export      write a portable JSON export
+    \\  restore     load an export into an empty database
+    \\  snapshot    copy the database with VACUUM INTO
+    \\  install     publish the opencode integration or the method templates
+    \\  mcp         serve MCP over stdio
     \\  version     print the version
     \\
 ;
