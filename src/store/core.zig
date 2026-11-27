@@ -2723,6 +2723,17 @@ pub fn runCheck(s: *Store, a: std.mem.Allocator, b: ?domain.Binding) !CheckRepor
     for (try run.collect("SELECT profile_id || '/' || kind || '/' || period FROM reviews GROUP BY profile_id, kind, period HAVING count(*) > 1", null, null)) |id|
         try run.fail("review {s} duplicates a profile/kind/period", .{id});
 
+    // 12. Solo avisa a quien practica la aserción de calendario: un perfil sin
+    // ninguna aserción no la usa, así que no se le exige.
+    if (b) |binding| {
+        const q = "SELECT r.id FROM reviews r WHERE r.kind = 'daily' AND r.profile_id = ? AND EXISTS (SELECT 1 FROM calendar_review_assertions cra WHERE cra.profile_id = r.profile_id) AND NOT EXISTS (SELECT 1 FROM calendar_review_assertions cra WHERE cra.profile_id = r.profile_id AND cra.actor_id = ? AND cra.local_date = r.period)";
+        var stmt = try s.db.prepare(q);
+        defer stmt.finalize();
+        try stmt.bindText(1, binding.profile);
+        try stmt.bindText(2, binding.actor);
+        while (try stmt.step()) try run.fail("daily review {s} has no calendar assertion", .{stmt.text(0)});
+    }
+
     return .{ .ok = run.failures.items.len == 0, .errors = run.failures.items };
 }
 
