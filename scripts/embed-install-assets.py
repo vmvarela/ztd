@@ -14,9 +14,12 @@ import shutil
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 # (prefix published by the installer, source tree, name under src/install_bundle)
+# Only the published subtrees: the Go embed directive shipped
+# integrations/opencode/skills and method/templates/*.md, and a README left
+# loose in either tree must not land in $HOME/.config/opencode or the store.
 BUNDLES = [
-    ("integrations/opencode", ROOT / "integrations/opencode", "opencode"),
-    ("method", ROOT / "method", "templates"),
+    ("integrations/opencode", ROOT / "integrations/opencode", "opencode", "skills"),
+    ("method", ROOT / "method", "templates", "templates"),
 ]
 SKIP = {".DS_Store"}
 
@@ -26,8 +29,8 @@ def main() -> None:
     if dest_root.exists():
         shutil.rmtree(dest_root)
     rows = []
-    for prefix, base, name in BUNDLES:
-        for path in sorted(p for p in base.rglob("*") if p.is_file()):
+    for prefix, base, name, sub in BUNDLES:
+        for path in sorted(p for p in (base / sub).rglob("*") if p.is_file()):
             if path.name in SKIP:
                 continue
             rel = path.relative_to(base).as_posix()

@@ -380,7 +380,7 @@ pub fn capture(s: *Store, a: std.mem.Allocator, cmd: CaptureCmd, now: Timestamp)
         var ref = try s.db.prepare("SELECT scope_id FROM sources WHERE id = ?");
         defer ref.finalize();
         try ref.bindText(1, source);
-        if (!try ref.step()) return errors.invalid("unknown source reference {s}", .{source});
+        if (!try ref.step()) return errors.fail(.not_found, "source {s} not found", .{source});
         if (!std.mem.eql(u8, ref.text(0), scope)) {
             return errors.fail(.scope_denied, "source {s} belongs to scope {s}, not {s}", .{ source, ref.text(0), scope });
         }

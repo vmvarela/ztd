@@ -24,25 +24,17 @@ jobs:
         with:
           version: 0.17.0
 
-      # The conformance corpus is a Go harness: it drives the built binary as
-      # a subprocess and compares its JSON against the recorded goldens.
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.27.x'
-
       - name: Format
-        run: zig fmt --check src build.zig
+        run: zig fmt --check src test build.zig
 
       - name: Test
         run: zig build test
 
-      - name: Vet harness
-        run: go vet ./test/...
-
       - name: Corpus
-        run: |
-          zig build --release=fast
-          ZTD_BIN=./zig-out/bin/ztd go test ./test/corpus -count=1
+        run: zig build corpus
+
+      - name: Integration
+        run: zig build integration
 
       - name: Smoke
         run: ./zig-out/bin/ztd version

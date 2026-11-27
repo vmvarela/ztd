@@ -31,6 +31,43 @@ pub fn build(b: *std.Build) void {
     });
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+
+    // The conformance harnesses spawn the installed binary, so both steps
+    // depend on the install artifact and pass its absolute path.
+    const corpus = harnessStep(b, target, optimize, "corpus", "Replay the golden corpus", "test/corpus/main.zig", exe);
+    _ = corpus;
+    const integration = harnessStep(b, target, optimize, "integration", "Run the integration suite", "test/integration/main.zig", exe);
+    _ = integration;
+}
+
+/// A test runner that drives the product binary through its CLI and MCP
+/// surface. It only needs std: no SQLite, no C.
+fn harnessStep(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    name: []const u8,
+    description: []const u8,
+    root: []const u8,
+    exe: *std.Build.Step.Compile,
+) *std.Build.Step {
+    const runner = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(root),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    // addRunArtifact passes the product binary as argv[1], so the harness
+    // never has to guess where the build put it.
+    const run = b.addRunArtifact(runner);
+    run.addArtifactArg(exe);
+    run.has_side_effects = true;
+    const step = b.step(name, description);
+    step.dependOn(&run.step);
+    return step;
 }
 
 fn productModule(

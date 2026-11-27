@@ -127,7 +127,12 @@ pub fn serve(arena: std.mem.Allocator, io: Io, w: *Io.Writer, st: *Store, b: dom
             const args = p.object.get("arguments");
             const payload = callTool(arena, io, st, b, allow_delete, name, args) catch |err| {
                 if (err == error.Ztd) {
-                    const msg2 = try std.fmt.allocPrint(arena, "{s}: {s}", .{ errors.getFamily().text(), errors.detail() });
+                    // The Go server answered every out-of-scope refusal with the
+                    // same not_found, so a model cannot probe other scopes.
+                    const msg2 = if (errors.getFamily() == .scope_denied)
+                        "not_found: not found"
+                    else
+                        try std.fmt.allocPrint(arena, "{s}: {s}", .{ errors.getFamily().text(), errors.detail() });
                     try errorReply(w, id, msg2);
                 } else {
                     const msg2 = try std.fmt.allocPrint(arena, "io_error: {s}", .{@errorName(err)});
@@ -308,6 +313,7 @@ fn callTool(
     args: ?std.json.Value,
 ) ![]const u8 {
     const now = timeutil.now(io);
+    try validateToolArgs(arena, allow_delete, name, args);
     if (std.mem.eql(u8, name, "capture")) return try toolCapture(arena, st, b, args, now);
     if (std.mem.eql(u8, name, "inbox_next")) return try toolInboxNext(arena, st, b, now);
     if (std.mem.eql(u8, name, "process_capture")) return try toolProcess(arena, st, b, args, now);
@@ -328,6 +334,53 @@ fn callTool(
     if (std.mem.eql(u8, name, "trace")) return try toolTrace(arena, st, args);
     if (allow_delete and std.mem.eql(u8, name, "delete_source")) return try toolDeleteSource(arena, st, b, args, now);
     return errors.invalid("unknown tool \"{s}\"", .{name});
+}
+
+/// Rejects the arguments a tool's own inputSchema forbids: unknown properties
+/// when `additionalProperties` is false, and any missing `required` entry.
+/// Only the two rules the schemas state are enforced; the typed handlers
+/// validate the values themselves.
+fn validateToolArgs(a: std.mem.Allocator, allow_delete: bool, name: []const u8, args: ?std.json.Value) !void {
+    const payload = if (allow_delete) tools_delete else tools_default;
+    const parsed = std.json.parseFromSlice(std.json.Value, a, payload, .{}) catch return;
+    const root = parsed.value;
+    if (root != .object) return;
+    const tools = jsonw.arrField(root, "tools") orelse return;
+    for (tools) |tool| {
+        if (tool != .object) continue;
+        const tool_name = jsonw.strField(tool, "name") orelse continue;
+        if (!std.mem.eql(u8, tool_name, name)) continue;
+        const schema = jsonw.field(tool, "inputSchema") orelse return;
+        if (schema != .object) return;
+        const props = jsonw.field(schema, "properties");
+
+        if (args) |given| {
+            if (given != .object) return;
+            if (props) |p| {
+                if (p == .object) {
+                    const closed = jsonw.boolField(schema, "additionalProperties") orelse true;
+                    if (!closed) {
+                        var it = given.object.iterator();
+                        while (it.next()) |kv| {
+                            if (p.object.get(kv.key_ptr.*) == null) {
+                                return errors.invalid("additional properties: \"{s}\" is not part of the {s} schema", .{ kv.key_ptr.*, name });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        const required = jsonw.arrField(schema, "required") orelse return;
+        for (required) |field| {
+            if (field != .string) continue;
+            const present = if (args) |given|
+                (given == .object and given.object.get(field.string) != null)
+            else
+                false;
+            if (!present) return errors.invalid("required: missing \"{s}\" for {s}", .{ field.string, name });
+        }
+        return;
+    }
 }
 
 fn toolCapture(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.json.Value, now: timeutil.Timestamp) ![]const u8 {
@@ -875,7 +928,15 @@ fn toolDocPut(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.js
 }
 
 fn toolDeleteSource(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.json.Value, now: timeutil.Timestamp) ![]const u8 {
-    const src = try core.deleteSource(st, a, b, try core.dup(a, argStr(args, "source_id")), try core.dup(a, argStr(args, "idempotency_key")), now);
+    const src = core.deleteSource(st, a, b, try core.dup(a, argStr(args, "source_id")), try core.dup(a, argStr(args, "idempotency_key")), now) catch |err| {
+        // A missing source and one outside the binding answer alike, so a
+        // model cannot probe the registry through deletion.
+        if (err == error.Ztd) {
+            const fam = errors.getFamily();
+            if (fam == .not_found or fam == .scope_denied) return errors.fail(.not_found, "not found", .{});
+        }
+        return err;
+    };
     var aw = Io.Writer.Allocating.init(a);
     var o = try jsonw.Obj.init(&aw.writer);
     var inner = try o.obj("source");

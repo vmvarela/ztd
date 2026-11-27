@@ -571,7 +571,7 @@
               "created_at": "<ts>",
               "updated_at": "<ts>"
             },
-            "rank": -1e-06,
+            "rank": -0.000001,
             "snippet": "One binary over [SQLite]."
           }
         ]
@@ -782,7 +782,8 @@
             "cursor": "",
             "last_attempt_at": "<ts>",
             "created_at": "<ts>",
-            "updated_at": "<ts>"
+            "updated_at": "<ts>",
+            "last_reported_at": "<ts>"
           }
         ]
       }
@@ -835,6 +836,8 @@
     "calendar_review_assertions": null,
     "captures": [
       {
+        "batch_id": "<null>",
+        "body_ref": "<null>",
         "captured_at": "<ts>",
         "content_hash": "<hash>",
         "external_id": "<null>",
@@ -844,13 +847,17 @@
         "original_text": "renew the parking permit",
         "processing_outcome": "work_items",
         "processing_state": "processed",
+        "provider_metadata": "{}",
         "review_after": "<null>",
         "revision": "2",
         "scope_id": "personal",
         "source_id": "MANUAL",
+        "source_review_id": "<null>",
         "source_uri": "<null>"
       },
       {
+        "batch_id": "<null>",
+        "body_ref": "<null>",
         "captured_at": "<ts>",
         "content_hash": "<hash>",
         "external_id": "<null>",
@@ -860,13 +867,17 @@
         "original_text": "read the architecture notes",
         "processing_outcome": "reference",
         "processing_state": "processed",
+        "provider_metadata": "{}",
         "review_after": "<null>",
         "revision": "2",
         "scope_id": "personal",
         "source_id": "MANUAL",
+        "source_review_id": "<null>",
         "source_uri": "<null>"
       },
       {
+        "batch_id": "<null>",
+        "body_ref": "<null>",
         "captured_at": "<ts>",
         "content_hash": "<hash>",
         "external_id": "<null>",
@@ -876,13 +887,17 @@
         "original_text": "call the bank",
         "processing_outcome": "immediate",
         "processing_state": "processed",
+        "provider_metadata": "{}",
         "review_after": "<null>",
         "revision": "2",
         "scope_id": "personal",
         "source_id": "MANUAL",
+        "source_review_id": "<null>",
         "source_uri": "<null>"
       },
       {
+        "batch_id": "<null>",
+        "body_ref": "<null>",
         "captured_at": "<ts>",
         "content_hash": "<hash>",
         "external_id": "<null>",
@@ -892,13 +907,17 @@
         "original_text": "learn to sail",
         "processing_outcome": "discard",
         "processing_state": "discarded",
+        "provider_metadata": "{}",
         "review_after": "<null>",
         "revision": "2",
         "scope_id": "personal",
         "source_id": "MANUAL",
+        "source_review_id": "<null>",
         "source_uri": "<null>"
       },
       {
+        "batch_id": "<null>",
+        "body_ref": "<null>",
         "captured_at": "<ts>",
         "content_hash": "<hash>",
         "external_id": "<null>",
@@ -908,13 +927,17 @@
         "original_text": "delegate the invoice",
         "processing_outcome": "defer",
         "processing_state": "deferred",
+        "provider_metadata": "{}",
         "review_after": "<ts>",
         "revision": "2",
         "scope_id": "personal",
         "source_id": "MANUAL",
+        "source_review_id": "<null>",
         "source_uri": "<null>"
       },
       {
+        "batch_id": "b1",
+        "body_ref": "<null>",
         "captured_at": "<ts>",
         "content_hash": "<hash>",
         "external_id": "note-001",
@@ -924,10 +947,12 @@
         "original_text": "renew the parking permit before the trip",
         "processing_outcome": "<null>",
         "processing_state": "pending",
+        "provider_metadata": "{}",
         "review_after": "<null>",
         "revision": "1",
         "scope_id": "personal",
         "source_id": "feed",
+        "source_review_id": "SR-20261127-001",
         "source_uri": "file:///notes/note-001.md"
       }
     ],
@@ -949,16 +974,24 @@
     "daily_limit_overrides": null,
     "documents": [
       {
+        "approved_at": "<null>",
+        "approved_by": "<null>",
         "body": "One binary over SQLite.",
         "created_at": "<ts>",
         "id": "doc:personal:knowledge:notes/architecture",
         "kind": "knowledge",
+        "options_json": "<null>",
+        "rationale": "<null>",
+        "record_kind": "<null>",
         "revision": "1",
         "scope_id": "personal",
         "slug": "notes/architecture",
+        "source_refs": "[]",
         "status": "draft",
+        "supersedes_id": "<null>",
         "title": "Architecture",
-        "updated_at": "<ts>"
+        "updated_at": "<ts>",
+        "valid_from": "<null>"
       }
     ],
     "focus_sessions": [
@@ -1411,6 +1444,7 @@
         "created_at": "<ts>",
         "id": "R-20261127-001",
         "kind": "daily",
+        "metrics_json": "{}",
         "outcomes": "1 completed",
         "period": "<week>",
         "profile_id": "personal",
@@ -1461,10 +1495,12 @@
         "id": "feed",
         "kind": "capture",
         "last_attempt_at": "<ts>",
+        "last_reported_at": "<ts>",
         "last_success_at": "<null>",
         "name": "Feed",
         "non_secret_query": "",
         "provider": "",
+        "reported_cursor": "",
         "scope_id": "personal",
         "updated_at": "<ts>"
       }

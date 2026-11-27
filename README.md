@@ -185,16 +185,17 @@ Run `./ztd <command> -h` for flags.
 ## Checks
 
 ```sh
-zig fmt --check src build.zig
+zig fmt --check src test build.zig
 zig build test
 zig build --release=fast
-ZTD_BIN=./zig-out/bin/ztd go test ./test/corpus -count=1
-go vet ./test/...
-go mod verify
+zig build corpus
+zig build integration
 ```
 
-`scripts/check.sh` runs the same list. Go is only the conformance client: the
-corpus and integration suites drive the real binary as a subprocess.
+`scripts/check.sh` runs the same list. `corpus` replays recorded CLI and
+database state against the built binary; `integration` drives the MCP server
+over stdio and exercises the installer. Both run the real binary as a
+subprocess.
 
 ## License
 

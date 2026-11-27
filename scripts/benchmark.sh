@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Stage 0.1 baseline: Go v2 vs the Zig v3 candidate.
-# Prints a Markdown section. Requires: go, zig, hyperfine, sqlite3.
+# Release measurements for the Zig build: size, startup, RSS, tools/list bytes
+# and database size after a fixed journey. Prints a Markdown table.
+# Requires: zig, hyperfine, sqlite3. Earlier Go-vs-Zig numbers are kept in
+# docs/benchmarks/baseline.md as the rewrite baseline.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-GO=${GO:-/opt/homebrew/bin/go}
 ZIG=${ZIG:-/Users/victor/bin/zig}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 echo "== build =="
-"$GO" build -trimpath -ldflags='-s -w' -o "$tmp/ztd-go" ./cmd/ztd
 "$ZIG" build --release=fast
 zigbin="$root/zig-out/bin/ztd"
 
@@ -51,11 +51,10 @@ journey() {
 }
 
 echo
-echo "| métrica | Go v2 | Zig v3 |"
-echo "|---|---|---|"
-gobin="$tmp/ztd-go"
-echo "| binario (bytes) | $(size "$gobin") | $(size "$zigbin") |"
-echo "| arranque medio (ms) | $(hyperfine --warmup 10 --runs 30 --style basic --export-json "$tmp/go.json" "$gobin version" >/dev/null 2>&1; python3 -c "import json;print(round(json.load(open('$tmp/go.json'))['results'][0]['mean']*1000,2))") | $(hyperfine --warmup 10 --runs 30 --style basic --export-json "$tmp/zig.json" "$zigbin version" >/dev/null 2>&1; python3 -c "import json;print(round(json.load(open('$tmp/zig.json'))['results'][0]['mean']*1000,2))") |"
-echo "| RSS máximo (bytes) | $(rss "$gobin") | $(rss "$zigbin") |"
-echo "| tools/list (bytes) | $(toolsbytes "$gobin" "$tmp/tools-go.sqlite") | $(toolsbytes "$zigbin" "$tmp/tools-zig.sqlite") |"
-echo "| DB tras journey (bytes) | $(journey "$gobin" "$tmp/j-go.sqlite") | — |"
+echo "| métrica | ztd (Zig) |"
+echo "|---|---|"
+echo "| binario (bytes) | $(size "$zigbin") |"
+echo "| arranque medio (ms) | $(hyperfine --warmup 10 --runs 30 --style basic --export-json "$tmp/zig.json" "$zigbin version" >/dev/null 2>&1; python3 -c "import json;print(round(json.load(open('$tmp/zig.json'))['results'][0]['mean']*1000,2))") |"
+echo "| RSS máximo (bytes) | $(rss "$zigbin") |"
+echo "| tools/list (bytes) | $(toolsbytes "$zigbin" "$tmp/tools-zig.sqlite") |"
+echo "| DB tras journey (bytes) | $(journey "$zigbin" "$tmp/j-zig.sqlite") |"

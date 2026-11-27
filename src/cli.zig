@@ -247,10 +247,7 @@ fn dispatch(c: *Cli, init: std.process.Init, command: []const u8, args: []const 
         if (args.len == 0 or (!std.mem.eql(u8, args[0], "done") and !std.mem.eql(u8, args[0], "add"))) {
             return errors.invalid("usage: routine done [flags] <routine-id> | routine add --id ID --cadence daily|weekly:<day> [--last YYYY-MM-DD]", .{});
         }
-        const forwarded = try c.arena.alloc([]const u8, args.len + 1);
-        forwarded[0] = "routines";
-        @memcpy(forwarded[1..], args);
-        return cmdRoutines(c, forwarded);
+        return cmdRoutines(c, args);
     }
     if (std.mem.eql(u8, command, "check")) return cmdCheck(c, args);
     if (std.mem.eql(u8, command, "override")) return cmdOverride(c, args);

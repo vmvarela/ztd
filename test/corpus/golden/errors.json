@@ -208,6 +208,8 @@
     "calendar_review_assertions": null,
     "captures": [
       {
+        "batch_id": "<null>",
+        "body_ref": "<null>",
         "captured_at": "<ts>",
         "content_hash": "<hash>",
         "external_id": "<null>",
@@ -217,10 +219,12 @@
         "original_text": "renew the parking permit",
         "processing_outcome": "<null>",
         "processing_state": "pending",
+        "provider_metadata": "{}",
         "review_after": "<null>",
         "revision": "1",
         "scope_id": "personal",
         "source_id": "MANUAL",
+        "source_review_id": "<null>",
         "source_uri": "<null>"
       }
     ],

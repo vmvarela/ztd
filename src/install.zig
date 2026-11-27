@@ -356,9 +356,9 @@ test "embedded bundle matches the repository trees" {
     // and the published bundles must agree byte for byte.
     const a = std.testing.allocator;
     const io = std.testing.io;
-    const cases = [_]struct { prefix: []const u8, dir: []const u8 }{
-        .{ .prefix = "integrations/opencode", .dir = "integrations/opencode" },
-        .{ .prefix = "method", .dir = "method" },
+    const cases = [_]struct { prefix: []const u8, dir: []const u8, sub: []const u8 }{
+        .{ .prefix = "integrations/opencode", .dir = "integrations/opencode", .sub = "skills" },
+        .{ .prefix = "method", .dir = "method", .sub = "templates" },
     };
     for (cases) |case| {
         var listed: std.ArrayList([]const u8) = .empty;
@@ -366,13 +366,15 @@ test "embedded bundle matches the repository trees" {
         for (embedded.assets) |asset| {
             if (!std.mem.eql(u8, asset.prefix, case.prefix)) continue;
             try listed.append(a, asset.rel);
-            const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ case.dir, asset.rel });
+            const path = try std.fmt.allocPrint(a, "{s}/{s}/{s}", .{ case.dir, case.sub, asset.rel[case.sub.len + 1 ..] });
             defer a.free(path);
             const disk = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(max_asset_bytes));
             defer a.free(disk);
             try std.testing.expectEqualStrings(disk, asset.data);
         }
-        var dir = try std.Io.Dir.cwd().openDir(io, case.dir, .{ .iterate = true });
+        const walk_root = try std.fmt.allocPrint(a, "{s}/{s}", .{ case.dir, case.sub });
+        defer a.free(walk_root);
+        var dir = try std.Io.Dir.cwd().openDir(io, walk_root, .{ .iterate = true });
         defer dir.close(io);
         var walker = try dir.walk(a);
         defer walker.deinit();

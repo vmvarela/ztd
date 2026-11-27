@@ -255,7 +255,7 @@ connector tools later does not change the contract above.
 ## Verify
 
 ```sh
-ZTD_BIN=./zig-out/bin/ztd go test ./test/integration -run MCP -count=1
+zig build integration
 ```
 
 The integration test starts the real binary over stdio, runs the capture to
