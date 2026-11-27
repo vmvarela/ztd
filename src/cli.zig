@@ -989,11 +989,16 @@ fn cmdPrepare(c: *Cli, args: []const []const u8) !void {
     const specs = [_]Spec{
         .{ .name = "scope", .value = true },
         .{ .name = "date", .value = true },
+        .{ .name = "packet", .value = false },
     };
     const parsed = try parseFlags(c.arena, args, &specs);
     if (parsed.positional.len != 0) return errors.invalid("usage: prepare [flags]", .{});
     var opened = try bound(c, oneScope(parsed.get("scope", "")));
     defer opened.st.close();
+    if (parsed.has("packet")) {
+        const packet = try core.preparePacket(&opened.st, c.arena, opened.b, parsed.get("date", ""), nowSeconds(c));
+        return succeedData(c, "prepare", packet);
+    }
     const brief = try core.prepare(&opened.st, c.arena, opened.b, parsed.get("date", ""), nowSeconds(c));
     return writeJson(c, "prepare", brief);
 }

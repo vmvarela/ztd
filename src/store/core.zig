@@ -1782,6 +1782,65 @@ pub fn prepare(s: *Store, a: std.mem.Allocator, b: domain.Binding, date_in: []co
     return brief;
 }
 
+/// Byte cap for the `prepare --packet` decision packet (spec §3).
+pub const packet_cap = 1536;
+
+fn countInScopes(s: *Store, a: std.mem.Allocator, b: domain.Binding, table: []const u8, predicate: []const u8) !i64 {
+    const clause = try scopeFilter(a, b.scopes.len);
+    const sql = try std.fmt.allocPrint(a, "SELECT count(*) FROM {s} WHERE {s} AND scope_id IN ({s})", .{ table, predicate, clause });
+    var stmt = try s.db.prepare(sql);
+    defer stmt.finalize();
+    _ = try scopeArgs(stmt, 1, b);
+    if (!try stmt.step()) return 0;
+    return stmt.int(0);
+}
+
+/// The compact decision packet: what to do now, with IDs only. Same candidates
+/// as `prepare` (MITs first, then next), but at most three, titles clipped, no
+/// bodies, and trimmed again if the bytes exceed the cap.
+pub fn preparePacket(s: *Store, a: std.mem.Allocator, b: domain.Binding, date_in: []const u8, now: Timestamp) ![]const u8 {
+    const brief = try prepare(s, a, b, date_in, now);
+    const Candidate = struct { item: domain.WorkItem, role: []const u8 };
+    var all: std.ArrayList(Candidate) = .empty;
+    for (brief.mits) |it| try all.append(a, .{ .item = it, .role = "mit" });
+    for (brief.next) |it| try all.append(a, .{ .item = it, .role = "next" });
+    const pending = try countInScopes(s, a, b, "captures", "processing_state = 'pending'");
+    const waiting = try countInScopes(s, a, b, "work_items", "lifecycle = 'waiting'");
+
+    var shown: usize = @min(all.items.len, 3);
+    while (true) {
+        var aw = std.Io.Writer.Allocating.init(a);
+        var o = try jsonw.Obj.init(&aw.writer);
+        try o.str("profile", brief.profile);
+        try o.str("date", brief.date);
+        if (brief.goal) |g| {
+            var go = try o.obj("goal");
+            try go.str("id", g.id);
+            try go.str("statement", try clip(a, g.statement, 120));
+            try go.optStr("end_on", g.end_on);
+            try go.end();
+        }
+        var arr = try o.arr("candidates");
+        for (all.items[0..shown]) |cand| {
+            var co = try arr.obj();
+            try co.str("id", cand.item.id);
+            try co.str("role", cand.role);
+            try co.str("title", try clip(a, cand.item.title, 120));
+            try co.end();
+        }
+        try arr.end();
+        try o.int("pending_captures", pending);
+        try o.int("waiting", waiting);
+        if (shown < all.items.len) {
+            try o.boolean("truncated", true);
+            try o.int("omitted", @intCast(all.items.len - shown));
+        }
+        try o.end();
+        if (aw.written().len <= packet_cap or shown == 0) return aw.written();
+        shown -= 1;
+    }
+}
+
 fn overrideApplies(s: *Store, actor: []const u8, period: []const u8, override_id: []const u8) !bool {
     const sql = if (override_id.len > 0)
         "SELECT 1 FROM daily_limit_overrides WHERE rule = 'mit' AND actor_id = ? AND local_date = ? AND id = ?"

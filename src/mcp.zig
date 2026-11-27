@@ -416,6 +416,9 @@ fn toolProcess(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.j
 }
 
 fn toolPrepare(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.json.Value, now: timeutil.Timestamp) ![]const u8 {
+    if (argOptBool(args, "packet") orelse false) {
+        return core.preparePacket(st, a, b, try core.dup(a, argStr(args, "date")), now);
+    }
     const brief = try core.prepare(st, a, b, try core.dup(a, argStr(args, "date")), now);
     var aw = Io.Writer.Allocating.init(a);
     var o = try jsonw.Obj.init(&aw.writer);
