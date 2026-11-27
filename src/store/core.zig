@@ -805,7 +805,7 @@ fn dueAfter(cap: domain.Capture, now: Timestamp) bool {
     return t <= now;
 }
 
-pub fn process(s: *Store, a: std.mem.Allocator, cmd: ProcessCmd, now: Timestamp) !ProcessResult {
+pub fn process(s: *Store, a: std.mem.Allocator, cmd: ProcessCmd, decision: []const u8, now: Timestamp) !ProcessResult {
     try validateBinding(cmd.binding);
     try requireKey(cmd.key);
     if (cmd.id.len == 0) return errors.invalid("capture id is required", .{});
@@ -818,6 +818,8 @@ pub fn process(s: *Store, a: std.mem.Allocator, cmd: ProcessCmd, now: Timestamp)
 
     try s.begin();
     errdefer s.rollback();
+
+    if (decision.len > 0) try requireDecision(s, decision, cmd.binding.scopes[0]);
 
     if (try lookupIdemStmt(s, a, "process", cmd.key, &hash)) |stored| {
         try s.commit();
@@ -890,6 +892,9 @@ pub fn process(s: *Store, a: std.mem.Allocator, cmd: ProcessCmd, now: Timestamp)
             };
             try insertHistory(s, a, "work_item", id, "created", cap.scope, "", 1, .{ .work_item = item }, now);
             try insertLink(s, a, "capture", cap.id, "work_item", id, "produced", cap.scope, now);
+            if (decision.len > 0) {
+                try insertLink(s, a, "document", decision, "work_item", id, "produced", cap.scope, now);
+            }
             try items.append(a, item);
         }
     }
@@ -1788,7 +1793,7 @@ fn overrideApplies(s: *Store, actor: []const u8, period: []const u8, override_id
     return try stmt.step();
 }
 
-pub fn commitPlan(s: *Store, a: std.mem.Allocator, cmd: CommitPlanCmd, now: Timestamp) !domain.Plan {
+pub fn commitPlan(s: *Store, a: std.mem.Allocator, cmd: CommitPlanCmd, decision: []const u8, now: Timestamp) !domain.Plan {
     try validateBinding(cmd.binding);
     try requireKey(cmd.key);
     if (!std.mem.eql(u8, cmd.kind, "daily") and !std.mem.eql(u8, cmd.kind, "weekly")) {
@@ -1802,6 +1807,8 @@ pub fn commitPlan(s: *Store, a: std.mem.Allocator, cmd: CommitPlanCmd, now: Time
 
     try s.begin();
     errdefer s.rollback();
+    if (decision.len > 0) try requireDecision(s, decision, cmd.binding.scopes[0]);
+
     if (try lookupIdemStmt(s, a, "commit_plan", cmd.key, &hash)) |stored| {
         try s.commit();
         const parsed = std.json.parseFromSlice(std.json.Value, a, stored, .{}) catch
@@ -1917,6 +1924,9 @@ pub fn commitPlan(s: *Store, a: std.mem.Allocator, cmd: CommitPlanCmd, now: Time
         try items.append(a, .{ .work_item_id = it.work_item_id, .role = it.role, .position = it.position });
     }
     plan.items = items.items;
+    if (decision.len > 0) {
+        try insertLink(s, a, "document", decision, "plan", plan_id, "produced", cmd.binding.scopes[0], now);
+    }
     try insertHistory(s, a, "plan", plan_id, "committed", "", cmd.binding.profile, next_rev, .{ .plan = plan }, now);
     try writeIdem(s, a, "commit_plan", cmd.key, &hash, .{ .plan = plan }, now);
     try s.commit();
@@ -4444,14 +4454,14 @@ fn traceLabel(a: std.mem.Allocator, s: *Store, id: []const u8) ![]const u8 {
         var q = try s.db.prepare("SELECT title FROM work_items WHERE id = ?");
         defer q.finalize();
         try q.bindText(1, id);
-        if (try q.step()) return clip(a, q.text(0), 60);
+        if (try q.step()) return dup(a, q.text(0));
         return "";
     }
     if (std.mem.startsWith(u8, id, "doc:")) {
         var q = try s.db.prepare("SELECT title FROM documents WHERE id = ?");
         defer q.finalize();
         try q.bindText(1, id);
-        if (try q.step()) return clip(a, q.text(0), 60);
+        if (try q.step()) return dup(a, q.text(0));
         return "";
     }
     return "";
@@ -4489,6 +4499,14 @@ pub fn traceEntity(s: *Store, a: std.mem.Allocator, id: []const u8) !TraceResult
 
 /// Evidence and trace checks only need existence inside the document's scope;
 /// profile-scoped entities have no scope column and are checked by id alone.
+fn requireDecision(s: *Store, decision: []const u8, scope: []const u8) !void {
+    const kind = entityKind(decision) orelse return errors.invalid("unknown decision id \"{s}\"", .{decision});
+    if (!std.mem.eql(u8, kind, "document")) return errors.invalid("unknown decision id \"{s}\"", .{decision});
+    if (!try entityLinkedInScope(s, kind, decision, scope)) {
+        return errors.fail(.not_found, "decision {s} not found", .{decision});
+    }
+}
+
 fn entityLinkedInScope(s: *Store, kind: []const u8, id: []const u8, scope: []const u8) !bool {
     const has_scope = std.mem.eql(u8, kind, "capture") or std.mem.eql(u8, kind, "work_item") or
         std.mem.eql(u8, kind, "checkpoint") or std.mem.eql(u8, kind, "document");

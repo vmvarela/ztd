@@ -394,7 +394,7 @@ fn toolProcess(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.j
         .id = try core.dup(a, argStr(args, "capture_id")),
         .expected = argInt(args, "expected_revision"),
         .outcome = outcome,
-    }, now);
+    }, (try optArg(a, args, "decision")) orelse "", now);
     var aw = Io.Writer.Allocating.init(a);
     var o = try jsonw.Obj.init(&aw.writer);
     var c = try o.obj("capture");
@@ -443,7 +443,7 @@ fn toolCommitPlan(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?st
         .expected = argInt(args, "expected_revision"),
         .override_id = try core.dup(a, argStr(args, "override_id")),
         .items = items,
-    }, now);
+    }, (try optArg(a, args, "decision")) orelse "", now);
     var aw = Io.Writer.Allocating.init(a);
     var o = try jsonw.Obj.init(&aw.writer);
     try plan.write(&o);

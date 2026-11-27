@@ -637,6 +637,7 @@ fn cmdProcess(c: *Cli, args: []const []const u8) !void {
         .{ .name = "review-after", .value = true },
         .{ .name = "reason", .value = true },
         .{ .name = "evidence", .value = true },
+        .{ .name = "decision", .value = true },
         .{ .name = "title", .value = true, .multi = true },
     };
     var parsed = try parseFlags(c.arena, args, &specs);
@@ -672,7 +673,7 @@ fn cmdProcess(c: *Cli, args: []const []const u8) !void {
         .id = parsed.positional[0],
         .expected = expected,
         .outcome = outcome,
-    }, nowSeconds(c));
+    }, parsed.get("decision", ""), nowSeconds(c));
 
     var aw = Io.Writer.Allocating.init(c.arena);
     var o = try jsonw.Obj.init(&aw.writer);
@@ -1026,6 +1027,7 @@ fn cmdPlan(c: *Cli, args: []const []const u8) !void {
         .{ .name = "period", .value = true },
         .{ .name = "expected", .value = true },
         .{ .name = "override", .value = true },
+        .{ .name = "decision", .value = true },
         .{ .name = "key", .value = true },
         .{ .name = "item", .value = true, .multi = true },
     };
@@ -1059,7 +1061,7 @@ fn cmdPlan(c: *Cli, args: []const []const u8) !void {
         .expected = expected,
         .items = items.items,
         .override_id = parsed.get("override", ""),
-    }, nowSeconds(c));
+    }, parsed.get("decision", ""), nowSeconds(c));
     return writeJson(c, "plan commit", plan);
 }
 
