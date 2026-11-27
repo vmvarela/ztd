@@ -381,7 +381,7 @@
         "ok": true,
         "command": "goal set",
         "data": {
-          "id": "G-20261126-001",
+          "id": "G-20261127-001",
           "profile_id": "personal",
           "kind": "primary",
           "start_on": "\u003cdate\u003e",
@@ -399,7 +399,7 @@
           "profile": "personal",
           "date": "\u003cdate\u003e",
           "goal": {
-            "id": "G-20261126-001",
+            "id": "G-20261127-001",
             "profile_id": "personal",
             "kind": "primary",
             "start_on": "\u003cdate\u003e",
@@ -473,7 +473,7 @@
         "ok": true,
         "command": "focus checkpoint",
         "data": {
-          "id": "CP-20261126-001",
+          "id": "CP-20261127-001",
           "scope": "personal",
           "work_item_id": "\u003ctid\u003e",
           "result": "permit renewed",
@@ -503,7 +503,7 @@
         "ok": true,
         "command": "review",
         "data": {
-          "id": "R-20261126-001",
+          "id": "R-20261127-001",
           "profile": "personal",
           "kind": "daily",
           "period": "\u003cweek\u003e",
@@ -739,7 +739,7 @@
             }
           ],
           "review": {
-            "id": "SR-20261126-001",
+            "id": "SR-20261127-001",
             "source_id": "feed",
             "batch_id": "b1",
             "result_kind": "reported",
@@ -834,662 +834,661 @@
     "areas": null,
     "calendar_review_assertions": null,
     "captures": [
-      [
-        "\u003ccid\u003e",
-        "personal",
-        "MANUAL",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "renew the parking permit",
-        "\u003chash\u003e",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "\u003cts\u003e",
-        "processed",
-        "work_items",
-        "\u003cnull\u003e",
-        "2"
-      ],
-      [
-        "\u003ccid\u003e",
-        "personal",
-        "MANUAL",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "read the architecture notes",
-        "\u003chash\u003e",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "\u003cts\u003e",
-        "processed",
-        "reference",
-        "\u003cnull\u003e",
-        "2"
-      ],
-      [
-        "\u003ccid\u003e",
-        "personal",
-        "MANUAL",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "call the bank",
-        "\u003chash\u003e",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "\u003cts\u003e",
-        "processed",
-        "immediate",
-        "\u003cnull\u003e",
-        "2"
-      ],
-      [
-        "\u003ccid\u003e",
-        "personal",
-        "MANUAL",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "learn to sail",
-        "\u003chash\u003e",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "\u003cts\u003e",
-        "discarded",
-        "discard",
-        "\u003cnull\u003e",
-        "2"
-      ],
-      [
-        "\u003ccid\u003e",
-        "personal",
-        "MANUAL",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "delegate the invoice",
-        "\u003chash\u003e",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "\u003cts\u003e",
-        "deferred",
-        "defer",
-        "\u003cts\u003e",
-        "2"
-      ],
-      [
-        "\u003ccid\u003e",
-        "personal",
-        "feed",
-        "note-001",
-        "1",
-        "renew the parking permit before the trip",
-        "\u003chash\u003e",
-        "file:///notes/note-001.md",
-        "\u003cnull\u003e",
-        "\u003cts\u003e",
-        "pending",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "1"
-      ]
+      {
+        "captured_at": "\u003cts\u003e",
+        "content_hash": "\u003chash\u003e",
+        "external_id": "\u003cnull\u003e",
+        "external_revision": "\u003cnull\u003e",
+        "id": "\u003ccid\u003e",
+        "occurred_at": "\u003cnull\u003e",
+        "original_text": "renew the parking permit",
+        "processing_outcome": "work_items",
+        "processing_state": "processed",
+        "review_after": "\u003cnull\u003e",
+        "revision": "2",
+        "scope_id": "personal",
+        "source_id": "MANUAL",
+        "source_uri": "\u003cnull\u003e"
+      },
+      {
+        "captured_at": "\u003cts\u003e",
+        "content_hash": "\u003chash\u003e",
+        "external_id": "\u003cnull\u003e",
+        "external_revision": "\u003cnull\u003e",
+        "id": "\u003ccid\u003e",
+        "occurred_at": "\u003cnull\u003e",
+        "original_text": "read the architecture notes",
+        "processing_outcome": "reference",
+        "processing_state": "processed",
+        "review_after": "\u003cnull\u003e",
+        "revision": "2",
+        "scope_id": "personal",
+        "source_id": "MANUAL",
+        "source_uri": "\u003cnull\u003e"
+      },
+      {
+        "captured_at": "\u003cts\u003e",
+        "content_hash": "\u003chash\u003e",
+        "external_id": "\u003cnull\u003e",
+        "external_revision": "\u003cnull\u003e",
+        "id": "\u003ccid\u003e",
+        "occurred_at": "\u003cnull\u003e",
+        "original_text": "call the bank",
+        "processing_outcome": "immediate",
+        "processing_state": "processed",
+        "review_after": "\u003cnull\u003e",
+        "revision": "2",
+        "scope_id": "personal",
+        "source_id": "MANUAL",
+        "source_uri": "\u003cnull\u003e"
+      },
+      {
+        "captured_at": "\u003cts\u003e",
+        "content_hash": "\u003chash\u003e",
+        "external_id": "\u003cnull\u003e",
+        "external_revision": "\u003cnull\u003e",
+        "id": "\u003ccid\u003e",
+        "occurred_at": "\u003cnull\u003e",
+        "original_text": "learn to sail",
+        "processing_outcome": "discard",
+        "processing_state": "discarded",
+        "review_after": "\u003cnull\u003e",
+        "revision": "2",
+        "scope_id": "personal",
+        "source_id": "MANUAL",
+        "source_uri": "\u003cnull\u003e"
+      },
+      {
+        "captured_at": "\u003cts\u003e",
+        "content_hash": "\u003chash\u003e",
+        "external_id": "\u003cnull\u003e",
+        "external_revision": "\u003cnull\u003e",
+        "id": "\u003ccid\u003e",
+        "occurred_at": "\u003cnull\u003e",
+        "original_text": "delegate the invoice",
+        "processing_outcome": "defer",
+        "processing_state": "deferred",
+        "review_after": "\u003cts\u003e",
+        "revision": "2",
+        "scope_id": "personal",
+        "source_id": "MANUAL",
+        "source_uri": "\u003cnull\u003e"
+      },
+      {
+        "captured_at": "\u003cts\u003e",
+        "content_hash": "\u003chash\u003e",
+        "external_id": "note-001",
+        "external_revision": "1",
+        "id": "\u003ccid\u003e",
+        "occurred_at": "\u003cnull\u003e",
+        "original_text": "renew the parking permit before the trip",
+        "processing_outcome": "\u003cnull\u003e",
+        "processing_state": "pending",
+        "review_after": "\u003cnull\u003e",
+        "revision": "1",
+        "scope_id": "personal",
+        "source_id": "feed",
+        "source_uri": "file:///notes/note-001.md"
+      }
     ],
     "checkpoints": [
-      [
-        "CP-20261126-001",
-        "personal",
-        "\u003ctid\u003e",
-        "\u003cfid\u003e",
-        "permit renewed",
-        "[]",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "1",
-        "\u003cts\u003e"
-      ]
+      {
+        "created_at": "\u003cts\u003e",
+        "evidence_json": "[]",
+        "focus_id": "\u003cfid\u003e",
+        "id": "CP-20261127-001",
+        "next_action": "\u003cnull\u003e",
+        "result": "permit renewed",
+        "revision": "1",
+        "scope_id": "personal",
+        "uncertainties": "\u003cnull\u003e",
+        "work_item_id": "\u003ctid\u003e"
+      }
     ],
     "contexts": null,
     "daily_limit_overrides": null,
     "documents": [
-      [
-        "doc:personal:knowledge:notes/architecture",
-        "personal",
-        "knowledge",
-        "notes/architecture",
-        "Architecture",
-        "One binary over SQLite.",
-        "draft",
-        "1",
-        "\u003cts\u003e",
-        "\u003cts\u003e"
-      ]
+      {
+        "body": "One binary over SQLite.",
+        "created_at": "\u003cts\u003e",
+        "id": "doc:personal:knowledge:notes/architecture",
+        "kind": "knowledge",
+        "revision": "1",
+        "scope_id": "personal",
+        "slug": "notes/architecture",
+        "status": "draft",
+        "title": "Architecture",
+        "updated_at": "\u003cts\u003e"
+      }
     ],
     "focus_sessions": [
-      [
-        "\u003cfid\u003e",
-        "personal",
-        "ztd-corpus",
-        "\u003ctid\u003e",
-        "\u003cts\u003e",
-        "\u003cts\u003e",
-        "\u003cnull\u003e",
-        "2"
-      ]
+      {
+        "actor_id": "ztd-corpus",
+        "ended_at": "\u003cts\u003e",
+        "id": "\u003cfid\u003e",
+        "outcome": "\u003cnull\u003e",
+        "profile_id": "personal",
+        "revision": "2",
+        "started_at": "\u003cts\u003e",
+        "work_item_id": "\u003ctid\u003e"
+      }
     ],
     "goals": [
-      [
-        "G-20261126-001",
-        "personal",
-        "primary",
-        "\u003cdate\u003e",
-        "\u003cnull\u003e",
-        "Ship ztd v3",
-        "active",
-        "\u003cts\u003e",
-        "\u003cts\u003e"
-      ]
+      {
+        "created_at": "\u003cts\u003e",
+        "end_on": "\u003cnull\u003e",
+        "id": "G-20261127-001",
+        "kind": "primary",
+        "profile_id": "personal",
+        "start_on": "\u003cdate\u003e",
+        "statement": "Ship ztd v3",
+        "status": "active",
+        "updated_at": "\u003cts\u003e"
+      }
     ],
     "history_events": [
-      [
-        "1",
-        "capture",
-        "\u003ccid\u003e",
-        "personal",
-        "\u003cnull\u003e",
-        "captured",
-        "1",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
-        "\u003cts\u003e"
-      ],
-      [
-        "2",
-        "capture",
-        "\u003ccid\u003e",
-        "personal",
-        "\u003cnull\u003e",
-        "captured",
-        "1",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"read the architecture notes\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
-        "\u003cts\u003e"
-      ],
-      [
-        "3",
-        "capture",
-        "\u003ccid\u003e",
-        "personal",
-        "\u003cnull\u003e",
-        "captured",
-        "1",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"call the bank\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
-        "\u003cts\u003e"
-      ],
-      [
-        "4",
-        "capture",
-        "\u003ccid\u003e",
-        "personal",
-        "\u003cnull\u003e",
-        "captured",
-        "1",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"learn to sail\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
-        "\u003cts\u003e"
-      ],
-      [
-        "5",
-        "capture",
-        "\u003ccid\u003e",
-        "personal",
-        "\u003cnull\u003e",
-        "captured",
-        "1",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"delegate the invoice\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
-        "\u003cts\u003e"
-      ],
-      [
-        "6",
-        "work_item",
-        "\u003ctid\u003e",
-        "personal",
-        "\u003cnull\u003e",
-        "created",
-        "1",
-        "{\"id\":\"\u003ctid\u003e\",\"scope\":\"personal\",\"title\":\"Renew permit\",\"origin_capture_id\":\"\u003ccid\u003e\",\"lifecycle\":\"next\",\"revision\":1,\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
-        "\u003cts\u003e"
-      ],
-      [
-        "7",
-        "capture",
-        "\u003ccid\u003e",
-        "personal",
-        "\u003cnull\u003e",
-        "processed",
-        "2",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"processed\",\"processing_outcome\":{\"kind\":\"work_items\",\"titles\":[\"Renew permit\"],\"waiting_on\":\"DMV\"},\"revision\":2}",
-        "\u003cts\u003e"
-      ],
-      [
-        "8",
-        "capture",
-        "\u003ccid\u003e",
-        "personal",
-        "\u003cnull\u003e",
-        "processed",
-        "2",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"read the architecture notes\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"processed\",\"processing_outcome\":{\"kind\":\"reference\",\"reason\":\"docs/architecture\"},\"revision\":2}",
-        "\u003cts\u003e"
-      ],
-      [
-        "9",
-        "capture",
-        "\u003ccid\u003e",
-        "personal",
-        "\u003cnull\u003e",
-        "processed",
-        "2",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"call the bank\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"processed\",\"processing_outcome\":{\"kind\":\"immediate\",\"result_evidence\":\"paid online\"},\"revision\":2}",
-        "\u003cts\u003e"
-      ],
-      [
-        "10",
-        "capture",
-        "\u003ccid\u003e",
-        "personal",
-        "\u003cnull\u003e",
-        "processed",
-        "2",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"learn to sail\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"discarded\",\"processing_outcome\":{\"kind\":\"discard\",\"reason\":\"duplicate\"},\"revision\":2}",
-        "\u003cts\u003e"
-      ],
-      [
-        "11",
-        "capture",
-        "\u003ccid\u003e",
-        "personal",
-        "\u003cnull\u003e",
-        "processed",
-        "2",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"delegate the invoice\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"deferred\",\"processing_outcome\":{\"kind\":\"defer\",\"review_after\":\"\u003cts\u003e\"},\"review_after\":\"\u003cts\u003e\",\"revision\":2}",
-        "\u003cts\u003e"
-      ],
-      [
-        "12",
-        "work_item",
-        "\u003ctid\u003e",
-        "personal",
-        "\u003cnull\u003e",
-        "moved",
-        "2",
-        "{\"fields\":{\"custom_fields\":{\"energy\":\"low\"}},\"target\":\"next\"}",
-        "\u003cts\u003e"
-      ],
-      [
-        "13",
-        "goal",
-        "G-20261126-001",
-        "\u003cnull\u003e",
-        "personal",
-        "created",
-        "1",
-        "{\"id\":\"G-20261126-001\",\"profile_id\":\"personal\",\"kind\":\"primary\",\"start_on\":\"\u003cdate\u003e\",\"statement\":\"Ship ztd v3\",\"status\":\"active\"}",
-        "\u003cts\u003e"
-      ],
-      [
-        "14",
-        "plan",
-        "P-personal-daily-\u003cweek\u003e",
-        "\u003cnull\u003e",
-        "personal",
-        "committed",
-        "1",
-        "{\"id\":\"P-personal-daily-\u003cweek\u003e\",\"profile\":\"personal\",\"kind\":\"daily\",\"period\":\"\u003cweek\u003e\",\"status\":\"committed\",\"revision\":1,\"items\":[{\"work_item_id\":\"\u003ctid\u003e\",\"role\":\"mit\",\"position\":0}],\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
-        "\u003cts\u003e"
-      ],
-      [
-        "15",
-        "focus_session",
-        "\u003cfid\u003e",
-        "personal",
-        "personal",
-        "started",
-        "1",
-        "{\"id\":\"\u003cfid\u003e\",\"profile\":\"personal\",\"actor\":\"ztd-corpus\",\"work_item_id\":\"\u003ctid\u003e\",\"started_at\":\"\u003cts\u003e\"}",
-        "\u003cts\u003e"
-      ],
-      [
-        "16",
-        "checkpoint",
-        "CP-20261126-001",
-        "personal",
-        "personal",
-        "recorded",
-        "1",
-        "{\"id\":\"CP-20261126-001\",\"scope\":\"personal\",\"work_item_id\":\"\u003ctid\u003e\",\"result\":\"permit renewed\",\"created_at\":\"\u003cts\u003e\",\"revision\":1}",
-        "\u003cts\u003e"
-      ],
-      [
-        "17",
-        "focus_session",
-        "\u003cfid\u003e",
-        "personal",
-        "personal",
-        "finished",
-        "2",
-        "{\"id\":\"\u003cfid\u003e\",\"profile\":\"personal\",\"actor\":\"ztd-corpus\",\"work_item_id\":\"\u003ctid\u003e\",\"started_at\":\"\u003cts\u003e\",\"ended_at\":\"\u003cts\u003e\"}",
-        "\u003cts\u003e"
-      ],
-      [
-        "18",
-        "review",
-        "R-20261126-001",
-        "\u003cnull\u003e",
-        "personal",
-        "recorded",
-        "1",
-        "{\"id\":\"R-20261126-001\",\"profile\":\"personal\",\"kind\":\"daily\",\"period\":\"\u003cweek\u003e\",\"outcomes\":\"1 completed\",\"coverage\":\"0.5\",\"completion_state\":\"complete\",\"created_at\":\"\u003cts\u003e\"}",
-        "\u003cts\u003e"
-      ],
-      [
-        "19",
-        "document",
-        "doc:personal:knowledge:notes/architecture",
-        "personal",
-        "\u003cnull\u003e",
-        "created",
-        "1",
-        "{\"id\":\"doc:personal:knowledge:notes/architecture\",\"scope\":\"personal\",\"kind\":\"knowledge\",\"slug\":\"notes/architecture\",\"title\":\"Architecture\",\"body\":\"One binary over SQLite.\",\"status\":\"draft\",\"revision\":1,\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
-        "\u003cts\u003e"
-      ],
-      [
-        "20",
-        "source",
-        "feed",
-        "personal",
-        "\u003cnull\u003e",
-        "created",
-        "1",
-        "{\"id\":\"feed\",\"name\":\"Feed\",\"scope\":\"personal\",\"kind\":\"capture\",\"connector\":\"manual\",\"provider\":\"\",\"connection_ref\":\"\",\"non_secret_query\":\"\",\"cadence\":\"\",\"auth_state\":\"unknown\",\"coverage\":\"unknown\",\"cursor\":\"\",\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
-        "\u003cts\u003e"
-      ],
-      [
-        "21",
-        "capture",
-        "\u003ccid\u003e",
-        "personal",
-        "\u003cnull\u003e",
-        "captured",
-        "1",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"feed\",\"external_id\":\"note-001\",\"external_revision\":\"1\",\"original_text\":\"renew the parking permit before the trip\",\"content_hash\":\"\u003chash\u003e\",\"source_uri\":\"file:///notes/note-001.md\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
-        "\u003cts\u003e"
-      ],
-      [
-        "22",
-        "source_review",
-        "SR-20261126-001",
-        "personal",
-        "\u003cnull\u003e",
-        "recorded",
-        "1",
-        "{\"id\":\"SR-20261126-001\",\"source_id\":\"feed\",\"batch_id\":\"b1\",\"result_kind\":\"reported\",\"coverage\":\"unverified\",\"retrieval\":{\"window\":\"\u003cdate\u003e\",\"cursor\":\"\",\"requested_limit\":50,\"provider_returned_limit\":1,\"complete_window\":true,\"truncated\":false,\"failures\":[]},\"capture_ids\":[\"\u003ccid\u003e\"],\"created_at\":\"\u003cts\u003e\"}",
-        "\u003cts\u003e"
-      ]
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "\u003ccid\u003e",
+        "entity_type": "capture",
+        "event": "captured",
+        "payload_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "1",
+        "scope_id": "personal",
+        "seq": "1"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "\u003ccid\u003e",
+        "entity_type": "capture",
+        "event": "captured",
+        "payload_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"read the architecture notes\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "1",
+        "scope_id": "personal",
+        "seq": "2"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "\u003ccid\u003e",
+        "entity_type": "capture",
+        "event": "captured",
+        "payload_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"call the bank\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "1",
+        "scope_id": "personal",
+        "seq": "3"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "\u003ccid\u003e",
+        "entity_type": "capture",
+        "event": "captured",
+        "payload_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"learn to sail\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "1",
+        "scope_id": "personal",
+        "seq": "4"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "\u003ccid\u003e",
+        "entity_type": "capture",
+        "event": "captured",
+        "payload_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"delegate the invoice\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "1",
+        "scope_id": "personal",
+        "seq": "5"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "\u003ctid\u003e",
+        "entity_type": "work_item",
+        "event": "created",
+        "payload_json": "{\"id\":\"\u003ctid\u003e\",\"scope\":\"personal\",\"title\":\"Renew permit\",\"origin_capture_id\":\"\u003ccid\u003e\",\"lifecycle\":\"next\",\"revision\":1,\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "1",
+        "scope_id": "personal",
+        "seq": "6"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "\u003ccid\u003e",
+        "entity_type": "capture",
+        "event": "processed",
+        "payload_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"processed\",\"processing_outcome\":{\"kind\":\"work_items\",\"titles\":[\"Renew permit\"],\"waiting_on\":\"DMV\"},\"revision\":2}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "2",
+        "scope_id": "personal",
+        "seq": "7"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "\u003ccid\u003e",
+        "entity_type": "capture",
+        "event": "processed",
+        "payload_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"read the architecture notes\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"processed\",\"processing_outcome\":{\"kind\":\"reference\",\"reason\":\"docs/architecture\"},\"revision\":2}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "2",
+        "scope_id": "personal",
+        "seq": "8"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "\u003ccid\u003e",
+        "entity_type": "capture",
+        "event": "processed",
+        "payload_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"call the bank\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"processed\",\"processing_outcome\":{\"kind\":\"immediate\",\"result_evidence\":\"paid online\"},\"revision\":2}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "2",
+        "scope_id": "personal",
+        "seq": "9"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "\u003ccid\u003e",
+        "entity_type": "capture",
+        "event": "processed",
+        "payload_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"learn to sail\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"discarded\",\"processing_outcome\":{\"kind\":\"discard\",\"reason\":\"duplicate\"},\"revision\":2}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "2",
+        "scope_id": "personal",
+        "seq": "10"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "\u003ccid\u003e",
+        "entity_type": "capture",
+        "event": "processed",
+        "payload_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"delegate the invoice\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"deferred\",\"processing_outcome\":{\"kind\":\"defer\",\"review_after\":\"\u003cts\u003e\"},\"review_after\":\"\u003cts\u003e\",\"revision\":2}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "2",
+        "scope_id": "personal",
+        "seq": "11"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "\u003ctid\u003e",
+        "entity_type": "work_item",
+        "event": "moved",
+        "payload_json": "{\"fields\":{\"custom_fields\":{\"energy\":\"low\"}},\"target\":\"next\"}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "2",
+        "scope_id": "personal",
+        "seq": "12"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "G-20261127-001",
+        "entity_type": "goal",
+        "event": "created",
+        "payload_json": "{\"id\":\"G-20261127-001\",\"profile_id\":\"personal\",\"kind\":\"primary\",\"start_on\":\"\u003cdate\u003e\",\"statement\":\"Ship ztd v3\",\"status\":\"active\"}",
+        "profile_id": "personal",
+        "revision": "1",
+        "scope_id": "\u003cnull\u003e",
+        "seq": "13"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "P-personal-daily-\u003cweek\u003e",
+        "entity_type": "plan",
+        "event": "committed",
+        "payload_json": "{\"id\":\"P-personal-daily-\u003cweek\u003e\",\"profile\":\"personal\",\"kind\":\"daily\",\"period\":\"\u003cweek\u003e\",\"status\":\"committed\",\"revision\":1,\"items\":[{\"work_item_id\":\"\u003ctid\u003e\",\"role\":\"mit\",\"position\":0}],\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
+        "profile_id": "personal",
+        "revision": "1",
+        "scope_id": "\u003cnull\u003e",
+        "seq": "14"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "\u003cfid\u003e",
+        "entity_type": "focus_session",
+        "event": "started",
+        "payload_json": "{\"id\":\"\u003cfid\u003e\",\"profile\":\"personal\",\"actor\":\"ztd-corpus\",\"work_item_id\":\"\u003ctid\u003e\",\"started_at\":\"\u003cts\u003e\"}",
+        "profile_id": "personal",
+        "revision": "1",
+        "scope_id": "personal",
+        "seq": "15"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "CP-20261127-001",
+        "entity_type": "checkpoint",
+        "event": "recorded",
+        "payload_json": "{\"id\":\"CP-20261127-001\",\"scope\":\"personal\",\"work_item_id\":\"\u003ctid\u003e\",\"result\":\"permit renewed\",\"created_at\":\"\u003cts\u003e\",\"revision\":1}",
+        "profile_id": "personal",
+        "revision": "1",
+        "scope_id": "personal",
+        "seq": "16"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "\u003cfid\u003e",
+        "entity_type": "focus_session",
+        "event": "finished",
+        "payload_json": "{\"id\":\"\u003cfid\u003e\",\"profile\":\"personal\",\"actor\":\"ztd-corpus\",\"work_item_id\":\"\u003ctid\u003e\",\"started_at\":\"\u003cts\u003e\",\"ended_at\":\"\u003cts\u003e\"}",
+        "profile_id": "personal",
+        "revision": "2",
+        "scope_id": "personal",
+        "seq": "17"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "R-20261127-001",
+        "entity_type": "review",
+        "event": "recorded",
+        "payload_json": "{\"id\":\"R-20261127-001\",\"profile\":\"personal\",\"kind\":\"daily\",\"period\":\"\u003cweek\u003e\",\"outcomes\":\"1 completed\",\"coverage\":\"0.5\",\"completion_state\":\"complete\",\"created_at\":\"\u003cts\u003e\"}",
+        "profile_id": "personal",
+        "revision": "1",
+        "scope_id": "\u003cnull\u003e",
+        "seq": "18"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "doc:personal:knowledge:notes/architecture",
+        "entity_type": "document",
+        "event": "created",
+        "payload_json": "{\"id\":\"doc:personal:knowledge:notes/architecture\",\"scope\":\"personal\",\"kind\":\"knowledge\",\"slug\":\"notes/architecture\",\"title\":\"Architecture\",\"body\":\"One binary over SQLite.\",\"status\":\"draft\",\"revision\":1,\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "1",
+        "scope_id": "personal",
+        "seq": "19"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "feed",
+        "entity_type": "source",
+        "event": "created",
+        "payload_json": "{\"id\":\"feed\",\"name\":\"Feed\",\"scope\":\"personal\",\"kind\":\"capture\",\"connector\":\"manual\",\"provider\":\"\",\"connection_ref\":\"\",\"non_secret_query\":\"\",\"cadence\":\"\",\"auth_state\":\"unknown\",\"coverage\":\"unknown\",\"cursor\":\"\",\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "1",
+        "scope_id": "personal",
+        "seq": "20"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "\u003ccid\u003e",
+        "entity_type": "capture",
+        "event": "captured",
+        "payload_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"feed\",\"external_id\":\"note-001\",\"external_revision\":\"1\",\"original_text\":\"renew the parking permit before the trip\",\"content_hash\":\"\u003chash\u003e\",\"source_uri\":\"file:///notes/note-001.md\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "1",
+        "scope_id": "personal",
+        "seq": "21"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "SR-20261127-001",
+        "entity_type": "source_review",
+        "event": "recorded",
+        "payload_json": "{\"id\":\"SR-20261127-001\",\"source_id\":\"feed\",\"batch_id\":\"b1\",\"result_kind\":\"reported\",\"coverage\":\"unverified\",\"retrieval\":{\"window\":\"\u003cdate\u003e\",\"cursor\":\"\",\"requested_limit\":50,\"provider_returned_limit\":1,\"complete_window\":true,\"truncated\":false,\"failures\":[]},\"capture_ids\":[\"\u003ccid\u003e\"],\"created_at\":\"\u003cts\u003e\"}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "1",
+        "scope_id": "personal",
+        "seq": "22"
+      }
     ],
     "idempotency_records": [
-      [
-        "capture",
-        "cap-1",
-        "\u003chash\u003e",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
-        "\u003cts\u003e"
-      ],
-      [
-        "capture",
-        "cap-2",
-        "\u003chash\u003e",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"read the architecture notes\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
-        "\u003cts\u003e"
-      ],
-      [
-        "capture",
-        "cap-3",
-        "\u003chash\u003e",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"call the bank\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
-        "\u003cts\u003e"
-      ],
-      [
-        "capture",
-        "cap-4",
-        "\u003chash\u003e",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"learn to sail\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
-        "\u003cts\u003e"
-      ],
-      [
-        "capture",
-        "cap-5",
-        "\u003chash\u003e",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"delegate the invoice\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
-        "\u003cts\u003e"
-      ],
-      [
-        "process",
-        "\u003ckey\u003e",
-        "\u003chash\u003e",
-        "{\"capture\":{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"processed\",\"processing_outcome\":{\"kind\":\"work_items\",\"titles\":[\"Renew permit\"],\"waiting_on\":\"DMV\"},\"revision\":2},\"work_items\":[{\"id\":\"\u003ctid\u003e\",\"scope\":\"personal\",\"title\":\"Renew permit\",\"origin_capture_id\":\"\u003ccid\u003e\",\"lifecycle\":\"next\",\"revision\":1,\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}]}",
-        "\u003cts\u003e"
-      ],
-      [
-        "process",
-        "\u003ckey\u003e",
-        "\u003chash\u003e",
-        "{\"capture\":{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"read the architecture notes\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"processed\",\"processing_outcome\":{\"kind\":\"reference\",\"reason\":\"docs/architecture\"},\"revision\":2}}",
-        "\u003cts\u003e"
-      ],
-      [
-        "process",
-        "\u003ckey\u003e",
-        "\u003chash\u003e",
-        "{\"capture\":{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"call the bank\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"processed\",\"processing_outcome\":{\"kind\":\"immediate\",\"result_evidence\":\"paid online\"},\"revision\":2}}",
-        "\u003cts\u003e"
-      ],
-      [
-        "process",
-        "\u003ckey\u003e",
-        "\u003chash\u003e",
-        "{\"capture\":{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"learn to sail\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"discarded\",\"processing_outcome\":{\"kind\":\"discard\",\"reason\":\"duplicate\"},\"revision\":2}}",
-        "\u003cts\u003e"
-      ],
-      [
-        "process",
-        "\u003ckey\u003e",
-        "\u003chash\u003e",
-        "{\"capture\":{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"delegate the invoice\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"deferred\",\"processing_outcome\":{\"kind\":\"defer\",\"review_after\":\"\u003cts\u003e\"},\"review_after\":\"\u003cts\u003e\",\"revision\":2}}",
-        "\u003cts\u003e"
-      ],
-      [
-        "move",
-        "\u003ckey\u003e",
-        "\u003chash\u003e",
-        "{\"id\":\"\u003ctid\u003e\",\"scope\":\"personal\",\"title\":\"Renew permit\",\"origin_capture_id\":\"\u003ccid\u003e\",\"lifecycle\":\"next\",\"custom_fields\":{\"energy\":\"low\"},\"revision\":2,\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
-        "\u003cts\u003e"
-      ],
-      [
-        "goal",
-        "\u003ckey\u003e",
-        "\u003chash\u003e",
-        "{\"id\":\"G-20261126-001\",\"profile_id\":\"personal\",\"kind\":\"primary\",\"start_on\":\"\u003cdate\u003e\",\"statement\":\"Ship ztd v3\",\"status\":\"active\"}",
-        "\u003cts\u003e"
-      ],
-      [
-        "commit_plan",
-        "\u003ckey\u003e",
-        "\u003chash\u003e",
-        "{\"id\":\"P-personal-daily-\u003cweek\u003e\",\"profile\":\"personal\",\"kind\":\"daily\",\"period\":\"\u003cweek\u003e\",\"status\":\"committed\",\"revision\":1,\"items\":[{\"work_item_id\":\"\u003ctid\u003e\",\"role\":\"mit\",\"position\":0}],\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
-        "\u003cts\u003e"
-      ],
-      [
-        "focus_start",
-        "\u003ckey\u003e",
-        "\u003chash\u003e",
-        "{\"focus\":{\"id\":\"\u003cfid\u003e\",\"profile\":\"personal\",\"actor\":\"ztd-corpus\",\"work_item_id\":\"\u003ctid\u003e\",\"started_at\":\"\u003cts\u003e\"}}",
-        "\u003cts\u003e"
-      ],
-      [
-        "checkpoint",
-        "\u003ckey\u003e",
-        "\u003chash\u003e",
-        "{\"id\":\"CP-20261126-001\",\"scope\":\"personal\",\"work_item_id\":\"\u003ctid\u003e\",\"result\":\"permit renewed\",\"created_at\":\"\u003cts\u003e\",\"revision\":1}",
-        "\u003cts\u003e"
-      ],
-      [
-        "focus_finish",
-        "\u003ckey\u003e",
-        "\u003chash\u003e",
-        "{\"id\":\"\u003cfid\u003e\",\"profile\":\"personal\",\"actor\":\"ztd-corpus\",\"work_item_id\":\"\u003ctid\u003e\",\"started_at\":\"\u003cts\u003e\",\"ended_at\":\"\u003cts\u003e\"}",
-        "\u003cts\u003e"
-      ],
-      [
-        "review",
-        "\u003ckey\u003e",
-        "\u003chash\u003e",
-        "{\"id\":\"R-20261126-001\",\"profile\":\"personal\",\"kind\":\"daily\",\"period\":\"\u003cweek\u003e\",\"outcomes\":\"1 completed\",\"coverage\":\"0.5\",\"completion_state\":\"complete\",\"created_at\":\"\u003cts\u003e\"}",
-        "\u003cts\u003e"
-      ],
-      [
-        "doc put",
-        "personal|knowledge|notes/architecture|0",
-        "\u003chash\u003e",
-        "{\"id\":\"doc:personal:knowledge:notes/architecture\",\"scope\":\"personal\",\"kind\":\"knowledge\",\"slug\":\"notes/architecture\",\"title\":\"Architecture\",\"body\":\"One binary over SQLite.\",\"status\":\"draft\",\"revision\":1,\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
-        "\u003cts\u003e"
-      ],
-      [
-        "source_review",
-        "r1",
-        "\u003chash\u003e",
-        "{\"review\":{\"id\":\"SR-20261126-001\",\"source_id\":\"feed\",\"batch_id\":\"b1\",\"result_kind\":\"reported\",\"coverage\":\"unverified\",\"retrieval\":{\"window\":\"\u003cdate\u003e\",\"cursor\":\"\",\"requested_limit\":50,\"provider_returned_limit\":1,\"complete_window\":true,\"truncated\":false,\"failures\":[]},\"capture_ids\":[\"\u003ccid\u003e\"],\"created_at\":\"\u003cts\u003e\"},\"captures\":[{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"feed\",\"external_id\":\"note-001\",\"external_revision\":\"1\",\"original_text\":\"renew the parking permit before the trip\",\"content_hash\":\"\u003chash\u003e\",\"source_uri\":\"file:///notes/note-001.md\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}]}",
-        "\u003cts\u003e"
-      ]
+      {
+        "command": "capture",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "cap-1",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}"
+      },
+      {
+        "command": "capture",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "cap-2",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"read the architecture notes\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}"
+      },
+      {
+        "command": "capture",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "cap-3",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"call the bank\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}"
+      },
+      {
+        "command": "capture",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "cap-4",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"learn to sail\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}"
+      },
+      {
+        "command": "capture",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "cap-5",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"delegate the invoice\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}"
+      },
+      {
+        "command": "process",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "\u003ckey\u003e",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"capture\":{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"processed\",\"processing_outcome\":{\"kind\":\"work_items\",\"titles\":[\"Renew permit\"],\"waiting_on\":\"DMV\"},\"revision\":2},\"work_items\":[{\"id\":\"\u003ctid\u003e\",\"scope\":\"personal\",\"title\":\"Renew permit\",\"origin_capture_id\":\"\u003ccid\u003e\",\"lifecycle\":\"next\",\"revision\":1,\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}]}"
+      },
+      {
+        "command": "process",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "\u003ckey\u003e",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"capture\":{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"read the architecture notes\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"processed\",\"processing_outcome\":{\"kind\":\"reference\",\"reason\":\"docs/architecture\"},\"revision\":2}}"
+      },
+      {
+        "command": "process",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "\u003ckey\u003e",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"capture\":{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"call the bank\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"processed\",\"processing_outcome\":{\"kind\":\"immediate\",\"result_evidence\":\"paid online\"},\"revision\":2}}"
+      },
+      {
+        "command": "process",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "\u003ckey\u003e",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"capture\":{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"learn to sail\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"discarded\",\"processing_outcome\":{\"kind\":\"discard\",\"reason\":\"duplicate\"},\"revision\":2}}"
+      },
+      {
+        "command": "process",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "\u003ckey\u003e",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"capture\":{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"delegate the invoice\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"deferred\",\"processing_outcome\":{\"kind\":\"defer\",\"review_after\":\"\u003cts\u003e\"},\"review_after\":\"\u003cts\u003e\",\"revision\":2}}"
+      },
+      {
+        "command": "move",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "\u003ckey\u003e",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"id\":\"\u003ctid\u003e\",\"scope\":\"personal\",\"title\":\"Renew permit\",\"origin_capture_id\":\"\u003ccid\u003e\",\"lifecycle\":\"next\",\"custom_fields\":{\"energy\":\"low\"},\"revision\":2,\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}"
+      },
+      {
+        "command": "goal",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "\u003ckey\u003e",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"id\":\"G-20261127-001\",\"profile_id\":\"personal\",\"kind\":\"primary\",\"start_on\":\"\u003cdate\u003e\",\"statement\":\"Ship ztd v3\",\"status\":\"active\"}"
+      },
+      {
+        "command": "commit_plan",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "\u003ckey\u003e",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"id\":\"P-personal-daily-\u003cweek\u003e\",\"profile\":\"personal\",\"kind\":\"daily\",\"period\":\"\u003cweek\u003e\",\"status\":\"committed\",\"revision\":1,\"items\":[{\"work_item_id\":\"\u003ctid\u003e\",\"role\":\"mit\",\"position\":0}],\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}"
+      },
+      {
+        "command": "focus_start",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "\u003ckey\u003e",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"focus\":{\"id\":\"\u003cfid\u003e\",\"profile\":\"personal\",\"actor\":\"ztd-corpus\",\"work_item_id\":\"\u003ctid\u003e\",\"started_at\":\"\u003cts\u003e\"}}"
+      },
+      {
+        "command": "checkpoint",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "\u003ckey\u003e",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"id\":\"CP-20261127-001\",\"scope\":\"personal\",\"work_item_id\":\"\u003ctid\u003e\",\"result\":\"permit renewed\",\"created_at\":\"\u003cts\u003e\",\"revision\":1}"
+      },
+      {
+        "command": "focus_finish",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "\u003ckey\u003e",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"id\":\"\u003cfid\u003e\",\"profile\":\"personal\",\"actor\":\"ztd-corpus\",\"work_item_id\":\"\u003ctid\u003e\",\"started_at\":\"\u003cts\u003e\",\"ended_at\":\"\u003cts\u003e\"}"
+      },
+      {
+        "command": "review",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "\u003ckey\u003e",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"id\":\"R-20261127-001\",\"profile\":\"personal\",\"kind\":\"daily\",\"period\":\"\u003cweek\u003e\",\"outcomes\":\"1 completed\",\"coverage\":\"0.5\",\"completion_state\":\"complete\",\"created_at\":\"\u003cts\u003e\"}"
+      },
+      {
+        "command": "doc put",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "personal|knowledge|notes/architecture|0",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"id\":\"doc:personal:knowledge:notes/architecture\",\"scope\":\"personal\",\"kind\":\"knowledge\",\"slug\":\"notes/architecture\",\"title\":\"Architecture\",\"body\":\"One binary over SQLite.\",\"status\":\"draft\",\"revision\":1,\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}"
+      },
+      {
+        "command": "source_review",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "r1",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"review\":{\"id\":\"SR-20261127-001\",\"source_id\":\"feed\",\"batch_id\":\"b1\",\"result_kind\":\"reported\",\"coverage\":\"unverified\",\"retrieval\":{\"window\":\"\u003cdate\u003e\",\"cursor\":\"\",\"requested_limit\":50,\"provider_returned_limit\":1,\"complete_window\":true,\"truncated\":false,\"failures\":[]},\"capture_ids\":[\"\u003ccid\u003e\"],\"created_at\":\"\u003cts\u003e\"},\"captures\":[{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"feed\",\"external_id\":\"note-001\",\"external_revision\":\"1\",\"original_text\":\"renew the parking permit before the trip\",\"content_hash\":\"\u003chash\u003e\",\"source_uri\":\"file:///notes/note-001.md\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}]}"
+      }
     ],
     "import_runs": null,
-    "knowledge_records": null,
     "legacy_records": null,
     "plan_items": [
-      [
-        "P-personal-daily-\u003cweek\u003e",
-        "\u003ctid\u003e",
-        "mit",
-        "0"
-      ]
+      {
+        "plan_id": "P-personal-daily-\u003cweek\u003e",
+        "position": "0",
+        "role": "mit",
+        "work_item_id": "\u003ctid\u003e"
+      }
     ],
     "plans": [
-      [
-        "P-personal-daily-\u003cweek\u003e",
-        "personal",
-        "daily",
-        "\u003cweek\u003e",
-        "committed",
-        "1",
-        "\u003cts\u003e",
-        "\u003cts\u003e"
-      ]
+      {
+        "created_at": "\u003cts\u003e",
+        "id": "P-personal-daily-\u003cweek\u003e",
+        "kind": "daily",
+        "period": "\u003cweek\u003e",
+        "profile_id": "personal",
+        "revision": "1",
+        "status": "committed",
+        "updated_at": "\u003cts\u003e"
+      }
     ],
     "profile_scopes": [
-      [
-        "personal",
-        "personal"
-      ]
+      {
+        "profile_id": "personal",
+        "scope_id": "personal"
+      }
     ],
     "profiles": [
-      [
-        "personal",
-        "personal",
-        "personal",
-        "ztd-corpus",
-        "Europe/Madrid",
-        "active"
-      ]
+      {
+        "id": "personal",
+        "kind": "personal",
+        "name": "personal",
+        "owner_actor_id": "ztd-corpus",
+        "status": "active",
+        "timezone": "Europe/Madrid"
+      }
     ],
     "projects": null,
     "reviews": [
-      [
-        "R-20261126-001",
-        "personal",
-        "daily",
-        "\u003cweek\u003e",
-        "1 completed",
-        "0.5",
-        "complete",
-        "\u003cts\u003e",
-        "1"
-      ]
+      {
+        "completion_state": "complete",
+        "coverage": "0.5",
+        "created_at": "\u003cts\u003e",
+        "id": "R-20261127-001",
+        "kind": "daily",
+        "outcomes": "1 completed",
+        "period": "\u003cweek\u003e",
+        "profile_id": "personal",
+        "revision": "1"
+      }
     ],
     "routines": [
-      [
-        "weekly",
-        "personal",
-        "routine",
-        "weekly:mon",
-        "\u003cnull\u003e",
-        "1",
-        "1"
-      ]
+      {
+        "active": "1",
+        "cadence": "weekly:mon",
+        "id": "weekly",
+        "kind": "routine",
+        "last_completed_at": "\u003cnull\u003e",
+        "revision": "1",
+        "scope_id": "personal"
+      }
     ],
     "scopes": [
-      [
-        "personal",
-        "personal",
-        "personal",
-        "\u003cts\u003e"
-      ]
+      {
+        "created_at": "\u003cts\u003e",
+        "id": "personal",
+        "kind": "personal",
+        "name": "personal"
+      }
     ],
     "source_reviews": [
-      [
-        "SR-20261126-001",
-        "feed",
-        "b1",
-        "r1",
-        "\u003chash\u003e",
-        "reported",
-        "unverified",
-        "{\"window\":\"\u003cdate\u003e\",\"cursor\":\"\",\"requested_limit\":50,\"provider_returned_limit\":1,\"complete_window\":true,\"truncated\":false,\"failures\":[]}",
-        "\u003cts\u003e"
-      ]
+      {
+        "batch_id": "b1",
+        "coverage_state": "unverified",
+        "created_at": "\u003cts\u003e",
+        "id": "SR-20261127-001",
+        "idempotency_key": "r1",
+        "request_hash": "\u003chash\u003e",
+        "result_kind": "reported",
+        "retrieval_json": "{\"window\":\"\u003cdate\u003e\",\"cursor\":\"\",\"requested_limit\":50,\"provider_returned_limit\":1,\"complete_window\":true,\"truncated\":false,\"failures\":[]}",
+        "source_id": "feed"
+      }
     ],
     "sources": [
-      [
-        "feed",
-        "Feed",
-        "personal",
-        "capture",
-        "manual",
-        "",
-        "",
-        "",
-        "",
-        "unknown",
-        "unverified",
-        "",
-        "\u003cts\u003e",
-        "\u003cnull\u003e",
-        "\u003cts\u003e",
-        "\u003cts\u003e"
-      ]
+      {
+        "auth_state": "unknown",
+        "cadence": "",
+        "connection_ref": "",
+        "connector": "manual",
+        "coverage_state": "unverified",
+        "created_at": "\u003cts\u003e",
+        "cursor": "",
+        "id": "feed",
+        "kind": "capture",
+        "last_attempt_at": "\u003cts\u003e",
+        "last_success_at": "\u003cnull\u003e",
+        "name": "Feed",
+        "non_secret_query": "",
+        "provider": "",
+        "scope_id": "personal",
+        "updated_at": "\u003cts\u003e"
+      }
     ],
     "work_items": [
-      [
-        "\u003ctid\u003e",
-        "personal",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "Renew permit",
-        "\u003ccid\u003e",
-        "next",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "2",
-        "\u003cts\u003e",
-        "\u003cts\u003e",
-        "{\"energy\":\"low\"}"
-      ]
+      {
+        "area_id": "\u003cnull\u003e",
+        "closed_at": "\u003cnull\u003e",
+        "closure_kind": "\u003cnull\u003e",
+        "context_id": "\u003cnull\u003e",
+        "created_at": "\u003cts\u003e",
+        "custom_fields": "{\"energy\":\"low\"}",
+        "due_at": "\u003cnull\u003e",
+        "id": "\u003ctid\u003e",
+        "lifecycle": "next",
+        "origin_capture_id": "\u003ccid\u003e",
+        "project_id": "\u003cnull\u003e",
+        "resolution": "\u003cnull\u003e",
+        "revision": "2",
+        "scope_id": "personal",
+        "title": "Renew permit",
+        "updated_at": "\u003cts\u003e",
+        "waiting_on": "\u003cnull\u003e"
+      }
     ]
   }
 }

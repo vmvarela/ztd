@@ -3944,6 +3944,7 @@ const canonical_tables = [_]TableDef{
     .{ .name = "areas", .pk = "id" },
     .{ .name = "projects", .pk = "id" },
     .{ .name = "documents", .pk = "id" },
+    .{ .name = "links", .pk = "from_type, from_id, to_type, to_id, relation" },
     .{ .name = "captures", .pk = "id" },
     .{ .name = "sources", .pk = "id" },
     .{ .name = "source_reviews", .pk = "id" },
@@ -3951,7 +3952,6 @@ const canonical_tables = [_]TableDef{
     .{ .name = "plans", .pk = "id" },
     .{ .name = "plan_items", .pk = "plan_id, work_item_id" },
     .{ .name = "routines", .pk = "id" },
-    .{ .name = "knowledge_records", .pk = "id" },
     .{ .name = "daily_limit_overrides", .pk = "id" },
     .{ .name = "calendar_review_assertions", .pk = "id" },
     .{ .name = "focus_sessions", .pk = "id" },
@@ -3993,7 +3993,7 @@ pub fn exportTo(s: *Store, a: std.mem.Allocator, io: std.Io, out: []const u8) !v
     var aw = std.Io.Writer.Allocating.init(a);
     var o = try jsonw.Obj.init(&aw.writer);
     try o.str("format", "ztd-export");
-    try o.int("version", 1);
+    try o.int("version", 2);
     var tables = try o.obj("tables");
     for (defs) |def| {
         const sql = try std.fmt.allocPrint(a, "SELECT * FROM {s} ORDER BY {s}", .{ def.name, def.pk });
@@ -4105,24 +4105,29 @@ pub fn restoreFrom(s: *Store, a: std.mem.Allocator, io: std.Io, from: []const u8
     }
     const format = jsonw.strField(doc, "format") orelse "";
     const version = jsonw.intField(doc, "version") orelse 0;
-    if (!std.mem.eql(u8, format, "ztd-export") or version != 1) {
+    if (!std.mem.eql(u8, format, "ztd-export") or (version != 1 and version != 2)) {
         return errors.fail(
             .unsupported_format,
-            "unsupported export format \"{s}\" version {d} (want ztd-export version 1)",
+            "unsupported export format \"{s}\" version {d} (want ztd-export version 2)",
             .{ format, version },
         );
     }
     const empty_tables = std.json.ObjectMap.init(a, &.{}, &.{}) catch return errors.fail(.io_error, "out of memory", .{});
     const tables_val = jsonw.field(doc, "tables") orelse std.json.Value{ .object = empty_tables };
     const tables_obj = if (tables_val == .object) tables_val.object else empty_tables;
+    // A version 1 export predates the knowledge consolidation: it carries
+    // knowledge_records and has no links table. Both are accepted and mapped.
+    const legacy = version == 1;
     for (canonical_tables) |def| {
+        if (legacy and std.mem.eql(u8, def.name, "links")) continue;
         if (!tables_obj.contains(def.name)) {
             return errors.fail(.unsupported_format, "export is missing table {s}", .{def.name});
         }
     }
     var kit = tables_obj.iterator();
     while (kit.next()) |entry| {
-        if (!knownTable(entry.key_ptr.*)) {
+        const known = knownTable(entry.key_ptr.*) or (legacy and std.mem.eql(u8, entry.key_ptr.*, "knowledge_records"));
+        if (!known) {
             return errors.fail(.unsupported_format, "export contains unknown table {s}", .{entry.key_ptr.*});
         }
     }
@@ -4152,6 +4157,13 @@ pub fn restoreFrom(s: *Store, a: std.mem.Allocator, io: std.Io, from: []const u8
             }
         }
         try counts.append(a, .{ .name = def.name, .count = n });
+    }
+    if (legacy) {
+        if (tables_obj.get("knowledge_records")) |rows_val| {
+            if (rows_val == .array) {
+                for (rows_val.array.items) |row| try insertLegacyKnowledge(s, row);
+            }
+        }
     }
     const report = try runCheck(s, a, null);
     if (!report.ok) {
@@ -4202,4 +4214,64 @@ pub fn inboxStats(s: *Store, a: std.mem.Allocator, b: domain.Binding, now: Times
     const pending = stmt.int(0);
     const due = stmt.int(1);
     return .{ .pending = pending, .due = due, .remaining = pending + due };
+}
+
+/// Maps one version 1 knowledge_records row into the consolidated documents
+/// table, exactly like migration 0010 does.
+fn insertLegacyKnowledge(s: *Store, row: std.json.Value) !void {
+    const id = jsonw.strField(row, "id") orelse return errors.fail(.unsupported_format, "knowledge row has no id", .{});
+    var slug_buf: [128]u8 = undefined;
+    const slug = std.fmt.bufPrint(&slug_buf, "kr/{s}", .{id}) catch
+        return errors.fail(.unsupported_format, "knowledge id is too long: {s}", .{id});
+    const text = jsonw.strField(row, "text") orelse "";
+    var title_buf: [80]u8 = undefined;
+    const title = try firstLineTitle(id, text, &title_buf);
+    const state = jsonw.strField(row, "state") orelse "";
+    const review = jsonw.strField(row, "review_state") orelse "";
+    const status = if (std.mem.eql(u8, state, "superseded"))
+        "superseded"
+    else if (std.mem.eql(u8, review, "verified"))
+        "verified"
+    else
+        "draft";
+    const reviewed = jsonw.strField(row, "reviewed_at");
+    const created = jsonw.strField(row, "created_at") orelse "";
+    const updated = reviewed orelse created;
+    var ins = try s.db.prepare(
+        "INSERT INTO documents (id, scope_id, kind, slug, title, body, status, revision, " ++
+            "created_at, updated_at, record_kind, approved_at, valid_from, source_refs, supersedes_id) " ++
+            "VALUES (?, ?, 'knowledge', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    defer ins.finalize();
+    try ins.bindText(1, id);
+    try ins.bindText(2, jsonw.strField(row, "scope_id") orelse "");
+    try ins.bindText(3, slug);
+    try ins.bindText(4, title);
+    try ins.bindText(5, text);
+    try ins.bindText(6, status);
+    try ins.bindInt(7, jsonw.intField(row, "revision") orelse 1);
+    try ins.bindText(8, created);
+    try ins.bindText(9, updated);
+    try ins.bindText(10, jsonw.strField(row, "kind") orelse "fact");
+    try ins.bindOptText(11, reviewed);
+    try ins.bindOptText(12, jsonw.strField(row, "valid_from"));
+    try ins.bindText(13, jsonw.strField(row, "source_refs") orelse "[]");
+    try ins.bindOptText(14, jsonw.strField(row, "supersedes_id"));
+    _ = try ins.step();
+}
+
+fn firstLineTitle(id: []const u8, text: []const u8, buf: []u8) ![]const u8 {
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        const line_trimmed = std.mem.trim(u8, line, " \t\r");
+        if (line_trimmed.len == 0) continue;
+        const stripped = std.mem.trim(u8, std.mem.trimStart(u8, line_trimmed, "#"), " \t");
+        const chosen = if (stripped.len > 0) stripped else line_trimmed;
+        const n = @min(chosen.len, 80);
+        @memcpy(buf[0..n], chosen[0..n]);
+        return buf[0..n];
+    }
+    const n = @min(id.len, 80);
+    @memcpy(buf[0..n], id[0..n]);
+    return buf[0..n];
 }

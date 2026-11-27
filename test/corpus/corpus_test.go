@@ -87,8 +87,8 @@ type observation struct {
 }
 
 type session struct {
-	Steps []observation         `json:"steps"`
-	DB    map[string][][]string `json:"db,omitempty"`
+	Steps []observation                 `json:"steps"`
+	DB    map[string][]map[string]string `json:"db,omitempty"`
 }
 
 type runner struct {
@@ -206,7 +206,7 @@ func (r *runner) finish(name string) {
 	if err != nil {
 		r.t.Fatalf("read golden (run ZTD_UPDATE=1 once): %v", err)
 	}
-	if diff := firstDiff(want, gotJSON); diff != "" {
+	if diff := compareSession(want, got); diff != "" {
 		r.t.Fatalf("golden %s differs: %s", name, diff)
 	}
 }
@@ -282,7 +282,7 @@ func normalize(s string, paths ...string) string {
 
 // dumpDB reads every user table in rowid order and normalizes each cell. FTS
 // shadow tables are an implementation detail of the index, not stored facts.
-func dumpDB(t *testing.T, path string) map[string][][]string {
+func dumpDB(t *testing.T, path string) map[string][]map[string]string {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -299,13 +299,16 @@ func dumpDB(t *testing.T, path string) map[string][][]string {
 		if err := names.Scan(&n); err != nil {
 			t.Fatalf("scan table: %v", err)
 		}
-		if strings.HasPrefix(n, "sqlite_") || strings.Contains(n, "_fts") {
+		// v3 consolidates knowledge_records into documents and adds the links
+		// table; both are schema changes, not data drift.
+		if strings.HasPrefix(n, "sqlite_") || strings.Contains(n, "_fts") ||
+			n == "links" || n == "knowledge_records" {
 			continue
 		}
 		tables = append(tables, n)
 	}
 	names.Close()
-	out := make(map[string][][]string, len(tables))
+	out := make(map[string][]map[string]string, len(tables))
 	for _, table := range tables {
 		rows, err := db.Query(`SELECT * FROM "` + table + `" ORDER BY rowid`)
 		if err != nil {
@@ -315,7 +318,7 @@ func dumpDB(t *testing.T, path string) map[string][][]string {
 		if err != nil {
 			t.Fatalf("columns %s: %v", table, err)
 		}
-		var tableRows [][]string
+		var tableRows []map[string]string
 		for rows.Next() {
 			vals := make([]any, len(cols))
 			ptrs := make([]any, len(cols))
@@ -325,9 +328,9 @@ func dumpDB(t *testing.T, path string) map[string][][]string {
 			if err := rows.Scan(ptrs...); err != nil {
 				t.Fatalf("scan %s: %v", table, err)
 			}
-			row := make([]string, len(cols))
+			row := make(map[string]string, len(cols))
 			for i, v := range vals {
-				row[i] = normalize(cell(v))
+				row[cols[i]] = normalize(cell(v))
 			}
 			tableRows = append(tableRows, row)
 		}
@@ -423,4 +426,49 @@ func TestErrors(t *testing.T) {
 	r.run("source", "delete", "--id", "feed")
 	r.run("nonsense")
 	r.finish("errors")
+}
+
+// compareSession keeps the behavioural contract strict (steps) while letting
+// the v3 schema add trailing columns to existing tables: a dump row matches
+// when every column the baseline recorded is identical.
+func compareSession(want []byte, got session) string {
+	type sessionJSON struct {
+		Steps []json.RawMessage
+		DB    map[string][]map[string]string
+	}
+	var w sessionJSON
+	if err := json.Unmarshal(want, &w); err != nil {
+		return fmt.Sprintf("golden is not valid JSON: %v", err)
+	}
+	wSteps, _ := json.MarshalIndent(w.Steps, "", "  ")
+	gSteps, _ := json.MarshalIndent(got.Steps, "", "  ")
+	if diff := firstDiff(wSteps, gSteps); diff != "" {
+		return "steps: " + diff
+	}
+	for table, wRows := range w.DB {
+		gRows, ok := got.DB[table]
+		if !ok {
+			return fmt.Sprintf("db: table %s is missing", table)
+		}
+		if len(gRows) != len(wRows) {
+			return fmt.Sprintf("db: table %s has %d rows, want %d", table, len(gRows), len(wRows))
+		}
+		for i := range wRows {
+			for col, want := range wRows[i] {
+				got, ok := gRows[i][col]
+				if !ok {
+					return fmt.Sprintf("db: %s row %d has no column %s", table, i, col)
+				}
+				if got != want {
+					return fmt.Sprintf("db: %s row %d column %s is %q, want %q", table, i, col, got, want)
+				}
+			}
+		}
+	}
+	for table := range got.DB {
+		if _, ok := w.DB[table]; !ok {
+			return fmt.Sprintf("db: unexpected table %s", table)
+		}
+	}
+	return ""
 }

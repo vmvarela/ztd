@@ -207,22 +207,22 @@
     "areas": null,
     "calendar_review_assertions": null,
     "captures": [
-      [
-        "\u003ccid\u003e",
-        "personal",
-        "MANUAL",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "renew the parking permit",
-        "\u003chash\u003e",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "\u003cts\u003e",
-        "pending",
-        "\u003cnull\u003e",
-        "\u003cnull\u003e",
-        "1"
-      ]
+      {
+        "captured_at": "\u003cts\u003e",
+        "content_hash": "\u003chash\u003e",
+        "external_id": "\u003cnull\u003e",
+        "external_revision": "\u003cnull\u003e",
+        "id": "\u003ccid\u003e",
+        "occurred_at": "\u003cnull\u003e",
+        "original_text": "renew the parking permit",
+        "processing_outcome": "\u003cnull\u003e",
+        "processing_state": "pending",
+        "review_after": "\u003cnull\u003e",
+        "revision": "1",
+        "scope_id": "personal",
+        "source_id": "MANUAL",
+        "source_uri": "\u003cnull\u003e"
+      }
     ],
     "checkpoints": null,
     "contexts": null,
@@ -231,80 +231,79 @@
     "focus_sessions": null,
     "goals": null,
     "history_events": [
-      [
-        "1",
-        "capture",
-        "\u003ccid\u003e",
-        "personal",
-        "\u003cnull\u003e",
-        "captured",
-        "1",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
-        "\u003cts\u003e"
-      ],
-      [
-        "2",
-        "source",
-        "feed",
-        "personal",
-        "\u003cnull\u003e",
-        "created",
-        "1",
-        "{\"id\":\"feed\",\"name\":\"Feed\",\"scope\":\"personal\",\"kind\":\"capture\",\"connector\":\"manual\",\"provider\":\"\",\"connection_ref\":\"\",\"non_secret_query\":\"\",\"cadence\":\"\",\"auth_state\":\"unknown\",\"coverage\":\"unknown\",\"cursor\":\"\",\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
-        "\u003cts\u003e"
-      ],
-      [
-        "3",
-        "source",
-        "feed",
-        "personal",
-        "\u003cnull\u003e",
-        "deleted",
-        "1",
-        "{\"id\":\"feed\",\"name\":\"Feed\",\"scope\":\"personal\",\"kind\":\"capture\",\"connector\":\"manual\",\"provider\":\"\",\"connection_ref\":\"\",\"non_secret_query\":\"\",\"cadence\":\"\",\"auth_state\":\"unknown\",\"coverage\":\"unknown\",\"cursor\":\"\",\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
-        "\u003cts\u003e"
-      ]
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "\u003ccid\u003e",
+        "entity_type": "capture",
+        "event": "captured",
+        "payload_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "1",
+        "scope_id": "personal",
+        "seq": "1"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "feed",
+        "entity_type": "source",
+        "event": "created",
+        "payload_json": "{\"id\":\"feed\",\"name\":\"Feed\",\"scope\":\"personal\",\"kind\":\"capture\",\"connector\":\"manual\",\"provider\":\"\",\"connection_ref\":\"\",\"non_secret_query\":\"\",\"cadence\":\"\",\"auth_state\":\"unknown\",\"coverage\":\"unknown\",\"cursor\":\"\",\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "1",
+        "scope_id": "personal",
+        "seq": "2"
+      },
+      {
+        "created_at": "\u003cts\u003e",
+        "entity_id": "feed",
+        "entity_type": "source",
+        "event": "deleted",
+        "payload_json": "{\"id\":\"feed\",\"name\":\"Feed\",\"scope\":\"personal\",\"kind\":\"capture\",\"connector\":\"manual\",\"provider\":\"\",\"connection_ref\":\"\",\"non_secret_query\":\"\",\"cadence\":\"\",\"auth_state\":\"unknown\",\"coverage\":\"unknown\",\"cursor\":\"\",\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
+        "profile_id": "\u003cnull\u003e",
+        "revision": "1",
+        "scope_id": "personal",
+        "seq": "3"
+      }
     ],
     "idempotency_records": [
-      [
-        "capture",
-        "cap-1",
-        "\u003chash\u003e",
-        "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
-        "\u003cts\u003e"
-      ]
+      {
+        "command": "capture",
+        "created_at": "\u003cts\u003e",
+        "idempotency_key": "cap-1",
+        "request_hash": "\u003chash\u003e",
+        "result_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}"
+      }
     ],
     "import_runs": null,
-    "knowledge_records": null,
     "legacy_records": null,
     "plan_items": null,
     "plans": null,
     "profile_scopes": [
-      [
-        "personal",
-        "personal"
-      ]
+      {
+        "profile_id": "personal",
+        "scope_id": "personal"
+      }
     ],
     "profiles": [
-      [
-        "personal",
-        "personal",
-        "personal",
-        "ztd-corpus",
-        "Europe/Madrid",
-        "active"
-      ]
+      {
+        "id": "personal",
+        "kind": "personal",
+        "name": "personal",
+        "owner_actor_id": "ztd-corpus",
+        "status": "active",
+        "timezone": "Europe/Madrid"
+      }
     ],
     "projects": null,
     "reviews": null,
     "routines": null,
     "scopes": [
-      [
-        "personal",
-        "personal",
-        "personal",
-        "\u003cts\u003e"
-      ]
+      {
+        "created_at": "\u003cts\u003e",
+        "id": "personal",
+        "kind": "personal",
+        "name": "personal"
+      }
     ],
     "source_reviews": null,
     "sources": null,
