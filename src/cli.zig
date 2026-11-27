@@ -252,6 +252,7 @@ fn dispatch(c: *Cli, init: std.process.Init, command: []const u8, args: []const 
     }
     if (std.mem.eql(u8, command, "check")) return cmdCheck(c, args);
     if (std.mem.eql(u8, command, "doc")) return cmdDoc(c, args);
+    if (std.mem.eql(u8, command, "trace")) return cmdTrace(c, args);
     if (std.mem.eql(u8, command, "mcp")) return cmdMcp(c, args);
     if (std.mem.eql(u8, command, "export")) return cmdExport(c, args);
     if (std.mem.eql(u8, command, "restore")) return cmdRestore(c, args);
@@ -2117,4 +2118,50 @@ fn cmdMcp(c: *Cli, args: []const []const u8) !void {
     defer r.st.close();
     try mcp.serve(c.arena, c.io, c.out, &r.st, r.b, p.has("allow-delete-source"));
     try c.out.flush();
+}
+
+// -------------------------------------------------------------- provenance
+
+const trace_cap = 1024;
+
+fn renderTrace(a: std.mem.Allocator, t: core.TraceResult, edges: []const core.TraceEdge, omitted: i64) ![]const u8 {
+    var aw = Io.Writer.Allocating.init(a);
+    var o = try jsonw.Obj.init(&aw.writer);
+    try o.str("id", t.id);
+    try o.str("kind", t.kind);
+    if (t.label.len > 0) try o.str("label", t.label);
+    var arr = try o.arr("edges");
+    for (edges) |e| {
+        var item = try arr.obj();
+        try item.str("relation", e.relation);
+        try item.str("from_type", e.from_type);
+        try item.str("from_id", e.from_id);
+        try item.str("to_type", e.to_type);
+        try item.str("to_id", e.to_id);
+        try item.end();
+    }
+    try arr.end();
+    if (omitted > 0) {
+        try o.int("omitted", omitted);
+        try o.boolean("truncated", true);
+    }
+    try o.end();
+    return aw.written();
+}
+
+fn cmdTrace(c: *Cli, args: []const []const u8) !void {
+    const p = try parseFlags(c.arena, args, &.{});
+    if (p.positional.len != 1) return errors.invalid("usage: trace ID", .{});
+    var r = try bound(c, &.{});
+    defer r.st.close();
+    const t = try core.traceEntity(&r.st, c.arena, p.positional[0]);
+    var edges = t.edges;
+    var omitted: i64 = 0;
+    var data = try renderTrace(c.arena, t, edges, omitted);
+    while (data.len > trace_cap and edges.len > 0) {
+        edges = edges[0 .. edges.len - 1];
+        omitted += 1;
+        data = try renderTrace(c.arena, t, edges, omitted);
+    }
+    try succeedData(c, "trace", data);
 }

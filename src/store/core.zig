@@ -572,6 +572,32 @@ pub fn insertHistory(
     _ = try stmt.step();
 }
 
+/// Records one provenance edge. Links are a set: a repeated edge is ignored.
+pub fn insertLink(
+    s: *Store,
+    a: std.mem.Allocator,
+    from_type: []const u8,
+    from_id: []const u8,
+    to_type: []const u8,
+    to_id: []const u8,
+    relation: []const u8,
+    scope: []const u8,
+    now: Timestamp,
+) !void {
+    var stmt = try s.db.prepare(
+        "INSERT OR IGNORE INTO links (from_type, from_id, to_type, to_id, relation, scope_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, from_type);
+    try stmt.bindText(2, from_id);
+    try stmt.bindText(3, to_type);
+    try stmt.bindText(4, to_id);
+    try stmt.bindText(5, relation);
+    try stmt.bindText(6, scope);
+    try stmt.bindText(7, try fmtTs(a, now));
+    _ = try stmt.step();
+}
+
 /// Returns the stored result JSON when the key replays, null when the key is
 /// new, and a conflict when the payload hash differs.
 pub fn lookupIdemStmt(
@@ -863,6 +889,7 @@ pub fn process(s: *Store, a: std.mem.Allocator, cmd: ProcessCmd, now: Timestamp)
                 .updated_at = now_s,
             };
             try insertHistory(s, a, "work_item", id, "created", cap.scope, "", 1, .{ .work_item = item }, now);
+            try insertLink(s, a, "capture", cap.id, "work_item", id, "produced", cap.scope, now);
             try items.append(a, item);
         }
     }
@@ -1886,6 +1913,7 @@ pub fn commitPlan(s: *Store, a: std.mem.Allocator, cmd: CommitPlanCmd, now: Time
         try ins.bindText(3, it.role);
         try ins.bindInt(4, it.position);
         _ = try ins.step();
+        try insertLink(s, a, "plan", plan_id, "work_item", it.work_item_id, "produced", cmd.binding.scopes[0], now);
         try items.append(a, .{ .work_item_id = it.work_item_id, .role = it.role, .position = it.position });
     }
     plan.items = items.items;
@@ -2053,6 +2081,7 @@ pub fn startFocus(s: *Store, a: std.mem.Allocator, cmd: FocusStartCmd, now: Time
         try ins.bindText(5, now_s);
         _ = try ins.step();
     }
+    try insertLink(s, a, "work_item", item.id, "focus_session", id, "produced", item.scope, now);
     const focus = domain.FocusSession{
         .id = id,
         .profile = cmd.binding.profile,
@@ -2132,6 +2161,7 @@ pub fn recordCheckpoint(s: *Store, a: std.mem.Allocator, cmd: CheckpointCmd, now
         try ins.bindText(10, now_s);
         _ = try ins.step();
     }
+    try insertLink(s, a, "focus_session", focus_id, "checkpoint", id, "produced", item.scope, now);
     const cp = domain.Checkpoint{
         .id = id,
         .scope = item.scope,
@@ -3505,22 +3535,26 @@ pub fn recordSourceReview(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd,
             .revision = 1,
         };
         var ci = try s.db.prepare(
-            "INSERT INTO captures (id, scope_id, source_id, external_id, external_revision, original_text, content_hash, source_uri, occurred_at, captured_at, processing_state, processing_outcome, review_after, revision) " ++
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, 1)",
+            "INSERT INTO captures (id, scope_id, source_id, source_review_id, batch_id, provider_metadata, external_id, external_revision, original_text, content_hash, source_uri, occurred_at, captured_at, processing_state, processing_outcome, review_after, revision) " ++
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, 1)",
         );
         defer ci.finalize();
         try ci.bindText(1, cap.id);
         try ci.bindText(2, cap.scope);
         try ci.bindText(3, cap.source_id);
-        try ci.bindOptText(4, cap.external_id);
-        try ci.bindOptText(5, cap.external_revision);
-        try ci.bindText(6, cap.original_text);
-        try ci.bindText(7, cap.content_hash);
-        try ci.bindOptText(8, cap.source_uri);
-        try ci.bindOptText(9, cap.occurred_at);
-        try ci.bindText(10, cap.captured_at);
+        try ci.bindText(4, review.id);
+        try ci.bindText(5, cmd.batch_id);
+        try ci.bindText(6, item.provider_metadata_summary orelse "{}");
+        try ci.bindOptText(7, cap.external_id);
+        try ci.bindOptText(8, cap.external_revision);
+        try ci.bindText(9, cap.original_text);
+        try ci.bindText(10, cap.content_hash);
+        try ci.bindOptText(11, cap.source_uri);
+        try ci.bindOptText(12, cap.occurred_at);
+        try ci.bindText(13, cap.captured_at);
         _ = try ci.step();
         try insertHistory(s, a, "capture", cap.id, "captured", cap.scope, "", 1, .{ .capture = cap }, now);
+        try insertLink(s, a, "source_review", review.id, "capture", cap.id, "produced", cap.scope, now);
         try captures.append(a, cap);
         try capture_ids.append(a, cap.id);
     }
@@ -4274,4 +4308,82 @@ fn firstLineTitle(id: []const u8, text: []const u8, buf: []u8) ![]const u8 {
     const n = @min(id.len, 80);
     @memcpy(buf[0..n], id[0..n]);
     return buf[0..n];
+}
+
+// ------------------------------------------------------------ provenance
+
+pub const TraceEdge = struct {
+    relation: []const u8,
+    from_type: []const u8,
+    from_id: []const u8,
+    to_type: []const u8,
+    to_id: []const u8,
+};
+
+pub const TraceResult = struct {
+    id: []const u8,
+    kind: []const u8,
+    label: []const u8 = "",
+    edges: []const TraceEdge,
+};
+
+pub fn entityKind(id: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, id, "C-")) return "capture";
+    if (std.mem.startsWith(u8, id, "CP-")) return "checkpoint";
+    if (std.mem.startsWith(u8, id, "T-")) return "work_item";
+    if (std.mem.startsWith(u8, id, "SR-")) return "source_review";
+    if (std.mem.startsWith(u8, id, "F-")) return "focus_session";
+    if (std.mem.startsWith(u8, id, "P-")) return "plan";
+    if (std.mem.startsWith(u8, id, "R-")) return "review";
+    if (std.mem.startsWith(u8, id, "G-")) return "goal";
+    if (std.mem.startsWith(u8, id, "doc:")) return "document";
+    return null;
+}
+
+fn traceLabel(a: std.mem.Allocator, s: *Store, id: []const u8) ![]const u8 {
+    if (std.mem.startsWith(u8, id, "T-")) {
+        var q = try s.db.prepare("SELECT title FROM work_items WHERE id = ?");
+        defer q.finalize();
+        try q.bindText(1, id);
+        if (try q.step()) return clip(a, q.text(0), 60);
+        return "";
+    }
+    if (std.mem.startsWith(u8, id, "doc:")) {
+        var q = try s.db.prepare("SELECT title FROM documents WHERE id = ?");
+        defer q.finalize();
+        try q.bindText(1, id);
+        if (try q.step()) return clip(a, q.text(0), 60);
+        return "";
+    }
+    return "";
+}
+
+fn clip(a: std.mem.Allocator, text: []const u8, max: usize) ![]const u8 {
+    if (text.len <= max) return dup(a, text);
+    var cut = max;
+    while (cut > 0 and (text[cut] & 0xc0) == 0x80) cut -= 1;
+    return dup(a, text[0..cut]);
+}
+
+/// One hop of the provenance graph around `id`, both directions.
+pub fn traceEntity(s: *Store, a: std.mem.Allocator, id: []const u8) !TraceResult {
+    const kind = entityKind(id) orelse return errors.invalid("unknown id \"{s}\"", .{id});
+    var q = try s.db.prepare(
+        "SELECT relation, from_type, from_id, to_type, to_id FROM links WHERE from_id = ? OR to_id = ? " ++
+            "ORDER BY relation, from_id, to_id",
+    );
+    defer q.finalize();
+    try q.bindText(1, id);
+    try q.bindText(2, id);
+    var edges: std.ArrayList(TraceEdge) = .empty;
+    while (try q.step()) {
+        try edges.append(a, .{
+            .relation = try dup(a, q.text(0)),
+            .from_type = try dup(a, q.text(1)),
+            .from_id = try dup(a, q.text(2)),
+            .to_type = try dup(a, q.text(3)),
+            .to_id = try dup(a, q.text(4)),
+        });
+    }
+    return .{ .id = try dup(a, id), .kind = try dup(a, kind), .label = try traceLabel(a, s, id), .edges = edges.items };
 }
