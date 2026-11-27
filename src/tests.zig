@@ -1,4 +1,5 @@
 test {
+    _ = @import("install.zig");
     _ = @import("errors.zig");
     _ = @import("json.zig");
     _ = @import("sqlite.zig");

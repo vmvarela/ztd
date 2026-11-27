@@ -15,6 +15,7 @@ const core = @import("store/core.zig");
 const doc = @import("docs.zig");
 const mcp = @import("mcp.zig");
 const version = @import("version.zig").version;
+const install_mod = @import("install.zig");
 
 const Store = store_mod.Store;
 
@@ -27,6 +28,7 @@ pub const Cli = struct {
     db: []const u8 = "",
     actor: []const u8 = "",
     ztd_scopes: ?[]const u8 = null,
+    exit_code: u8 = 0,
     home: ?[]const u8 = null,
     sources_path: ?[]const u8 = null,
 };
@@ -204,7 +206,7 @@ pub fn run(init: std.process.Init, w: *Io.Writer, ew: *Io.Writer, args: []const 
         },
         else => return e,
     };
-    return 0;
+    return c.exit_code;
 }
 
 fn dispatch(c: *Cli, init: std.process.Init, command: []const u8, args: []const []const u8) !void {
@@ -256,6 +258,7 @@ fn dispatch(c: *Cli, init: std.process.Init, command: []const u8, args: []const 
     if (std.mem.eql(u8, command, "doc")) return cmdDoc(c, args);
     if (std.mem.eql(u8, command, "trace")) return cmdTrace(c, args);
     if (std.mem.eql(u8, command, "mcp")) return cmdMcp(c, args);
+    if (std.mem.eql(u8, command, "install")) return cmdInstall(c, args);
     if (std.mem.eql(u8, command, "export")) return cmdExport(c, args);
     if (std.mem.eql(u8, command, "restore")) return cmdRestore(c, args);
     if (std.mem.eql(u8, command, "snapshot")) return cmdSnapshot(c, args);
@@ -1489,6 +1492,7 @@ test "scope declarations parse id and kind" {
 // --------------------------------------------------------------- documents
 
 fn failWithData(c: *Cli, command: []const u8, family: errors.Family, detail: []const u8, data: []const u8) !void {
+    c.exit_code = 1;
     if (!c.json) {
         try c.err.print("{s}: {s}\n", .{ family.text(), detail });
         return;
@@ -2293,6 +2297,57 @@ fn cmdRecover(c: *Cli, args: []const []const u8) !void {
     try o.boolean("recovered", false);
     try o.end();
     try succeedData(c, "recover", aw.written());
+}
+
+fn cmdInstall(c: *Cli, args: []const []const u8) !void {
+    const use_line = "usage: install opencode|templates [--dry-run]";
+    if (args.len == 0) return errors.invalid(use_line, .{});
+    const target = args[0];
+    const specs = [_]Spec{.{ .name = "dry-run", .value = false }};
+    const p = try parseFlags(c.arena, args[1..], &specs);
+    if (p.positional.len != 0) return errors.invalid(use_line, .{});
+    var cfg = install_mod.Config{ .prefix = "", .root = "", .version = version, .dry_run = p.has("dry-run") };
+    if (std.mem.eql(u8, target, "opencode")) {
+        const home = c.home orelse return errors.fail(.io_error, "resolve home directory: not set", .{});
+        cfg.prefix = "integrations/opencode";
+        cfg.root = try std.fmt.allocPrint(c.arena, "{s}/.config/opencode", .{home});
+    } else if (std.mem.eql(u8, target, "templates")) {
+        cfg.prefix = "method";
+        cfg.root = parentOf(c.db);
+        cfg.require_root = true;
+    } else {
+        return errors.invalid(use_line, .{});
+    }
+    const report = install_mod.run(c.arena, c.io, cfg) catch |e| switch (e) {
+        error.Ztd => return e,
+        else => return errors.fail(.io_error, "install: {s}", .{@errorName(e)}),
+    };
+    if (report.conflicts.len > 0) {
+        var aw = Io.Writer.Allocating.init(c.arena);
+        var o = try jsonw.Obj.init(&aw.writer);
+        try report.write(&o);
+        try o.end();
+        return failWithData(c, "install", .conflict, try std.fmt.allocPrint(c.arena, "install aborted, no files written:\n{s}", .{try std.mem.join(c.arena, "\n", report.conflicts)}), aw.written());
+    }
+    if (!c.json) {
+        var buf: [128]u8 = undefined;
+        const summary = try std.fmt.bufPrint(&buf, "installed {d}, updated {d}, unchanged {d}{s}", .{
+            report.installed, report.updated, report.unchanged,
+            if (cfg.dry_run) " (dry run, nothing written)" else "",
+        });
+        return succeedData(c, "install", try quoteJson(c.arena, summary));
+    }
+    return writeJson(c, "install", report);
+}
+
+fn parentOf(path: []const u8) []const u8 {
+    return std.fs.path.dirname(path) orelse path;
+}
+
+fn quoteJson(a: std.mem.Allocator, s: []const u8) ![]const u8 {
+    var aw = Io.Writer.Allocating.init(a);
+    try jsonw.writeString(&aw.writer, s);
+    return aw.written();
 }
 
 fn cmdMcp(c: *Cli, args: []const []const u8) !void {
