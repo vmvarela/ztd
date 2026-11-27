@@ -7,7 +7,7 @@
         "command": "init",
         "data": {
           "actor": "ztd-corpus",
-          "database": "\u003ctmp\u003e/ztd.db",
+          "database": "<tmp>/ztd.db",
           "profiles": [
             {
               "id": "personal",
@@ -29,12 +29,12 @@
         "ok": true,
         "command": "capture",
         "data": {
-          "id": "\u003ccid\u003e",
+          "id": "<cid>",
           "scope": "personal",
           "source_id": "MANUAL",
           "original_text": "renew the parking permit",
-          "content_hash": "\u003chash\u003e",
-          "captured_at": "\u003cts\u003e",
+          "content_hash": "<hash>",
+          "captured_at": "<ts>",
           "processing_state": "pending",
           "revision": 1
         }
@@ -46,12 +46,12 @@
         "ok": true,
         "command": "capture",
         "data": {
-          "id": "\u003ccid\u003e",
+          "id": "<cid>",
           "scope": "personal",
           "source_id": "MANUAL",
           "original_text": "renew the parking permit",
-          "content_hash": "\u003chash\u003e",
-          "captured_at": "\u003cts\u003e",
+          "content_hash": "<hash>",
+          "captured_at": "<ts>",
           "processing_state": "pending",
           "revision": 1
         }
@@ -86,7 +86,7 @@
         "command": "show",
         "error": {
           "family": "not_found",
-          "detail": "work item \u003ctid\u003e not found"
+          "detail": "work item <tid> not found"
         }
       }
     },
@@ -119,7 +119,7 @@
         "command": "move",
         "error": {
           "family": "not_found",
-          "detail": "work item \u003ccid\u003e not found"
+          "detail": "work item <cid> not found"
         }
       }
     },
@@ -163,8 +163,8 @@
           "auth_state": "unknown",
           "coverage": "unknown",
           "cursor": "",
-          "created_at": "\u003cts\u003e",
-          "updated_at": "\u003cts\u003e"
+          "created_at": "<ts>",
+          "updated_at": "<ts>"
         }
       }
     },
@@ -186,8 +186,8 @@
           "auth_state": "unknown",
           "coverage": "unknown",
           "cursor": "",
-          "created_at": "\u003cts\u003e",
-          "updated_at": "\u003cts\u003e"
+          "created_at": "<ts>",
+          "updated_at": "<ts>"
         }
       }
     },
@@ -208,20 +208,20 @@
     "calendar_review_assertions": null,
     "captures": [
       {
-        "captured_at": "\u003cts\u003e",
-        "content_hash": "\u003chash\u003e",
-        "external_id": "\u003cnull\u003e",
-        "external_revision": "\u003cnull\u003e",
-        "id": "\u003ccid\u003e",
-        "occurred_at": "\u003cnull\u003e",
+        "captured_at": "<ts>",
+        "content_hash": "<hash>",
+        "external_id": "<null>",
+        "external_revision": "<null>",
+        "id": "<cid>",
+        "occurred_at": "<null>",
         "original_text": "renew the parking permit",
-        "processing_outcome": "\u003cnull\u003e",
+        "processing_outcome": "<null>",
         "processing_state": "pending",
-        "review_after": "\u003cnull\u003e",
+        "review_after": "<null>",
         "revision": "1",
         "scope_id": "personal",
         "source_id": "MANUAL",
-        "source_uri": "\u003cnull\u003e"
+        "source_uri": "<null>"
       }
     ],
     "checkpoints": null,
@@ -232,34 +232,34 @@
     "goals": null,
     "history_events": [
       {
-        "created_at": "\u003cts\u003e",
-        "entity_id": "\u003ccid\u003e",
+        "created_at": "<ts>",
+        "entity_id": "<cid>",
         "entity_type": "capture",
         "event": "captured",
-        "payload_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}",
-        "profile_id": "\u003cnull\u003e",
+        "payload_json": "{\"id\":\"<cid>\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"<hash>\",\"captured_at\":\"<ts>\",\"processing_state\":\"pending\",\"revision\":1}",
+        "profile_id": "<null>",
         "revision": "1",
         "scope_id": "personal",
         "seq": "1"
       },
       {
-        "created_at": "\u003cts\u003e",
+        "created_at": "<ts>",
         "entity_id": "feed",
         "entity_type": "source",
         "event": "created",
-        "payload_json": "{\"id\":\"feed\",\"name\":\"Feed\",\"scope\":\"personal\",\"kind\":\"capture\",\"connector\":\"manual\",\"provider\":\"\",\"connection_ref\":\"\",\"non_secret_query\":\"\",\"cadence\":\"\",\"auth_state\":\"unknown\",\"coverage\":\"unknown\",\"cursor\":\"\",\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
-        "profile_id": "\u003cnull\u003e",
+        "payload_json": "{\"id\":\"feed\",\"name\":\"Feed\",\"scope\":\"personal\",\"kind\":\"capture\",\"connector\":\"manual\",\"provider\":\"\",\"connection_ref\":\"\",\"non_secret_query\":\"\",\"cadence\":\"\",\"auth_state\":\"unknown\",\"coverage\":\"unknown\",\"cursor\":\"\",\"created_at\":\"<ts>\",\"updated_at\":\"<ts>\"}",
+        "profile_id": "<null>",
         "revision": "1",
         "scope_id": "personal",
         "seq": "2"
       },
       {
-        "created_at": "\u003cts\u003e",
+        "created_at": "<ts>",
         "entity_id": "feed",
         "entity_type": "source",
         "event": "deleted",
-        "payload_json": "{\"id\":\"feed\",\"name\":\"Feed\",\"scope\":\"personal\",\"kind\":\"capture\",\"connector\":\"manual\",\"provider\":\"\",\"connection_ref\":\"\",\"non_secret_query\":\"\",\"cadence\":\"\",\"auth_state\":\"unknown\",\"coverage\":\"unknown\",\"cursor\":\"\",\"created_at\":\"\u003cts\u003e\",\"updated_at\":\"\u003cts\u003e\"}",
-        "profile_id": "\u003cnull\u003e",
+        "payload_json": "{\"id\":\"feed\",\"name\":\"Feed\",\"scope\":\"personal\",\"kind\":\"capture\",\"connector\":\"manual\",\"provider\":\"\",\"connection_ref\":\"\",\"non_secret_query\":\"\",\"cadence\":\"\",\"auth_state\":\"unknown\",\"coverage\":\"unknown\",\"cursor\":\"\",\"created_at\":\"<ts>\",\"updated_at\":\"<ts>\"}",
+        "profile_id": "<null>",
         "revision": "1",
         "scope_id": "personal",
         "seq": "3"
@@ -268,10 +268,10 @@
     "idempotency_records": [
       {
         "command": "capture",
-        "created_at": "\u003cts\u003e",
+        "created_at": "<ts>",
         "idempotency_key": "cap-1",
-        "request_hash": "\u003chash\u003e",
-        "result_json": "{\"id\":\"\u003ccid\u003e\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"\u003chash\u003e\",\"captured_at\":\"\u003cts\u003e\",\"processing_state\":\"pending\",\"revision\":1}"
+        "request_hash": "<hash>",
+        "result_json": "{\"id\":\"<cid>\",\"scope\":\"personal\",\"source_id\":\"MANUAL\",\"original_text\":\"renew the parking permit\",\"content_hash\":\"<hash>\",\"captured_at\":\"<ts>\",\"processing_state\":\"pending\",\"revision\":1}"
       }
     ],
     "import_runs": null,
@@ -291,7 +291,7 @@
         "name": "personal",
         "owner_actor_id": "ztd-corpus",
         "status": "active",
-        "timezone": "Europe/Madrid"
+        "timezone": "<tz>"
       }
     ],
     "projects": null,
@@ -299,7 +299,7 @@
     "routines": null,
     "scopes": [
       {
-        "created_at": "\u003cts\u003e",
+        "created_at": "<ts>",
         "id": "personal",
         "kind": "personal",
         "name": "personal"

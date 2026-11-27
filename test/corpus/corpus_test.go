@@ -1,7 +1,7 @@
 // Package corpus records normalized CLI output and database state for fixed
-// journeys, then replays them against another binary. During the v3 rewrite
-// ZTD_BIN points at the Zig build: the existing integration suite asserts
-// behavior, and this package catches byte-level envelope and schema drift.
+// journeys, then replays them against another binary. ZTD_BIN selects the
+// subject (default ./zig-out/bin/ztd); this package catches byte-level
+// envelope and schema drift.
 package corpus
 
 import (
@@ -38,18 +38,13 @@ func TestMain(m *testing.M) {
 		}
 		binPath = abs
 	} else {
-		dir, err := os.MkdirTemp("", "ztd-corpus-")
+		// The Go product is retired; the default subject is the Zig build.
+		abs, err := resolveBin(filepath.Join(repoRoot(), "zig-out/bin/ztd"))
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "temp dir:", err)
+			fmt.Fprintln(os.Stderr, "ZTD_BIN: set it or run `zig build --release=fast` first:", err)
 			os.Exit(1)
 		}
-		binPath = filepath.Join(dir, "ztd")
-		build := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", binPath, "./cmd/ztd")
-		build.Dir = repoRoot()
-		if out, err := build.CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "go build: %v\n%s", err, out)
-			os.Exit(1)
-		}
+		binPath = abs
 	}
 	os.Exit(m.Run())
 }
@@ -332,7 +327,13 @@ func dumpDB(t *testing.T, path string) map[string][]map[string]string {
 			}
 			row := make(map[string]string, len(cols))
 			for i, v := range vals {
-				row[cols[i]] = normalize(cell(v))
+				value := normalize(cell(v))
+				// The profile timezone is the machine's local zone, so it differs
+				// between the recording host and CI; the shape is what matters.
+				if cols[i] == "timezone" {
+					value = "<tz>"
+				}
+				row[cols[i]] = value
 			}
 			tableRows = append(tableRows, row)
 		}
