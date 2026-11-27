@@ -3329,7 +3329,7 @@ pub const SourceCmd = struct {
     cadence: []const u8 = "",
 };
 
-fn validateSourceCmd(cmd: SourceCmd) !void {
+fn validateSourceCmd(a: std.mem.Allocator, cmd: SourceCmd) !void {
     try validateBinding(cmd.binding);
     if (!validSourceId(cmd.id)) return errors.invalid("source id must match [a-z][a-z0-9_-]{{1,63}}", .{});
     if (trimmed(cmd.name).len == 0) return errors.invalid("source name is required", .{});
@@ -3346,6 +3346,9 @@ fn validateSourceCmd(cmd: SourceCmd) !void {
     if (cmd.scope.len == 0) return errors.invalid("source scope is required", .{});
     if (!cmd.binding.allows(cmd.scope)) {
         return errors.fail(.scope_denied, "scope {s} is outside the active scopes", .{cmd.scope});
+    }
+    if (std.mem.eql(u8, cmd.connector, "directory")) {
+        _ = parseDirectoryRoots(a, cmd.id, cmd.connection_ref) catch |e| return e;
     }
 }
 
@@ -3390,7 +3393,7 @@ fn refuseReusedSourceId(s: *Store, id: []const u8) !void {
 
 
 pub fn addSource(s: *Store, a: std.mem.Allocator, cmd: SourceCmd, now: Timestamp) !domain.Source {
-    try validateSourceCmd(cmd);
+    try validateSourceCmd(a, cmd);
     const now_s = try fmtTs(a, now);
 
     try s.begin();
@@ -3542,6 +3545,17 @@ pub const SourceReviewCmd = struct {
     retrieval: domain.SourceRetrieval = .{},
     items: []const domain.SourceItem = &.{},
 };
+
+/// The `body_ref` a provider summary may carry: where the full body lives when
+/// only an excerpt was ingested.
+fn metadataBodyRef(a: std.mem.Allocator, summary: ?[]const u8) !?[]const u8 {
+    const raw = summary orelse return null;
+    const parsed = std.json.parseFromSlice(std.json.Value, a, raw, .{}) catch return null;
+    if (parsed.value != .object) return null;
+    const ref = jsonw.strField(parsed.value, "body_ref") orelse return null;
+    if (ref.len == 0) return null;
+    return try dup(a, ref);
+}
 
 fn validateSourceItem(item: domain.SourceItem) !void {
     if (trimmed(item.original_text).len == 0) return errors.invalid("source item text is required", .{});
@@ -3748,8 +3762,8 @@ pub fn recordSourceReview(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd,
             .revision = 1,
         };
         var ci = try s.db.prepare(
-            "INSERT INTO captures (id, scope_id, source_id, source_review_id, batch_id, provider_metadata, external_id, external_revision, original_text, content_hash, source_uri, occurred_at, captured_at, processing_state, processing_outcome, review_after, revision) " ++
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, 1)",
+            "INSERT INTO captures (id, scope_id, source_id, source_review_id, batch_id, provider_metadata, external_id, external_revision, original_text, content_hash, source_uri, body_ref, occurred_at, captured_at, processing_state, processing_outcome, review_after, revision) " ++
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, 1)",
         );
         defer ci.finalize();
         try ci.bindText(1, cap.id);
@@ -3763,8 +3777,9 @@ pub fn recordSourceReview(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd,
         try ci.bindText(9, cap.original_text);
         try ci.bindText(10, cap.content_hash);
         try ci.bindOptText(11, cap.source_uri);
-        try ci.bindOptText(12, cap.occurred_at);
-        try ci.bindText(13, cap.captured_at);
+        try ci.bindOptText(12, try metadataBodyRef(a, item.provider_metadata_summary));
+        try ci.bindOptText(13, cap.occurred_at);
+        try ci.bindText(14, cap.captured_at);
         _ = try ci.step();
         try insertHistory(s, a, "capture", cap.id, "captured", cap.scope, "", 1, .{ .capture = cap }, now);
         try insertLink(s, a, "source_review", review.id, "capture", cap.id, "produced", cap.scope, now);
@@ -3841,6 +3856,175 @@ fn sourceReviewResultFromValue(a: std.mem.Allocator, v: std.json.Value) !SourceR
         for (list) |item| try captures.append(a, try captureFromValue(a, item));
     }
     return .{ .review = review, .captures = captures.items };
+}
+
+// ------------------------------------------------- directory connector (observed)
+
+fn parseDirectoryRoots(a: std.mem.Allocator, id: []const u8, connection_ref: []const u8) ![]const []const u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, a, connection_ref, .{}) catch
+        return errors.invalid("directory source {s} must list its roots as a JSON array of absolute paths in connection_ref", .{id});
+    if (parsed.value != .array) {
+        return errors.invalid("directory source {s} must list its roots as a JSON array of absolute paths in connection_ref", .{id});
+    }
+    var roots: std.ArrayList([]const u8) = .empty;
+    for (parsed.value.array.items) |item| {
+        if (item != .string) {
+            return errors.invalid("directory source {s} must list its roots as a JSON array of absolute paths in connection_ref", .{id});
+        }
+        if (!std.Io.Dir.path.isAbsolute(item.string)) {
+            return errors.invalid("directory root {s} must be an absolute path", .{item.string});
+        }
+        try roots.append(a, try dup(a, item.string));
+    }
+    if (roots.items.len == 0) return errors.invalid("directory source {s} needs at least one root", .{id});
+    return roots.items;
+}
+
+fn realpathAlloc(a: std.mem.Allocator, path: []const u8) ![]const u8 {
+    const z = try a.dupeSentinel(u8, path, 0);
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const resolved = c.realpath(z.ptr, &buf) orelse return error.RealpathFailed;
+    return a.dupe(u8, std.mem.span(resolved));
+}
+
+fn insideRoot(path: []const u8, root: []const u8) bool {
+    if (std.mem.eql(u8, path, root)) return true;
+    return std.mem.startsWith(u8, path, root) and path.len > root.len and path[root.len] == '/';
+}
+
+fn readPrefix(a: std.mem.Allocator, io: std.Io, path: []const u8, limit: usize) ![]const u8 {
+    var file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer file.close(io);
+    var buf: [4096]u8 = undefined;
+    var fr = file.reader(io, &buf);
+    return fr.interface.readAllocShort(a, limit);
+}
+
+/// Walks a directory source and records one observed review. The cursor only
+/// moves when the window is complete: every root resolved and listed, no read
+/// failures, nothing truncated. A suspicious path (a symlink leaving its root)
+/// counts as a failure and never as content.
+pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Binding, source_id: []const u8, key_in: []const u8, now: Timestamp) !SourceReviewResult {
+    const src = try loadSourceScope(s, a, b, source_id);
+    if (!std.mem.eql(u8, src.connector, "directory")) {
+        return errors.invalid("source {s} is not a directory source", .{src.id});
+    }
+    const roots = try parseDirectoryRoots(a, src.id, src.connection_ref);
+
+    var items: std.ArrayList(domain.SourceItem) = .empty;
+    var failures: std.ArrayList([]const u8) = .empty;
+    var seen = std.StringHashMap(void).init(a);
+    var complete = true;
+    var truncated = false;
+    var max_mtime: Timestamp = 0;
+
+    for (roots) |root| {
+        const real_root = realpathAlloc(a, root) catch {
+            try failures.append(a, try std.fmt.allocPrint(a, "root {s} cannot be resolved", .{root}));
+            complete = false;
+            continue;
+        };
+        // The root is canonicalised before use, so containment is checked
+        // against the directory actually read. A root that only differs by
+        // canonicalisation (/tmp -> /private/tmp) is fine; whatever it points
+        // at is what the approval covers, and entries are still confined to it.
+        var dir = std.Io.Dir.openDirAbsolute(io, real_root, .{ .iterate = true }) catch {
+            try failures.append(a, try std.fmt.allocPrint(a, "root {s} cannot be opened", .{root}));
+            complete = false;
+            continue;
+        };
+        defer dir.close(io);
+        var walker = dir.walk(a) catch {
+            try failures.append(a, try std.fmt.allocPrint(a, "root {s} cannot be listed", .{root}));
+            complete = false;
+            continue;
+        };
+        defer walker.deinit();
+        while (true) {
+            const entry = walker.next(io) catch {
+                try failures.append(a, try std.fmt.allocPrint(a, "root {s} cannot be listed completely", .{root}));
+                complete = false;
+                break;
+            } orelse break;
+            if (entry.kind != .file and entry.kind != .sym_link) continue;
+            const full = try std.fmt.allocPrint(a, "{s}/{s}", .{ real_root, entry.path });
+            const real = realpathAlloc(a, full) catch {
+                try failures.append(a, try std.fmt.allocPrint(a, "path {s} cannot be resolved", .{full}));
+                complete = false;
+                continue;
+            };
+            if (!insideRoot(real, real_root)) {
+                try failures.append(a, try std.fmt.allocPrint(a, "path {s} resolves outside root {s}", .{ full, real_root }));
+                complete = false;
+                continue;
+            }
+            if (items.items.len >= 500) {
+                truncated = true;
+                complete = false;
+                break;
+            }
+            const st = std.Io.Dir.statFile(dir, io, entry.path, .{}) catch {
+                try failures.append(a, try std.fmt.allocPrint(a, "path {s} cannot be read", .{full}));
+                complete = false;
+                continue;
+            };
+            if (st.kind == .directory) continue;
+            const seconds = st.mtime.toSeconds();
+            const revision = try std.fmt.allocPrint(a, "{d}:{d}", .{ seconds, st.size });
+            const dedupe_key = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ real, revision });
+            if (seen.contains(dedupe_key)) continue;
+            try seen.put(dedupe_key, {});
+            const text = readPrefix(a, io, real, 64 * 1024) catch {
+                try failures.append(a, try std.fmt.allocPrint(a, "path {s} cannot be read", .{full}));
+                complete = false;
+                continue;
+            };
+            if (trimmed(text).len == 0) continue;
+            try items.append(a, .{
+                .external_id = real,
+                .external_revision = revision,
+                .original_text = text,
+                .source_uri = try std.fmt.allocPrint(a, "file://{s}", .{real}),
+                .occurred_at = null,
+                .provider_metadata_summary = if (st.size > 64 * 1024)
+                    try std.fmt.allocPrint(a, "{{\"body_ref\":\"file://{s}\",\"bytes\":{d}}}", .{ real, st.size })
+                else
+                    null,
+            });
+            if (seconds > max_mtime) max_mtime = seconds;
+        }
+    }
+
+    // Deterministic order: the capture IDs must not depend on the walk order.
+    std.mem.sort(domain.SourceItem, items.items, {}, struct {
+        fn less(_: void, lhs: domain.SourceItem, rhs: domain.SourceItem) bool {
+            return std.mem.lessThan(u8, lhs.external_id, rhs.external_id);
+        }
+    }.less);
+
+    const cursor = if (max_mtime > 0) try fmtTs(a, max_mtime) else src.cursor;
+    // One batch per scan: the nanosecond stamp keeps two scans in the same
+    // second from colliding on the (source, batch) unique key.
+    const stamp = std.Io.Timestamp.now(io, .real).nanoseconds;
+    const key = if (key_in.len > 0) key_in else try std.fmt.allocPrint(a, "scan:{s}:{d}", .{ src.id, stamp });
+    const batch_id = try std.fmt.allocPrint(a, "scan:{s}:{d}", .{ src.id, stamp });
+    return recordSourceReview(s, a, .{
+        .binding = b,
+        .source_id = src.id,
+        .batch_id = batch_id,
+        .key = key,
+        .result_kind = "observed",
+        .retrieval = .{
+            .window = try std.fmt.allocPrint(a, "{s}..{s}", .{ src.cursor, cursor }),
+            .cursor = cursor,
+            .requested_limit = 0,
+            .provider_returned_limit = @intCast(items.items.len),
+            .complete_window = complete,
+            .truncated = truncated,
+            .failures = if (failures.items.len > 0) failures.items else null,
+        },
+        .items = items.items,
+    }, now);
 }
 
 // --------------------------------------------------- scopes, contexts, projects
@@ -4115,7 +4299,7 @@ pub fn applySources(s: *Store, a: std.mem.Allocator, cmds: []const SourceCmd, no
     if (cmds.len == 0) return errors.invalid("source configuration is empty", .{});
     if (cmds.len > 200) return errors.invalid("source configuration exceeds 200 entries", .{});
     for (cmds, 0..) |cmd, i| {
-        try validateSourceCmd(cmd);
+        try validateSourceCmd(a, cmd);
         for (cmds[0..i]) |prev| {
             if (std.mem.eql(u8, prev.id, cmd.id)) return errors.invalid("duplicate source id {s}", .{cmd.id});
         }

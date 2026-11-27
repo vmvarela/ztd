@@ -1801,15 +1801,16 @@ fn declaredScopes(c: *Cli, st: *Store) ![]const []const u8 {
 }
 
 fn cmdSource(c: *Cli, args: []const []const u8) !void {
-    if (args.len == 0) return errors.invalid("usage: source add|apply|list|review|delete [flags]", .{});
+    if (args.len == 0) return errors.invalid("usage: source add|apply|list|review|scan|delete [flags]", .{});
     const sub = args[0];
     const rest = args[1..];
     if (std.mem.eql(u8, sub, "add")) return sourceAdd(c, rest);
     if (std.mem.eql(u8, sub, "list")) return sourceList(c, rest);
     if (std.mem.eql(u8, sub, "review")) return sourceReview(c, rest);
+    if (std.mem.eql(u8, sub, "scan")) return sourceScan(c, rest);
     if (std.mem.eql(u8, sub, "delete")) return sourceDelete(c, rest);
     if (std.mem.eql(u8, sub, "apply")) return sourceApply(c, rest);
-    return errors.invalid("usage: source add|apply|list|review|delete [flags]", .{});
+    return errors.invalid("usage: source add|apply|list|review|scan|delete [flags]", .{});
 }
 
 fn sourceAdd(c: *Cli, args: []const []const u8) !void {
@@ -1938,22 +1939,42 @@ fn sourceReview(c: *Cli, args: []const []const u8) !void {
         .retrieval = retrieval,
         .items = items.items,
     }, nowSeconds(c));
+    try emitSourceReview(c, "source review", out, p.has("full"));
+}
+
+/// Emits a source review under its byte cap: the full list only when it fits or
+/// `full` was asked for, otherwise the first captures that fit (ten at most)
+/// with the review recording how many were cut.
+fn emitSourceReview(c: *Cli, command: []const u8, out: core.SourceReviewResult, full: bool) !void {
     var full_aw = Io.Writer.Allocating.init(c.arena);
     try renderSourceReview(&full_aw.writer, out, out.captures.len);
-    if (p.has("full") or full_aw.written().len <= core.source_review_cap) {
-        return succeedData(c, "source review", full_aw.written());
+    if (full or full_aw.written().len <= core.source_review_cap) {
+        return succeedData(c, command, full_aw.written());
     }
-    // Over the cap: keep the first captures that fit, never more than ten, and
-    // let the review record how many were cut.
     var shown = @min(core.compact_capture_ids, out.captures.len);
     while (true) {
         var aw = Io.Writer.Allocating.init(c.arena);
         try renderSourceReview(&aw.writer, out, shown);
         if (aw.written().len <= core.source_review_cap or shown == 0) {
-            return succeedData(c, "source review", aw.written());
+            return succeedData(c, command, aw.written());
         }
         shown -= 1;
     }
+}
+
+fn sourceScan(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true }, .{ .name = "id", .value = true },
+        .{ .name = "key", .value = true },   .{ .name = "full", .value = false },
+    };
+    const p = try parseFlags(c.arena, args, &specs);
+    if (p.positional.len != 0) return errors.invalid("usage: source scan --id ID [flags]", .{});
+    const id = p.get("id", "");
+    if (id.len == 0) return errors.invalid("--id is required", .{});
+    var r = try bound(c, oneScope(p.get("scope", "")));
+    defer r.st.close();
+    const out = try core.scanDirectory(&r.st, c.arena, c.io, r.b, id, p.get("key", ""), nowSeconds(c));
+    try emitSourceReview(c, "source scan", out, p.has("full"));
 }
 
 /// Renders the `source review` data block: captures first, then the review, as

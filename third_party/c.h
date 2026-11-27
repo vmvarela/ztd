@@ -3,5 +3,6 @@
 #include "sqlite3.h"
 #include <time.h>
 #include <unistd.h>
+#include <stdlib.h>
 #include <fcntl.h>
 #include <stdint.h>
