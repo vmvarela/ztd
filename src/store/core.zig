@@ -3738,7 +3738,9 @@ pub fn recordSourceReview(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd,
         const cap_id = try std.fmt.allocPrint(a, "C-{s}-{d:0>3}", .{
             date, @as(u32, @intCast(try store.nextDailySeq(s.db, "captures", try std.fmt.allocPrint(a, "C-{s}-", .{date})))),
         });
-        const content_hash = sha256hex(item.original_text);
+        // Copied into the arena: the capture outlives this loop iteration, so a
+        // pointer to the stack buffer would dangle (garbage on other ABIs).
+        const content_hash = try dup(a, &sha256hex(item.original_text));
         const ext_id: ?[]const u8 = if (item.external_id.len > 0) item.external_id else null;
         const ext_rev: ?[]const u8 = if (item.external_id.len > 0) item.external_revision else null;
         const cap = domain.Capture{
@@ -3748,7 +3750,7 @@ pub fn recordSourceReview(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd,
             .external_id = ext_id,
             .external_revision = ext_rev,
             .original_text = item.original_text,
-            .content_hash = &content_hash,
+            .content_hash = content_hash,
             .source_uri = item.source_uri,
             .occurred_at = item.occurred_at,
             .captured_at = now_s,

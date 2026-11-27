@@ -36,5 +36,8 @@ jobs:
       - name: Integration
         run: zig build integration
 
+      - name: Build the release binary
+        run: zig build --release=fast
+
       - name: Smoke
         run: ./zig-out/bin/ztd version
