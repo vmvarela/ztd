@@ -194,7 +194,9 @@ pub const ConfigEntry = struct {
     existed: bool,
 };
 
-/// One Markdown-shaped record identified by (scope, kind, slug).
+/// One Markdown-shaped record identified by (scope, kind, slug). The v3
+/// record fields stay absent from JSON when unset, so v2-shaped documents
+/// keep their exact output.
 pub const Document = struct {
     id: []const u8,
     scope: []const u8,
@@ -206,6 +208,13 @@ pub const Document = struct {
     revision: i64,
     created_at: []const u8,
     updated_at: []const u8,
+    record_kind: ?[]const u8 = null,
+    rationale: ?[]const u8 = null,
+    options_json: ?[]const u8 = null,
+    approved_by: ?[]const u8 = null,
+    approved_at: ?[]const u8 = null,
+    valid_from: ?[]const u8 = null,
+    supersedes_id: ?[]const u8 = null,
 
     pub fn write(self: Document, o: *json.Obj) !void {
         try o.str("id", self.id);
@@ -218,6 +227,13 @@ pub const Document = struct {
         try o.int("revision", self.revision);
         try o.str("created_at", self.created_at);
         try o.str("updated_at", self.updated_at);
+        if (self.record_kind) |v| try o.str("record_kind", v);
+        if (self.rationale) |v| try o.str("rationale", v);
+        if (self.options_json) |v| try o.raw("options", v);
+        if (self.approved_by) |v| try o.str("approved_by", v);
+        if (self.approved_at) |v| try o.str("approved_at", v);
+        if (self.valid_from) |v| try o.str("valid_from", v);
+        if (self.supersedes_id) |v| try o.str("supersedes_id", v);
     }
 };
 

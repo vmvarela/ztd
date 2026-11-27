@@ -1426,6 +1426,7 @@ fn cmdDoc(c: *Cli, args: []const []const u8) !void {
     if (std.mem.eql(u8, sub, "log")) return docLog(c, rest);
     if (std.mem.eql(u8, sub, "lint")) return docLint(c, rest);
     if (std.mem.eql(u8, sub, "archive")) return docArchive(c, rest);
+    if (std.mem.eql(u8, sub, "supersede")) return docSupersede(c, rest);
     return errors.invalid("usage: doc put|get|list|search|related|log|lint|archive [flags]", .{});
 }
 
@@ -1435,6 +1436,9 @@ fn docPut(c: *Cli, args: []const []const u8) !void {
         .{ .name = "slug", .value = true },    .{ .name = "title", .value = true },
         .{ .name = "body", .value = true },    .{ .name = "file", .value = true },
         .{ .name = "status", .value = true },  .{ .name = "expected", .value = true },
+        .{ .name = "record-kind", .value = true }, .{ .name = "rationale", .value = true },
+        .{ .name = "options", .value = true },     .{ .name = "evidence", .value = true },
+        .{ .name = "approved-by", .value = true }, .{ .name = "valid-from", .value = true },
     };
     const p = try parseFlags(c.arena, args, &specs);
     if (p.positional.len != 0) return errors.invalid("usage: doc put --kind K --slug S [flags]", .{});
@@ -1457,6 +1461,12 @@ fn docPut(c: *Cli, args: []const []const u8) !void {
         .body = body,
         .status = p.get("status", "draft"),
         .expected = expected,
+        .record_kind = p.get("record-kind", ""),
+        .rationale = p.get("rationale", ""),
+        .options_json = p.get("options", ""),
+        .evidence = if (p.multi.get("evidence")) |ev| ev.items else &.{},
+        .approved_by = p.get("approved-by", ""),
+        .valid_from = p.get("valid-from", ""),
     }, nowSeconds(c));
     try writeJson(c, "doc put", out);
 }
@@ -1505,6 +1515,7 @@ fn docSearch(c: *Cli, args: []const []const u8) !void {
     const specs = [_]Spec{
         .{ .name = "scope", .value = true }, .{ .name = "query", .value = true },
         .{ .name = "kind", .value = true },  .{ .name = "limit", .value = true },
+        .{ .name = "record-kind", .value = true },
     };
     const p = try parseFlags(c.arena, args, &specs);
     if (p.positional.len != 0) return errors.invalid("usage: doc search --query Q [--kind K] [--scope X] [--limit N]", .{});
@@ -1513,7 +1524,7 @@ fn docSearch(c: *Cli, args: []const []const u8) !void {
     const limit = try intFlag("limit", p.get("limit", "10"));
     var r = try bound(c, oneScope(p.get("scope", "")));
     defer r.st.close();
-    const hits = try core.searchDocuments(&r.st, c.arena, r.b, query, p.get("kind", ""), limit);
+    const hits = try core.searchDocumentsBy(&r.st, c.arena, r.b, query, p.get("kind", ""), p.get("record-kind", ""), limit);
     var aw = Io.Writer.Allocating.init(c.arena);
     var arr = try jsonw.Arr.init(&aw.writer);
     for (hits) |h| {
@@ -2164,4 +2175,27 @@ fn cmdTrace(c: *Cli, args: []const []const u8) !void {
         data = try renderTrace(c.arena, t, edges, omitted);
     }
     try succeedData(c, "trace", data);
+}
+
+fn docSupersede(c: *Cli, args: []const []const u8) !void {
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true },
+        .{ .name = "kind", .value = true },
+    };
+    const p = try parseFlags(c.arena, args, &specs);
+    if (p.positional.len != 2) return errors.invalid("usage: doc supersede OLD NEW [--kind K] [--scope X]", .{});
+    const kind = p.get("kind", "knowledge");
+    var r = try bound(c, oneScope(p.get("scope", "")));
+    defer r.st.close();
+    const out = try core.supersedeDocument(
+        &r.st,
+        c.arena,
+        r.b,
+        kind,
+        p.get("scope", ""),
+        p.positional[0],
+        p.positional[1],
+        nowSeconds(c),
+    );
+    try writeJson(c, "doc supersede", out);
 }

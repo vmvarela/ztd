@@ -2708,8 +2708,8 @@ pub fn runCheck(s: *Store, a: std.mem.Allocator, b: ?domain.Binding) !CheckRepor
 
 // ------------------------------------------------------------ documents
 
-pub const document_columns = "id, scope_id, kind, slug, title, body, status, revision, created_at, updated_at";
-const joined_document_columns = "documents.id, documents.scope_id, documents.kind, documents.slug, documents.title, documents.body, documents.status, documents.revision, documents.created_at, documents.updated_at";
+pub const document_columns = "id, scope_id, kind, slug, title, body, status, revision, created_at, updated_at, record_kind, rationale, options_json, approved_by, approved_at, valid_from, supersedes_id";
+const joined_document_columns = "documents.id, documents.scope_id, documents.kind, documents.slug, documents.title, documents.body, documents.status, documents.revision, documents.created_at, documents.updated_at, documents.record_kind, documents.rationale, documents.options_json, documents.approved_by, documents.approved_at, documents.valid_from, documents.supersedes_id";
 
 pub const document_kinds = [_][]const u8{
     "knowledge", "knowledge_index", "project_note", "plan_daily", "plan_weekly",
@@ -2748,6 +2748,13 @@ fn scanDocument(a: std.mem.Allocator, stmt: sqlite.Statement) !domain.Document {
         .revision = stmt.int(7),
         .created_at = try reformat(a, stmt.text(8), "documents.created_at"),
         .updated_at = try reformat(a, stmt.text(9), "documents.updated_at"),
+        .record_kind = try dupOpt(a, stmt.optText(10)),
+        .rationale = try dupOpt(a, stmt.optText(11)),
+        .options_json = try dupOpt(a, stmt.optText(12)),
+        .approved_by = try dupOpt(a, stmt.optText(13)),
+        .approved_at = try dupOpt(a, stmt.optText(14)),
+        .valid_from = try dupOpt(a, stmt.optText(15)),
+        .supersedes_id = try dupOpt(a, stmt.optText(16)),
     };
 }
 
@@ -2763,6 +2770,13 @@ fn documentFromValue(a: std.mem.Allocator, v: std.json.Value) !domain.Document {
         .revision = jsonw.intField(v, "revision") orelse 0,
         .created_at = try dup(a, jsonw.strField(v, "created_at") orelse ""),
         .updated_at = try dup(a, jsonw.strField(v, "updated_at") orelse ""),
+        .record_kind = try dupOpt(a, jsonw.strField(v, "record_kind")),
+        .rationale = try dupOpt(a, jsonw.strField(v, "rationale")),
+        .options_json = try dupOpt(a, jsonw.strField(v, "options")),
+        .approved_by = try dupOpt(a, jsonw.strField(v, "approved_by")),
+        .approved_at = try dupOpt(a, jsonw.strField(v, "approved_at")),
+        .valid_from = try dupOpt(a, jsonw.strField(v, "valid_from")),
+        .supersedes_id = try dupOpt(a, jsonw.strField(v, "supersedes_id")),
     };
 }
 
@@ -2783,7 +2797,20 @@ pub const DocumentCmd = struct {
     status: []const u8 = "draft",
     expected: i64 = 0,
     draft_only: bool = false,
+    record_kind: []const u8 = "",
+    rationale: []const u8 = "",
+    options_json: []const u8 = "",
+    evidence: []const []const u8 = &.{},
+    approved_by: []const u8 = "",
+    valid_from: []const u8 = "",
 };
+
+pub const record_kinds = [_][]const u8{ "fact", "decision", "constraint", "procedure", "reference" };
+
+pub fn validRecordKind(kind: []const u8) bool {
+    for (record_kinds) |k| if (std.mem.eql(u8, k, kind)) return true;
+    return false;
+}
 
 fn validateDocumentCmd(cmd: DocumentCmd) !void {
     try validateBinding(cmd.binding);
@@ -2805,6 +2832,23 @@ fn validateDocumentCmd(cmd: DocumentCmd) !void {
     if (cmd.draft_only and !std.mem.eql(u8, cmd.status, "draft")) {
         return errors.invalid("draft-only write cannot set status \"{s}\" (want draft)", .{cmd.status});
     }
+    if (cmd.record_kind.len > 0 and !validRecordKind(cmd.record_kind)) {
+        return errors.invalid("unknown record kind \"{s}\" (want fact, decision, constraint, procedure or reference)", .{cmd.record_kind});
+    }
+    if (cmd.options_json.len > 0) {
+        const parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, cmd.options_json, .{}) catch
+            return errors.invalid("options must be a JSON array", .{});
+        defer parsed.deinit();
+        if (parsed.value != .array) return errors.invalid("options must be a JSON array", .{});
+    }
+    if (cmd.status.len > 0 and std.mem.eql(u8, cmd.status, "verified") and
+        std.mem.eql(u8, cmd.record_kind, "decision") and cmd.approved_by.len == 0)
+    {
+        return errors.invalid("approved_by is required to verify a decision", .{});
+    }
+    for (cmd.evidence) |id| {
+        if (trimmed(id).len == 0) return errors.invalid("evidence id must not be blank", .{});
+    }
 }
 
 fn writeDocumentRequest(w: *std.Io.Writer, cmd: DocumentCmd) !void {
@@ -2816,6 +2860,14 @@ fn writeDocumentRequest(w: *std.Io.Writer, cmd: DocumentCmd) !void {
     try o.str("Body", cmd.body);
     try o.str("Status", cmd.status);
     try o.int("Expected", cmd.expected);
+    try o.str("RecordKind", cmd.record_kind);
+    try o.str("Rationale", cmd.rationale);
+    try o.str("Options", cmd.options_json);
+    var ev = try o.arr("Evidence");
+    for (cmd.evidence) |id| try ev.str(id);
+    try ev.end();
+    try o.str("ApprovedBy", cmd.approved_by);
+    try o.str("ValidFrom", cmd.valid_from);
     try o.end();
 }
 
@@ -2870,6 +2922,18 @@ pub fn putDocument(s: *Store, a: std.mem.Allocator, cmd: DocumentCmd, now: Times
         break :blk "created";
     };
 
+    const rec_kind: ?[]const u8 = if (cmd.record_kind.len > 0) try dup(a, cmd.record_kind) else if (existing) |e| e.record_kind else null;
+    const rationale: ?[]const u8 = if (cmd.rationale.len > 0) try dup(a, cmd.rationale) else if (existing) |e| e.rationale else null;
+    const options: ?[]const u8 = if (cmd.options_json.len > 0) try dup(a, cmd.options_json) else if (existing) |e| e.options_json else null;
+    const approved_by: ?[]const u8 = if (cmd.approved_by.len > 0) try dup(a, cmd.approved_by) else if (existing) |e| e.approved_by else null;
+    const valid_from: ?[]const u8 = if (cmd.valid_from.len > 0) try dup(a, cmd.valid_from) else if (existing) |e| e.valid_from else null;
+    const approved_at: ?[]const u8 = if (approved_by != null and std.mem.eql(u8, cmd.status, "verified")) now_s else null;
+    if (approved_by == null and std.mem.eql(u8, cmd.status, "verified") and
+        rec_kind != null and std.mem.eql(u8, rec_kind.?, "decision"))
+    {
+        return errors.invalid("approved_by is required to verify a decision", .{});
+    }
+
     var out: domain.Document = undefined;
     if (existing) |e| {
         out = .{
@@ -2883,9 +2947,17 @@ pub fn putDocument(s: *Store, a: std.mem.Allocator, cmd: DocumentCmd, now: Times
             .revision = e.revision + 1,
             .created_at = e.created_at,
             .updated_at = now_s,
+            .record_kind = rec_kind,
+            .rationale = rationale,
+            .options_json = options,
+            .approved_by = approved_by,
+            .approved_at = approved_at,
+            .valid_from = valid_from,
+            .supersedes_id = e.supersedes_id,
         };
         var up = try s.db.prepare(
-            "UPDATE documents SET title = ?, body = ?, status = ?, revision = ?, updated_at = ? " ++
+            "UPDATE documents SET title = ?, body = ?, status = ?, revision = ?, updated_at = ?, record_kind = ?, " ++
+                "rationale = ?, options_json = ?, approved_by = ?, approved_at = ?, valid_from = ? " ++
                 "WHERE id = ? AND scope_id = ? AND kind = ? AND slug = ?",
         );
         defer up.finalize();
@@ -2894,10 +2966,16 @@ pub fn putDocument(s: *Store, a: std.mem.Allocator, cmd: DocumentCmd, now: Times
         try up.bindText(3, out.status);
         try up.bindInt(4, out.revision);
         try up.bindText(5, out.updated_at);
-        try up.bindText(6, out.id);
-        try up.bindText(7, scope);
-        try up.bindText(8, cmd.kind);
-        try up.bindText(9, cmd.slug);
+        try up.bindOptText(6, out.record_kind);
+        try up.bindOptText(7, out.rationale);
+        try up.bindOptText(8, out.options_json);
+        try up.bindOptText(9, out.approved_by);
+        try up.bindOptText(10, out.approved_at);
+        try up.bindOptText(11, out.valid_from);
+        try up.bindText(12, out.id);
+        try up.bindText(13, scope);
+        try up.bindText(14, cmd.kind);
+        try up.bindText(15, cmd.slug);
         _ = try up.step();
     } else {
         const id = try std.fmt.allocPrint(a, "doc:{s}:{s}:{s}", .{ scope, cmd.kind, cmd.slug });
@@ -2912,10 +2990,17 @@ pub fn putDocument(s: *Store, a: std.mem.Allocator, cmd: DocumentCmd, now: Times
             .revision = 1,
             .created_at = now_s,
             .updated_at = now_s,
+            .record_kind = rec_kind,
+            .rationale = rationale,
+            .options_json = options,
+            .approved_by = approved_by,
+            .approved_at = approved_at,
+            .valid_from = valid_from,
         };
         var ins = try s.db.prepare(
-            "INSERT INTO documents (id, scope_id, kind, slug, title, body, status, revision, created_at, updated_at) " ++
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO documents (id, scope_id, kind, slug, title, body, status, revision, created_at, updated_at, " ++
+                "record_kind, rationale, options_json, approved_by, approved_at, valid_from) " ++
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         defer ins.finalize();
         try ins.bindText(1, out.id);
@@ -2928,7 +3013,21 @@ pub fn putDocument(s: *Store, a: std.mem.Allocator, cmd: DocumentCmd, now: Times
         try ins.bindInt(8, out.revision);
         try ins.bindText(9, out.created_at);
         try ins.bindText(10, out.updated_at);
+        try ins.bindOptText(11, out.record_kind);
+        try ins.bindOptText(12, out.rationale);
+        try ins.bindOptText(13, out.options_json);
+        try ins.bindOptText(14, out.approved_by);
+        try ins.bindOptText(15, out.approved_at);
+        try ins.bindOptText(16, out.valid_from);
         _ = try ins.step();
+    }
+
+    for (cmd.evidence) |ev_id| {
+        const ev_kind = entityKind(ev_id) orelse return errors.invalid("unknown evidence id \"{s}\"", .{ev_id});
+        if (!try entityLinkedInScope(s, ev_kind, ev_id, scope)) {
+            return errors.fail(.not_found, "evidence {s} not found", .{ev_id});
+        }
+        try insertLink(s, a, "document", out.id, ev_kind, ev_id, "evidence", scope, now);
     }
 
     try insertHistory(s, a, "document", out.id, event, scope, "", out.revision, .{ .document = out }, now);
@@ -3043,8 +3142,8 @@ pub fn searchDocuments(s: *Store, a: std.mem.Allocator, b: domain.Binding, query
     while (try q.step()) {
         try out.append(a, .{
             .document = try scanDocument(a, q),
-            .rank = q.real(10),
-            .snippet = try dup(a, q.text(11)),
+            .rank = q.real(17),
+            .snippet = try dup(a, q.text(18)),
         });
     }
     return out.items;
@@ -4386,4 +4485,126 @@ pub fn traceEntity(s: *Store, a: std.mem.Allocator, id: []const u8) !TraceResult
         });
     }
     return .{ .id = try dup(a, id), .kind = try dup(a, kind), .label = try traceLabel(a, s, id), .edges = edges.items };
+}
+
+/// Evidence and trace checks only need existence inside the document's scope;
+/// profile-scoped entities have no scope column and are checked by id alone.
+fn entityLinkedInScope(s: *Store, kind: []const u8, id: []const u8, scope: []const u8) !bool {
+    const has_scope = std.mem.eql(u8, kind, "capture") or std.mem.eql(u8, kind, "work_item") or
+        std.mem.eql(u8, kind, "checkpoint") or std.mem.eql(u8, kind, "document");
+    const table = if (std.mem.eql(u8, kind, "capture")) "captures" else if (std.mem.eql(u8, kind, "work_item")) "work_items" else if (std.mem.eql(u8, kind, "checkpoint")) "checkpoints" else if (std.mem.eql(u8, kind, "document")) "documents" else if (std.mem.eql(u8, kind, "plan")) "plans" else if (std.mem.eql(u8, kind, "review")) "reviews" else if (std.mem.eql(u8, kind, "focus_session")) "focus_sessions" else if (std.mem.eql(u8, kind, "goal")) "goals" else if (std.mem.eql(u8, kind, "source_review")) "source_reviews" else return false;
+    const sql = if (has_scope)
+        try std.fmt.allocPrint(std.heap.page_allocator, "SELECT 1 FROM {s} WHERE id = ? AND scope_id = ?", .{table})
+    else
+        try std.fmt.allocPrint(std.heap.page_allocator, "SELECT 1 FROM {s} WHERE id = ?", .{table});
+    var q = try s.db.prepare(sql);
+    defer q.finalize();
+    try q.bindText(1, id);
+    if (has_scope) try q.bindText(2, scope);
+    return try q.step();
+}
+
+pub fn supersedeDocument(
+    s: *Store,
+    a: std.mem.Allocator,
+    b: domain.Binding,
+    kind: []const u8,
+    scope_in: []const u8,
+    old_slug: []const u8,
+    new_slug: []const u8,
+    now: Timestamp,
+) !domain.Document {
+    try validateBinding(b);
+    const scope = if (scope_in.len > 0) scope_in else b.scopes[0];
+    if (!b.allows(scope)) return errors.fail(.scope_denied, "document scope is outside this binding", .{});
+    if (std.mem.eql(u8, old_slug, new_slug)) return errors.invalid("a document cannot supersede itself", .{});
+
+    try s.begin();
+    errdefer s.rollback();
+    const now_s = try fmtTs(a, now);
+    var old = try getDocument(s, a, b, kind, old_slug, scope);
+    var new = try getDocument(s, a, b, kind, new_slug, scope);
+    if (new.supersedes_id != null) {
+        return errors.fail(.invalid_transition, "document {s}/{s} already supersedes another document", .{ kind, new_slug });
+    }
+    if (std.mem.eql(u8, old.status, "superseded")) {
+        return errors.fail(.invalid_transition, "document {s}/{s} is already superseded", .{ kind, old_slug });
+    }
+
+    new.supersedes_id = try dup(a, old.id);
+    new.revision += 1;
+    new.updated_at = now_s;
+    old.status = "superseded";
+    old.revision += 1;
+    old.updated_at = now_s;
+
+    for ([_]*domain.Document{ &new, &old }) |doc| {
+        var up = try s.db.prepare(
+            "UPDATE documents SET status = ?, revision = ?, updated_at = ?, supersedes_id = ? WHERE id = ?",
+        );
+        defer up.finalize();
+        try up.bindText(1, doc.status);
+        try up.bindInt(2, doc.revision);
+        try up.bindText(3, doc.updated_at);
+        try up.bindOptText(4, doc.supersedes_id);
+        try up.bindText(5, doc.id);
+        _ = try up.step();
+    }
+    try insertLink(s, a, "document", new.id, "document", old.id, "supersedes", scope, now);
+    try insertHistory(s, a, "document", new.id, "updated", scope, "", new.revision, .{ .document = new }, now);
+    try insertHistory(s, a, "document", old.id, "superseded", scope, "", old.revision, .{ .document = old }, now);
+    try s.commit();
+    return new;
+}
+
+pub fn searchDocumentsBy(
+    s: *Store,
+    a: std.mem.Allocator,
+    b: domain.Binding,
+    query: []const u8,
+    kind: []const u8,
+    record_kind: []const u8,
+    limit: i64,
+) ![]const DocumentSearchHit {
+    try validateBinding(b);
+    const match = try ftsQuery(a, query);
+    if (match.len == 0) return errors.invalid("search query is required", .{});
+    if (kind.len > 0 and !validDocumentKind(kind)) return errors.invalid("unknown document kind \"{s}\"", .{kind});
+    if (record_kind.len > 0 and !validRecordKind(record_kind)) {
+        return errors.invalid("unknown record kind \"{s}\"", .{record_kind});
+    }
+    const n: i64 = if (limit <= 0) 10 else if (limit > 50) 50 else limit;
+
+    var sql_buf = std.Io.Writer.Allocating.init(a);
+    try sql_buf.writer.print(
+        "SELECT " ++ joined_document_columns ++ ", bm25(documents_fts), snippet(documents_fts, 5, '[', ']', '…', 20) " ++
+            "FROM documents_fts JOIN documents ON documents.id = documents_fts.doc_id " ++
+            "WHERE documents_fts MATCH ? AND documents_fts.scope_id IN ({s})",
+        .{try scopeFilter(a, b.scopes.len)},
+    );
+    if (kind.len > 0) try sql_buf.writer.writeAll(" AND documents_fts.kind = ?");
+    if (record_kind.len > 0) try sql_buf.writer.writeAll(" AND documents.record_kind = ?");
+    try sql_buf.writer.writeAll(" ORDER BY bm25(documents_fts) ASC, documents.kind, documents.slug LIMIT ?");
+    var q = try s.db.prepare(sql_buf.written());
+    defer q.finalize();
+    try q.bindText(1, match);
+    var idx = try scopeArgs(q, 2, b);
+    if (kind.len > 0) {
+        try q.bindText(idx, kind);
+        idx += 1;
+    }
+    if (record_kind.len > 0) {
+        try q.bindText(idx, record_kind);
+        idx += 1;
+    }
+    try q.bindInt(idx, n);
+    var out: std.ArrayList(DocumentSearchHit) = .empty;
+    while (try q.step()) {
+        try out.append(a, .{
+            .document = try scanDocument(a, q),
+            .rank = q.real(17),
+            .snippet = try dup(a, q.text(18)),
+        });
+    }
+    return out.items;
 }
