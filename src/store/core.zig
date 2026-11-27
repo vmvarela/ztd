@@ -4825,6 +4825,7 @@ pub fn externalEdges(s: *Store, a: std.mem.Allocator, id: []const u8) ![]const T
 
 pub fn traceEntity(s: *Store, a: std.mem.Allocator, id: []const u8) !TraceResult {
     const kind = entityKind(id) orelse return errors.invalid("unknown id \"{s}\"", .{id});
+    if (!try entityExists(s, kind, id)) return errors.fail(.not_found, "{s} not found", .{id});
     var q = try s.db.prepare(
         "SELECT relation, from_type, from_id, to_type, to_id FROM links WHERE from_id = ? OR to_id = ? " ++
             "ORDER BY relation, from_id, to_id",
@@ -4853,6 +4854,28 @@ fn requireDecision(s: *Store, decision: []const u8, scope: []const u8) !void {
     if (!try entityLinkedInScope(s, kind, decision, scope)) {
         return errors.fail(.not_found, "decision {s} not found", .{decision});
     }
+}
+
+fn entityTable(kind: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, kind, "capture")) return "captures";
+    if (std.mem.eql(u8, kind, "work_item")) return "work_items";
+    if (std.mem.eql(u8, kind, "checkpoint")) return "checkpoints";
+    if (std.mem.eql(u8, kind, "document")) return "documents";
+    if (std.mem.eql(u8, kind, "plan")) return "plans";
+    if (std.mem.eql(u8, kind, "review")) return "reviews";
+    if (std.mem.eql(u8, kind, "focus_session")) return "focus_sessions";
+    if (std.mem.eql(u8, kind, "goal")) return "goals";
+    if (std.mem.eql(u8, kind, "source_review")) return "source_reviews";
+    return null;
+}
+
+fn entityExists(s: *Store, kind: []const u8, id: []const u8) !bool {
+    const table = entityTable(kind) orelse return false;
+    const sql = try std.fmt.allocPrint(std.heap.page_allocator, "SELECT 1 FROM {s} WHERE id = ?", .{table});
+    var q = try s.db.prepare(sql);
+    defer q.finalize();
+    try q.bindText(1, id);
+    return try q.step();
 }
 
 fn entityLinkedInScope(s: *Store, kind: []const u8, id: []const u8, scope: []const u8) !bool {

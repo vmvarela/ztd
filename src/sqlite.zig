@@ -166,7 +166,7 @@ pub const Statement = struct {
             c.SQLITE_ROW => true,
             c.SQLITE_DONE => false,
             c.SQLITE_BUSY, c.SQLITE_LOCKED => errors.fail(.db_busy, "database is locked", .{}),
-            else => errors.fail(.io_error, "sqlite step failed", .{}),
+            else => errors.fromSqlite(std.mem.span(c.sqlite3_errmsg(c.sqlite3_db_handle(self.stmt))), false),
         };
     }
 
