@@ -475,6 +475,10 @@ pub const Source = struct {
     last_success_at: ?[]const u8 = null,
     created_at: []const u8,
     updated_at: []const u8,
+    // Advisory watermark from reported batches (v3). Omitted from JSON when
+    // empty so v2 responses stay byte-identical.
+    reported_cursor: []const u8 = "",
+    last_reported_at: ?[]const u8 = null,
 
     pub fn write(self: Source, o: *json.Obj) !void {
         try o.str("id", self.id);
@@ -493,6 +497,8 @@ pub const Source = struct {
         try o.optStr("last_success_at", self.last_success_at);
         try o.str("created_at", self.created_at);
         try o.str("updated_at", self.updated_at);
+        if (self.last_reported_at) |v| try o.str("last_reported_at", v);
+        if (self.reported_cursor.len > 0) try o.str("reported_cursor", self.reported_cursor);
     }
 };
 

@@ -1581,7 +1581,7 @@ pub fn setGoalStatus(s: *Store, a: std.mem.Allocator, b: domain.Binding, status:
 
 const plan_columns = "id, profile_id, kind, period, status, revision, created_at, updated_at";
 const source_columns = "id, name, scope_id, kind, connector, provider, connection_ref, non_secret_query, cadence, " ++
-    "auth_state, coverage_state, cursor, last_attempt_at, last_success_at, created_at, updated_at";
+    "auth_state, coverage_state, cursor, last_attempt_at, last_success_at, created_at, updated_at, reported_cursor, last_reported_at";
 
 pub const PlanItemCmd = struct {
     work_item_id: []const u8,
@@ -1674,6 +1674,8 @@ fn scanSource(a: std.mem.Allocator, stmt: sqlite.Statement) !domain.Source {
         .last_success_at = try dupOpt(a, stmt.optText(13)),
         .created_at = try reformat(a, stmt.text(14), "sources.created_at"),
         .updated_at = try reformat(a, stmt.text(15), "sources.updated_at"),
+        .reported_cursor = try dup(a, stmt.text(16)),
+        .last_reported_at = try dupOpt(a, stmt.optText(17)),
     };
 }
 
@@ -3264,7 +3266,8 @@ fn validateSourceCmd(cmd: SourceCmd) !void {
     }
     if (!std.mem.eql(u8, cmd.connector, "manual") and
         !std.mem.eql(u8, cmd.connector, "directory") and
-        !std.mem.eql(u8, cmd.connector, "host_mcp"))
+        !std.mem.eql(u8, cmd.connector, "host_mcp") and
+        !std.mem.eql(u8, cmd.connector, "host_cli"))
     {
         return errors.invalid("unknown source connector \"{s}\"", .{cmd.connector});
     }
@@ -3582,6 +3585,14 @@ pub fn recordSourceReview(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd,
     if (std.mem.eql(u8, cmd.result_kind, "observed") and failure_count == 0) {
         last_success = try dup(a, now_s);
     }
+    // The reported watermark is an advisory hint: it records where the host
+    // said it read, without claiming coverage.
+    var reported_cursor = src.reported_cursor;
+    var last_reported = src.last_reported_at;
+    if (std.mem.eql(u8, cmd.result_kind, "reported")) {
+        reported_cursor = try dup(a, cmd.retrieval.cursor);
+        last_reported = try dup(a, now_s);
+    }
 
     var rid = std.Io.Writer.Allocating.init(a);
     try rid.writer.print("SR-{s}-{d:0>3}", .{ date, @as(u32, @intCast(try store.nextDailySeq(s.db, "source_reviews", try std.fmt.allocPrint(a, "SR-{s}-", .{date})))) });
@@ -3691,7 +3702,8 @@ pub fn recordSourceReview(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd,
     if (capture_ids.items.len > 0) review.capture_ids = capture_ids.items;
 
     var up = try s.db.prepare(
-        "UPDATE sources SET coverage_state = ?, last_attempt_at = ?, last_success_at = ?, cursor = ?, updated_at = ? WHERE id = ?",
+        "UPDATE sources SET coverage_state = ?, last_attempt_at = ?, last_success_at = ?, cursor = ?, updated_at = ?, " ++
+            "reported_cursor = ?, last_reported_at = ? WHERE id = ?",
     );
     defer up.finalize();
     try up.bindText(1, coverage);
@@ -3699,7 +3711,9 @@ pub fn recordSourceReview(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd,
     try up.bindOptText(3, last_success);
     try up.bindText(4, cursor);
     try up.bindText(5, now_s);
-    try up.bindText(6, src.id);
+    try up.bindText(6, reported_cursor);
+    try up.bindOptText(7, last_reported);
+    try up.bindText(8, src.id);
     _ = try up.step();
 
     try insertHistory(s, a, "source_review", review.id, "recorded", src.scope, "", 1, .{ .source_review = review }, now);

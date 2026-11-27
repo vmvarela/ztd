@@ -14,7 +14,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -431,6 +433,68 @@ func TestErrors(t *testing.T) {
 // compareSession keeps the behavioural contract strict (steps) while letting
 // the v3 schema add trailing columns to existing tables: a dump row matches
 // when every column the baseline recorded is identical.
+// diffValue compares a golden JSON document against a produced one. Every key,
+// array element and scalar in want must be present and equal in got; object
+// keys only present in got are ignored so v3 can add fields to v2 responses.
+func diffValue(path string, want, got json.RawMessage) string {
+	var w, g any
+	if err := json.Unmarshal(want, &w); err != nil {
+		return path + ": golden is not valid JSON: " + err.Error()
+	}
+	if err := json.Unmarshal(got, &g); err != nil {
+		return path + ": output is not valid JSON: " + err.Error()
+	}
+	return diffParsed(path, w, g)
+}
+
+func diffParsed(path string, want, got any) string {
+	switch w := want.(type) {
+	case map[string]any:
+		g, ok := got.(map[string]any)
+		if !ok {
+			return fmt.Sprintf("%s: want object, got %T", path, got)
+		}
+		for _, k := range sortedKeys(w) {
+			gv, ok := g[k]
+			if !ok {
+				return fmt.Sprintf("%s.%s: missing", path, k)
+			}
+			if d := diffParsed(path+"."+k, w[k], gv); d != "" {
+				return d
+			}
+		}
+		return ""
+	case []any:
+		g, ok := got.([]any)
+		if !ok {
+			return fmt.Sprintf("%s: want array, got %T", path, got)
+		}
+		if len(g) != len(w) {
+			return fmt.Sprintf("%s: array has %d elements, want %d", path, len(g), len(w))
+		}
+		for i := range w {
+			if d := diffParsed(fmt.Sprintf("%s[%d]", path, i), w[i], g[i]); d != "" {
+				return d
+			}
+		}
+		return ""
+	default:
+		if !reflect.DeepEqual(want, got) {
+			return fmt.Sprintf("%s: got %v, want %v", path, got, want)
+		}
+		return ""
+	}
+}
+
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func compareSession(want []byte, got session) string {
 	type sessionJSON struct {
 		Steps []json.RawMessage
@@ -440,10 +504,18 @@ func compareSession(want []byte, got session) string {
 	if err := json.Unmarshal(want, &w); err != nil {
 		return fmt.Sprintf("golden is not valid JSON: %v", err)
 	}
-	wSteps, _ := json.MarshalIndent(w.Steps, "", "  ")
-	gSteps, _ := json.MarshalIndent(got.Steps, "", "  ")
-	if diff := firstDiff(wSteps, gSteps); diff != "" {
-		return "steps: " + diff
+	if len(got.Steps) != len(w.Steps) {
+		return fmt.Sprintf("steps: got %d steps, want %d", len(got.Steps), len(w.Steps))
+	}
+	for i := range w.Steps {
+		// v3 adds keys to existing responses; every key the golden records must
+		// still match exactly, and extra keys are tolerated. Harmless drift in
+		// the other direction (a missing key) still fails.
+		wantStep, _ := json.Marshal(w.Steps[i])
+		gotStep, _ := json.Marshal(got.Steps[i])
+		if diff := diffValue(fmt.Sprintf("step %d", i), wantStep, gotStep); diff != "" {
+			return "steps: " + diff
+		}
 	}
 	for table, wRows := range w.DB {
 		gRows, ok := got.DB[table]
