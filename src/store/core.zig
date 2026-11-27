@@ -4620,6 +4620,76 @@ pub fn supersedeDocument(
     return new;
 }
 
+pub const LearnCmd = struct {
+    binding: domain.Binding,
+    review: []const u8,
+    slug: []const u8,
+    title: []const u8 = "",
+    body: []const u8,
+    record_kind: []const u8 = "",
+    evidence: []const []const u8 = &.{},
+};
+
+/// `learn propose`: stores the knowledge card a human wrote while closing a
+/// review, as a draft tied to that review (`learned`). Promotion stays a human
+/// `doc put --status verified --approved-by`.
+pub fn proposeLearning(s: *Store, a: std.mem.Allocator, cmd: LearnCmd, now: Timestamp) !domain.Document {
+    try validateBinding(cmd.binding);
+    if (cmd.review.len == 0) return errors.invalid("--review is required", .{});
+    if (cmd.slug.len == 0) return errors.invalid("--slug is required", .{});
+
+    var profile: ?[]const u8 = null;
+    {
+        var q = try s.db.prepare("SELECT profile_id FROM reviews WHERE id = ?");
+        defer q.finalize();
+        try q.bindText(1, cmd.review);
+        if (try q.step()) profile = try dup(a, q.text(0));
+    }
+    const review_profile = profile orelse
+        return errors.fail(.not_found, "review {s} not found", .{cmd.review});
+    if (!std.mem.eql(u8, review_profile, cmd.binding.profile)) {
+        return errors.fail(.scope_denied, "review {s} belongs to another profile", .{cmd.review});
+    }
+
+    const scope = cmd.binding.scopes[0];
+    var existing: ?domain.Document = null;
+    {
+        var q = try s.db.prepare("SELECT " ++ document_columns ++ " FROM documents WHERE scope_id = ? AND kind = ? AND slug = ?");
+        defer q.finalize();
+        try q.bindText(1, scope);
+        try q.bindText(2, "knowledge");
+        try q.bindText(3, cmd.slug);
+        if (try q.step()) existing = try scanDocument(a, q);
+    }
+    const want_title = if (cmd.title.len > 0) cmd.title else cmd.slug;
+    if (existing) |e| {
+        if (!std.mem.eql(u8, e.status, "draft")) {
+            return errors.fail(.invalid_transition, "document {s}/{s} is {s}; learn propose only writes drafts", .{ "knowledge", cmd.slug, e.status });
+        }
+        const cur_kind = e.record_kind orelse "";
+        if (std.mem.eql(u8, e.title, want_title) and std.mem.eql(u8, e.body, cmd.body) and
+            std.mem.eql(u8, cur_kind, cmd.record_kind))
+        {
+            try insertLink(s, a, "review", cmd.review, "document", e.id, "learned", scope, now);
+            return e;
+        }
+    }
+    const doc = try putDocument(s, a, .{
+        .binding = cmd.binding,
+        .kind = "knowledge",
+        .slug = cmd.slug,
+        .title = want_title,
+        .body = cmd.body,
+        .expected = if (existing) |e| e.revision else 0,
+        .draft_only = true,
+        .record_kind = cmd.record_kind,
+        .evidence = cmd.evidence,
+    }, now);
+    // Reached on replay too: putDocument returns early there, the edge is still owed.
+    try insertLink(s, a, "review", cmd.review, "document", doc.id, "learned", scope, now);
+    return doc;
+}
+
 pub fn searchDocumentsBy(
     s: *Store,
     a: std.mem.Allocator,

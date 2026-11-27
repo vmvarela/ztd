@@ -252,6 +252,7 @@ fn dispatch(c: *Cli, init: std.process.Init, command: []const u8, args: []const 
     }
     if (std.mem.eql(u8, command, "check")) return cmdCheck(c, args);
     if (std.mem.eql(u8, command, "override")) return cmdOverride(c, args);
+    if (std.mem.eql(u8, command, "learn")) return cmdLearn(c, args);
     if (std.mem.eql(u8, command, "doc")) return cmdDoc(c, args);
     if (std.mem.eql(u8, command, "trace")) return cmdTrace(c, args);
     if (std.mem.eql(u8, command, "mcp")) return cmdMcp(c, args);
@@ -1217,6 +1218,35 @@ fn reviewShowCmd(c: *Cli, args: []const []const u8) !void {
     return succeedData(c, "review show", aw.written());
 }
 
+fn cmdLearn(c: *Cli, args: []const []const u8) !void {
+    const usage_line =
+        "usage: learn propose --review ID --slug S [--title T] [--body B | --file F] [--record-kind K] [--evidence ID]... [--scope X]";
+    if (args.len == 0 or !std.mem.eql(u8, args[0], "propose")) return errors.invalid("{s}", .{usage_line});
+    const specs = [_]Spec{
+        .{ .name = "scope", .value = true },       .{ .name = "review", .value = true },
+        .{ .name = "slug", .value = true },        .{ .name = "title", .value = true },
+        .{ .name = "body", .value = true },        .{ .name = "file", .value = true },
+        .{ .name = "record-kind", .value = true }, .{ .name = "evidence", .value = true, .multi = true },
+    };
+    const p = try parseFlags(c.arena, args[1..], &specs);
+    if (p.positional.len != 0) return errors.invalid("{s}", .{usage_line});
+    if (p.has("body") and p.has("file")) return errors.invalid("--body and --file are mutually exclusive", .{});
+    var body = p.get("body", "");
+    if (p.has("file")) body = try readBodyFile(c, p.get("file", ""));
+    var r = try bound(c, oneScope(p.get("scope", "")));
+    defer r.st.close();
+    const out = try core.proposeLearning(&r.st, c.arena, .{
+        .binding = r.b,
+        .review = p.get("review", ""),
+        .slug = p.get("slug", ""),
+        .title = p.get("title", ""),
+        .body = body,
+        .record_kind = p.get("record-kind", ""),
+        .evidence = if (p.multi.get("evidence")) |ev| ev.items else &.{},
+    }, nowSeconds(c));
+    try writeJson(c, "learn propose", out);
+}
+
 fn cmdOverride(c: *Cli, args: []const []const u8) !void {
     if (args.len == 0 or !std.mem.eql(u8, args[0], "add")) {
         return errors.invalid("usage: override add --rule mit|focus --date YYYY-MM-DD --reason R [--actor A]", .{});
@@ -1495,7 +1525,7 @@ fn docPut(c: *Cli, args: []const []const u8) !void {
         .{ .name = "body", .value = true },    .{ .name = "file", .value = true },
         .{ .name = "status", .value = true },  .{ .name = "expected", .value = true },
         .{ .name = "record-kind", .value = true }, .{ .name = "rationale", .value = true },
-        .{ .name = "options", .value = true },     .{ .name = "evidence", .value = true },
+        .{ .name = "options", .value = true },     .{ .name = "evidence", .value = true, .multi = true },
         .{ .name = "approved-by", .value = true }, .{ .name = "valid-from", .value = true },
     };
     const p = try parseFlags(c.arena, args, &specs);
