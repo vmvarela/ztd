@@ -206,3 +206,16 @@ Do not switch your routines to the new database until:
 
 The legacy Markdown store stays read-only. There is no bidirectional sync and
 no second canonical copy.
+
+## Rollback
+
+Migrations only move forward: `ztd` refuses a database whose schema is newer
+than it supports. A snapshot taken after the v3 migration is therefore **not**
+a rollback point for the Go build — restoring it still refuses to open with
+`db_incompatible`.
+
+Rolling back to `v2-go-final` (or the `v0.3.0` release) means restoring a
+backup the Go build can read (schema version 7 or lower) and accepting the data
+lost since that backup. Keep such a backup around until you are past the
+cutover, or accept that rollback is not available and recovery means restoring
+the latest v3 snapshot with the current binary.
