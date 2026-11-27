@@ -621,7 +621,15 @@ fn cmdInbox(c: *Cli, args: []const []const u8) !void {
     var o = try jsonw.Obj.init(&aw.writer);
     try cap.write(&o);
     try o.end();
-    try succeedData(c, "inbox next", aw.written());
+    if (aw.written().len <= core.inbox_cap) return succeedData(c, "inbox next", aw.written());
+    // Over the byte cap: re-emit with an excerpt and a truncation marker.
+    var aw2 = Io.Writer.Allocating.init(c.arena);
+    var o2 = try jsonw.Obj.init(&aw2.writer);
+    const short = try core.clipCapture(c.arena, cap, core.inbox_excerpt);
+    try short.write(&o2);
+    try o2.boolean("truncated", true);
+    try o2.end();
+    try succeedData(c, "inbox next", aw2.written());
 }
 
 // ------------------------------------------------------------------ process
@@ -1618,19 +1626,31 @@ fn docSearch(c: *Cli, args: []const []const u8) !void {
     var r = try bound(c, oneScope(p.get("scope", "")));
     defer r.st.close();
     const hits = try core.searchDocumentsBy(&r.st, c.arena, r.b, query, p.get("kind", ""), p.get("record-kind", ""), limit);
-    var aw = Io.Writer.Allocating.init(c.arena);
-    var arr = try jsonw.Arr.init(&aw.writer);
-    for (hits) |h| {
-        var o = try arr.obj();
-        var inner = try o.obj("document");
-        try h.document.write(&inner);
-        try inner.end();
-        try o.float("rank", h.rank);
-        try o.str("snippet", h.snippet);
-        try o.end();
+    // The CLI keeps its v2 array shape, so over-cap results drop trailing hits
+    // and say so on stderr; shortcuts: no `omitted` field in the array, add one
+    // by moving `doc search` to the object shape the MCP tool already uses.
+    var shown = hits.len;
+    while (true) {
+        var aw = Io.Writer.Allocating.init(c.arena);
+        var arr = try jsonw.Arr.init(&aw.writer);
+        for (hits[0..shown]) |h| {
+            var o = try arr.obj();
+            var inner = try o.obj("document");
+            try h.document.write(&inner);
+            try inner.end();
+            try o.float("rank", h.rank);
+            try o.str("snippet", h.snippet);
+            try o.end();
+        }
+        try arr.end();
+        if (aw.written().len <= core.doc_search_cap or shown <= 1) {
+            if (shown < hits.len) {
+                try c.err.print("doc search: showing {d} of {d} hits to stay under the {d}-byte cap\n", .{ shown, hits.len, core.doc_search_cap });
+            }
+            return succeedData(c, "doc search", aw.written());
+        }
+        shown -= 1;
     }
-    try arr.end();
-    try succeedData(c, "doc search", aw.written());
 }
 
 fn docRelated(c: *Cli, args: []const []const u8) !void {
@@ -1866,7 +1886,7 @@ fn sourceReview(c: *Cli, args: []const []const u8) !void {
     const specs = [_]Spec{
         .{ .name = "scope", .value = true }, .{ .name = "source", .value = true },
         .{ .name = "batch", .value = true }, .{ .name = "key", .value = true },
-        .{ .name = "file", .value = true },
+        .{ .name = "file", .value = true },  .{ .name = "full", .value = false },
     };
     const p = try parseFlags(c.arena, args, &specs);
     const file = p.get("file", "");
@@ -1918,20 +1938,48 @@ fn sourceReview(c: *Cli, args: []const []const u8) !void {
         .retrieval = retrieval,
         .items = items.items,
     }, nowSeconds(c));
-    var aw = Io.Writer.Allocating.init(c.arena);
-    var o = try jsonw.Obj.init(&aw.writer);
+    var full_aw = Io.Writer.Allocating.init(c.arena);
+    try renderSourceReview(&full_aw.writer, out, out.captures.len);
+    if (p.has("full") or full_aw.written().len <= core.source_review_cap) {
+        return succeedData(c, "source review", full_aw.written());
+    }
+    // Over the cap: keep the first captures that fit, never more than ten, and
+    // let the review record how many were cut.
+    var shown = @min(core.compact_capture_ids, out.captures.len);
+    while (true) {
+        var aw = Io.Writer.Allocating.init(c.arena);
+        try renderSourceReview(&aw.writer, out, shown);
+        if (aw.written().len <= core.source_review_cap or shown == 0) {
+            return succeedData(c, "source review", aw.written());
+        }
+        shown -= 1;
+    }
+}
+
+/// Renders the `source review` data block: captures first, then the review, as
+/// the v2 map-based envelope orders them. `shown` is the exact capture count.
+fn renderSourceReview(w: *Io.Writer, out: core.SourceReviewResult, shown: usize) !void {
+    var o = try jsonw.Obj.init(w);
     var arr = try o.arr("captures");
-    for (out.captures) |cap| {
+    for (out.captures[0..shown]) |cap| {
         var item = try arr.obj();
         try cap.write(&item);
         try item.end();
     }
     try arr.end();
     var rev = try o.obj("review");
-    try out.review.write(&rev);
+    var view = out.review;
+    if (shown < out.captures.len) {
+        if (out.review.capture_ids) |ids| {
+            if (ids.len > shown) {
+                view.capture_ids = ids[0..shown];
+                view.omitted = ids.len - shown;
+            }
+        }
+    }
+    try view.write(&rev);
     try rev.end();
     try o.end();
-    try succeedData(c, "source review", aw.written());
 }
 
 fn sourceDelete(c: *Cli, args: []const []const u8) !void {

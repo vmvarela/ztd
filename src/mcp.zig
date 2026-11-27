@@ -366,7 +366,22 @@ fn toolInboxNext(a: std.mem.Allocator, st: *Store, b: domain.Binding, now: timeu
     try s.int("remaining", stats.remaining);
     try s.end();
     try o.end();
-    return aw.written();
+    if (aw.written().len <= core.inbox_cap) return aw.written();
+    // Over the byte cap: excerpt plus an explicit truncation marker.
+    var aw2 = Io.Writer.Allocating.init(a);
+    var o2 = try jsonw.Obj.init(&aw2.writer);
+    var c2 = try o2.obj("capture");
+    const short = try core.clipCapture(a, cap, core.inbox_excerpt);
+    try short.write(&c2);
+    try c2.end();
+    var s2 = try o2.obj("stats");
+    try s2.int("pending", stats.pending);
+    try s2.int("due", stats.due);
+    try s2.int("remaining", stats.remaining);
+    try s2.end();
+    try o2.boolean("truncated", true);
+    try o2.end();
+    return aw2.written();
 }
 
 fn toolProcess(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.json.Value, now: timeutil.Timestamp) ![]const u8 {
@@ -567,20 +582,41 @@ fn toolSourceReview(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?
         .retrieval = try parseRetrieval(a, args),
         .items = try parseItems(a, args),
     }, now);
-    var aw = Io.Writer.Allocating.init(a);
-    var o = try jsonw.Obj.init(&aw.writer);
+    var full_aw = Io.Writer.Allocating.init(a);
+    try renderSourceReview(&full_aw.writer, res, res.captures.len);
+    if (full_aw.written().len <= core.source_review_cap) return full_aw.written();
+    var shown = @min(core.compact_capture_ids, res.captures.len);
+    while (true) {
+        var aw = Io.Writer.Allocating.init(a);
+        try renderSourceReview(&aw.writer, res, shown);
+        if (aw.written().len <= core.source_review_cap or shown == 0) return aw.written();
+        shown -= 1;
+    }
+}
+
+/// The MCP shape orders `review` before `captures`. `shown` is the exact count.
+fn renderSourceReview(w: *Io.Writer, res: core.SourceReviewResult, shown: usize) !void {
+    var o = try jsonw.Obj.init(w);
     var r = try o.obj("review");
-    try res.review.write(&r);
+    var view = res.review;
+    if (shown < res.captures.len) {
+        if (res.review.capture_ids) |ids| {
+            if (ids.len > shown) {
+                view.capture_ids = ids[0..shown];
+                view.omitted = ids.len - shown;
+            }
+        }
+    }
+    try view.write(&r);
     try r.end();
     var arr = try o.arr("captures");
-    for (res.captures) |cap| {
+    for (res.captures[0..shown]) |cap| {
         var item = try arr.obj();
         try cap.write(&item);
         try item.end();
     }
     try arr.end();
     try o.end();
-    return aw.written();
 }
 
 fn toolFind(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.json.Value) ![]const u8 {
@@ -692,21 +728,29 @@ fn toolDocSearch(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std
         (try optArg(a, args, "record_kind")) orelse "",
         argInt(args, "limit"),
     );
-    var aw = Io.Writer.Allocating.init(a);
-    var o = try jsonw.Obj.init(&aw.writer);
-    var arr = try o.arr("hits");
-    for (hits) |h| {
-        var item = try arr.obj();
-        var d = try item.obj("document");
-        try h.document.write(&d);
-        try d.end();
-        try item.float("rank", h.rank);
-        try item.str("snippet", h.snippet);
-        try item.end();
+    var shown = hits.len;
+    while (true) {
+        var aw = Io.Writer.Allocating.init(a);
+        var o = try jsonw.Obj.init(&aw.writer);
+        var arr = try o.arr("hits");
+        for (hits[0..shown]) |h| {
+            var item = try arr.obj();
+            var d = try item.obj("document");
+            try h.document.write(&d);
+            try d.end();
+            try item.float("rank", h.rank);
+            try item.str("snippet", h.snippet);
+            try item.end();
+        }
+        try arr.end();
+        if (shown < hits.len) {
+            try o.boolean("truncated", true);
+            try o.int("omitted", @intCast(hits.len - shown));
+        }
+        try o.end();
+        if (aw.written().len <= core.doc_search_cap or shown <= 1) return aw.written();
+        shown -= 1;
     }
-    try arr.end();
-    try o.end();
-    return aw.written();
 }
 
 fn docScope(args: ?std.json.Value) ![]const u8 {

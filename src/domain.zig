@@ -588,6 +588,8 @@ pub const SourceReview = struct {
     retrieval: SourceRetrieval,
     capture_ids: ?[]const []const u8 = null,
     created_at: []const u8,
+    // Set only on a truncated presentation of the review (v3 cap); never stored.
+    omitted: usize = 0,
 
     pub fn write(self: SourceReview, o: *json.Obj) !void {
         try o.str("id", self.id);
@@ -606,5 +608,9 @@ pub const SourceReview = struct {
             try o.raw("capture_ids", "null");
         }
         try o.str("created_at", self.created_at);
+        if (self.omitted > 0) {
+            try o.boolean("truncated", true);
+            try o.int("omitted", @intCast(self.omitted));
+        }
     }
 };

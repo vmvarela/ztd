@@ -1784,6 +1784,19 @@ pub fn prepare(s: *Store, a: std.mem.Allocator, b: domain.Binding, date_in: []co
 
 /// Byte cap for the `prepare --packet` decision packet (spec §3).
 pub const packet_cap = 1536;
+/// Byte caps for the token-economical reads (spec §3).
+pub const inbox_cap = 1024;
+pub const doc_search_cap = 2048;
+pub const source_review_cap = 1024;
+pub const inbox_excerpt = 280;
+pub const compact_capture_ids = 10;
+
+/// A copy of `cap` whose text is cut to `max` bytes on a character boundary.
+pub fn clipCapture(a: std.mem.Allocator, cap: domain.Capture, max: usize) !domain.Capture {
+    var out = cap;
+    out.original_text = try clip(a, cap.original_text, max);
+    return out;
+}
 
 fn countInScopes(s: *Store, a: std.mem.Allocator, b: domain.Binding, table: []const u8, predicate: []const u8) !i64 {
     const clause = try scopeFilter(a, b.scopes.len);
@@ -3782,19 +3795,52 @@ pub fn recordSourceReview(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd,
     return out;
 }
 
+fn retrievalFromValue(a: std.mem.Allocator, v: std.json.Value) !domain.SourceRetrieval {
+    if (v != .object) return .{};
+    var out = domain.SourceRetrieval{
+        .window = try dup(a, jsonw.strField(v, "window") orelse ""),
+        .cursor = try dup(a, jsonw.strField(v, "cursor") orelse ""),
+        .requested_limit = jsonw.intField(v, "requested_limit") orelse 0,
+        .provider_returned_limit = jsonw.intField(v, "provider_returned_limit") orelse 0,
+        .complete_window = jsonw.boolField(v, "complete_window") orelse false,
+        .truncated = jsonw.boolField(v, "truncated") orelse false,
+    };
+    if (jsonw.arrField(v, "failures")) |list| {
+        var failures: std.ArrayList([]const u8) = .empty;
+        for (list) |f| {
+            if (f != .string) continue;
+            try failures.append(a, try dup(a, f.string));
+        }
+        out.failures = failures.items;
+    }
+    return out;
+}
+
 fn sourceReviewResultFromValue(a: std.mem.Allocator, v: std.json.Value) !SourceReviewResult {
     const rev_value = jsonw.field(v, "review") orelse return errors.invalid("stored source review is missing review", .{});
-    const review = domain.SourceReview{
+    var review = domain.SourceReview{
         .id = try dup(a, jsonw.strField(rev_value, "id") orelse ""),
         .source_id = try dup(a, jsonw.strField(rev_value, "source_id") orelse ""),
         .batch_id = try dup(a, jsonw.strField(rev_value, "batch_id") orelse ""),
         .result_kind = try dup(a, jsonw.strField(rev_value, "result_kind") orelse ""),
         .coverage = try dup(a, jsonw.strField(rev_value, "coverage") orelse ""),
-        .retrieval = .{},
+        .retrieval = try retrievalFromValue(a, jsonw.field(rev_value, "retrieval") orelse .null),
         .capture_ids = null,
         .created_at = try dup(a, jsonw.strField(rev_value, "created_at") orelse ""),
     };
-    return .{ .review = review, .captures = &.{} };
+    if (jsonw.arrField(rev_value, "capture_ids")) |list| {
+        var ids: std.ArrayList([]const u8) = .empty;
+        for (list) |id| {
+            if (id != .string) continue;
+            try ids.append(a, try dup(a, id.string));
+        }
+        review.capture_ids = ids.items;
+    }
+    var captures: std.ArrayList(domain.Capture) = .empty;
+    if (jsonw.arrField(v, "captures")) |list| {
+        for (list) |item| try captures.append(a, try captureFromValue(a, item));
+    }
+    return .{ .review = review, .captures = captures.items };
 }
 
 // --------------------------------------------------- scopes, contexts, projects
@@ -4561,7 +4607,7 @@ fn traceLabel(a: std.mem.Allocator, s: *Store, id: []const u8) ![]const u8 {
     return "";
 }
 
-fn clip(a: std.mem.Allocator, text: []const u8, max: usize) ![]const u8 {
+pub fn clip(a: std.mem.Allocator, text: []const u8, max: usize) ![]const u8 {
     if (text.len <= max) return dup(a, text);
     var cut = max;
     while (cut > 0 and (text[cut] & 0xc0) == 0x80) cut -= 1;
