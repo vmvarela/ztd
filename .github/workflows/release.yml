@@ -448,6 +448,10 @@ jobs:
           # Windows is experimental in the build matrix: stage it when present.
           if [ -f artifacts/ztd-x86_64-windows.exe ]; then
             cp artifacts/ztd-x86_64-windows.exe npm-pkg/bin/ztd-win32-x64.exe
+          else
+            # No binary, no route: the wrapper then reports the platform as
+            # unsupported instead of failing with ENOENT on a missing file.
+            sed -i "/'win32-x64':/d" npm-pkg/bin/ztd.js
           fi
           chmod +x npm-pkg/bin/ztd-linux-* npm-pkg/bin/ztd-darwin-*
 

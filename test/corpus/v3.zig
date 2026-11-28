@@ -476,6 +476,10 @@ fn measurement(t: *T) !void {
     var dbuf: [10]u8 = undefined;
     const date = today(t.io, &dbuf, 0);
 
+    // The writer must refuse exactly what `check` refuses, or a stored review
+    // turns the database permanently red and blocks every later restore.
+    _ = try v3Fail(t, try r.run(&.{ "review", "monthly", "--period", "2026-+1", "--outcomes", "x", "--coverage", "1" }), "invalid_input");
+    _ = try v3Fail(t, try r.run(&.{ "review", "yearly", "--period", " 2026", "--outcomes", "x", "--coverage", "1" }), "invalid_input");
     const rev = try v3OK(t, try r.run(&.{ "review", "daily", "--period", date, "--outcomes", "shipped the release", "--coverage", "1", "--derive" }));
     const rd = try v3Data(t, rev);
     v3RFC3339(t, try v3Str(t, rd, "created_at")) catch return error.SubtestFailed;
@@ -745,6 +749,14 @@ fn directoryConnector(t: *T) !void {
     try straddle.appendNTimes(t.a, 'a', 65535);
     try straddle.appendSlice(t.a, "é tail\n");
     try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = try std.fmt.allocPrint(t.a, "{s}/c.md", .{tree}), .data = straddle.items });
+    // A binary whose header is valid ASCII must be skipped, never captured as
+    // truncated text: only the incomplete tail of the cut may be trimmed.
+    var blob: std.ArrayList(u8) = .empty;
+    try blob.appendSlice(t.a, "%PDF-1.4\n");
+    try blob.appendNTimes(t.a, 'a', 65000);
+    try blob.appendSlice(t.a, &.{ 0x80, 0x81, 0xff });
+    try blob.appendNTimes(t.a, 'b', 2000);
+    try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = try std.fmt.allocPrint(t.a, "{s}/bin.pdf", .{tree}), .data = blob.items });
     const outside = try r.path("outside.md");
     try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = outside, .data = "outside note\n" });
 
@@ -771,6 +783,8 @@ fn directoryConnector(t: *T) !void {
     const cursor1 = try v3Str(t, try v3Obj(t, rev1, "retrieval"), "cursor");
     if (cursor1.len == 0) return t.fail("scan cursor is empty", .{});
     v3RFC3339(t, cursor1) catch return error.SubtestFailed;
+    const skipped1 = try v3Num(t, try v3Obj(t, rev1, "retrieval"), "skipped");
+    if (skipped1 != 1) return t.fail("skipped {d}, want 1 (the binary file)", .{skipped1});
 
     const scan2 = try v3Data(t, try v3OK(t, try r.run(&.{ "source", "scan", "--id", "dir1" })));
     const caps2 = try v3Arr(t, scan2, "captures");

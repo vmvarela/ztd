@@ -1923,6 +1923,7 @@ fn parseRetrieval(v: ?std.json.Value) domain.SourceRetrieval {
     if (jsonw.intField(value, "provider_returned_limit")) |n| r.provider_returned_limit = n;
     if (jsonw.boolField(value, "complete_window")) |b| r.complete_window = b;
     if (jsonw.boolField(value, "truncated")) |b| r.truncated = b;
+    if (jsonw.intField(value, "skipped")) |n| r.skipped = @intCast(@max(0, n));
     if (jsonw.arrField(value, "failures")) |arr| {
         const list = std.heap.page_allocator.alloc([]const u8, arr.len) catch unreachable;
         for (arr, 0..) |f, i| list[i] = if (f == .string) f.string else "";

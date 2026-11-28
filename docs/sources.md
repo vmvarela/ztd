@@ -143,6 +143,12 @@ Plain prose claiming retrieval success establishes nothing.
 | `complete` | Reserved for an observed batch that provably read its whole window. |
 | `failed` | A batch with no items and at least one failure. |
 
+A directory scan also reports `retrieval.skipped`: the files it did not read
+because they are not text (a picture, an archive, a PDF). That count is
+informational — the window was still walked end to end, so coverage stays
+`complete` and the cursor advances. Only read errors and truncation make a
+window `partial`.
+
 Empty with errors is not the same as empty and complete. A failed or partial
 retrieval keeps its gap visible: `prepare` and the source views surface
 unverified, partial, and failed coverage whenever sources exist, so an

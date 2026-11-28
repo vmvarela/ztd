@@ -653,15 +653,33 @@ fn lookupLegacyIdem(
     key: []const u8,
     hash: *const [64]u8,
 ) !?[]const u8 {
-    var stmt = try s.db.prepare(
-        "SELECT request_hash, result_json FROM idempotency_records WHERE command = ? AND idempotency_key = ?",
-    );
-    defer stmt.finalize();
-    try stmt.bindText(1, command);
-    try stmt.bindText(2, key);
-    if (!try stmt.step()) return null;
-    if (!std.mem.eql(u8, stmt.text(0), hash)) return null;
-    return try dup(a, stmt.text(1));
+    var stored: ?[]const u8 = null;
+    var superseded = false;
+    {
+        var stmt = try s.db.prepare(
+            "SELECT request_hash, result_json FROM idempotency_records WHERE command = ? AND idempotency_key = ?",
+        );
+        defer stmt.finalize();
+        try stmt.bindText(1, command);
+        try stmt.bindText(2, key);
+        if (try stmt.step()) {
+            if (std.mem.eql(u8, stmt.text(0), hash)) {
+                stored = try dup(a, stmt.text(1));
+            } else {
+                superseded = true;
+            }
+        }
+    }
+    if (superseded) {
+        // The request moved on: drop the pre-split row so a later retry of the
+        // old payload cannot replay a revision the store has superseded.
+        var del = try s.db.prepare("DELETE FROM idempotency_records WHERE command = ? AND idempotency_key = ?");
+        defer del.finalize();
+        try del.bindText(1, command);
+        try del.bindText(2, key);
+        _ = try del.step();
+    }
+    return stored;
 }
 
 pub fn writeIdem(
@@ -2741,8 +2759,10 @@ pub fn runCheck(s: *Store, a: std.mem.Allocator, b: ?domain.Binding) !CheckRepor
 
     var scope_sql: []const u8 = "";
     if (b) |binding| scope_sql = try std.fmt.allocPrint(a, " AND scope_id IN ({s})", .{try scopeFilter(a, binding.scopes.len)});
-    const plan_sql = " AND profile_id = ?";
     const bound = b != null;
+    // Without a binding there is no profile to bind: an unconditional clause
+    // would compare against NULL and silently skip every plan check.
+    const plan_sql: []const u8 = if (bound) " AND profile_id = ?" else "";
     const profile: ?[]const u8 = if (b) |binding| binding.profile else null;
 
     // 1. Integridad referencial.
@@ -3885,6 +3905,7 @@ fn retrievalFromValue(a: std.mem.Allocator, v: std.json.Value) !domain.SourceRet
         .provider_returned_limit = jsonw.intField(v, "provider_returned_limit") orelse 0,
         .complete_window = jsonw.boolField(v, "complete_window") orelse false,
         .truncated = jsonw.boolField(v, "truncated") orelse false,
+        .skipped = @intCast(@max(0, jsonw.intField(v, "skipped") orelse 0)),
     };
     if (jsonw.arrField(v, "failures")) |list| {
         var failures: std.ArrayList([]const u8) = .empty;
@@ -4071,6 +4092,13 @@ pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Bind
             // Trim before validating: the cut can split a character, and that
             // repaired tail is what decides whether the file is text at all.
             const tail = if (st.size > 64 * 1024) errors.utf8Prefix(text, text.len) else text;
+            // utf8Prefix stops at the first invalid byte anywhere, so a binary
+            // file with an ASCII header would survive as a truncated capture.
+            // Only a split character at the cut (at most 3 bytes) is a trim.
+            if (text.len - tail.len > 3) {
+                skipped += 1;
+                continue;
+            }
             // A binary file in an approved tree is simply not a capture: skip it
             // without failing the window, or one .png freezes the cursor forever.
             if (!std.unicode.utf8ValidateSlice(tail)) {
@@ -5202,6 +5230,15 @@ fn validWeekPeriod(period: []const u8) bool {
 }
 
 fn periodRange(a: std.mem.Allocator, kind: []const u8, period: []const u8) !PeriodRange {
+    // The writer and `check` share one rule, so a stored period can never be
+    // one that `check` (and therefore `restore`) would later reject.
+    if (!periodValidFor(kind, period)) {
+        if (std.mem.eql(u8, kind, "daily")) return errors.invalid("period must be YYYY-MM-DD for daily reviews", .{});
+        if (std.mem.eql(u8, kind, "weekly")) return errors.invalid("period must be YYYY-Www for weekly reviews", .{});
+        if (std.mem.eql(u8, kind, "monthly")) return errors.invalid("period must be YYYY-MM for monthly reviews", .{});
+        if (std.mem.eql(u8, kind, "yearly")) return errors.invalid("period must be YYYY for yearly reviews", .{});
+        return errors.invalid("unknown review kind \"{s}\"", .{kind});
+    }
     var start_days: i64 = 0;
     var end_days: i64 = 0;
     if (std.mem.eql(u8, kind, "daily")) {

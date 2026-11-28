@@ -290,6 +290,7 @@ fn parseRetrieval(a: std.mem.Allocator, v: ?std.json.Value) !domain.SourceRetrie
     out.provider_returned_limit = argInt(val, "provider_returned_limit");
     out.complete_window = argOptBool(val, "complete_window") orelse false;
     out.truncated = argOptBool(val, "truncated") orelse false;
+    out.skipped = @intCast(@max(0, argInt(val, "skipped")));
     if (argArr(val, "failures")) |items| {
         const list = try a.alloc([]const u8, items.len);
         for (items, 0..) |item, i| {
