@@ -78,11 +78,14 @@ curl -fsSL "$URL/sha256sums.txt" -o "$TMP/sha256sums.txt"
 
 (
 	cd "$TMP"
-	if command -v sha256sum >/dev/null 2>&1; then
-		grep " $ASSET\$" sha256sums.txt | sha256sum -c -
-	else
-		grep " $ASSET\$" sha256sums.txt | shasum -a 256 -c -
-	fi
+	# Darwin's sha256sum reports success on empty input, so the line must
+	# exist before it is handed to the checker.
+	line=$(grep " $ASSET\$" sha256sums.txt) || {
+		echo "sha256sums.txt has no entry for $ASSET" >&2
+		exit 1
+	}
+	printf '%s\n' "$line" | sha256sum -c - 2>/dev/null ||
+		printf '%s\n' "$line" | shasum -a 256 -c -
 )
 
 mkdir -p "$INSTALL_DIR"

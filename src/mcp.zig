@@ -902,7 +902,10 @@ fn toolDocPut(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.js
     var evidence: []const []const u8 = &.{};
     if (argArr(args, "evidence")) |raw| {
         const list = try a.alloc([]const u8, raw.len);
-        for (raw, 0..) |item, i| list[i] = try core.dup(a, item.string);
+        for (raw, 0..) |item, i| list[i] = switch (item) {
+            .string => |v| try core.dup(a, v),
+            else => "",
+        };
         evidence = list;
     }
     const d = try core.putDocument(st, a, .{

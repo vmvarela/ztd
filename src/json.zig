@@ -284,7 +284,8 @@ pub fn intField(v: std.json.Value, name: []const u8) ?i64 {
     const f = field(v, name) orelse return null;
     return switch (f) {
         .integer => |i| i,
-        .float => |x| @intFromFloat(x),
+        // A hostile 1e300 must not take the server down: clamp instead.
+        .float => |x| std.math.lossyCast(i64, x),
         else => null,
     };
 }

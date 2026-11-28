@@ -75,13 +75,12 @@ fn isSymlink(st: std.Io.File.Stat) bool {
 
 /// Absent is fine: the publish phase creates it. A symlink or a file where a
 /// directory belongs is a conflict.
-fn checkDir(io: Io, path: []const u8) !?[]const u8 {
-    var buf: [4096]u8 = undefined;
+fn checkDir(a: std.mem.Allocator, io: Io, path: []const u8) !?[]const u8 {
     switch (try lstat(io, path)) {
         .missing => return null,
         .ok => |st| {
-            if (isSymlink(st)) return std.fmt.bufPrint(&buf, "symlink ancestor {s}", .{path}) catch "symlink ancestor";
-            if (st.kind != .directory) return std.fmt.bufPrint(&buf, "not a directory {s}", .{path}) catch "not a directory";
+            if (isSymlink(st)) return try std.fmt.allocPrint(a, "symlink ancestor {s}", .{path});
+            if (st.kind != .directory) return try std.fmt.allocPrint(a, "not a directory {s}", .{path});
             return null;
         },
     }
@@ -143,7 +142,7 @@ pub fn run(a: std.mem.Allocator, io: Io, cfg: Config) !Report {
         }
     }
     for (dirs.items) |dir| {
-        if (try checkDir(io, dir)) |msg| try conflicts.append(a, try a.dupe(u8, msg));
+        if (try checkDir(a, io, dir)) |msg| try conflicts.append(a, msg);
     }
 
     const manifest_path = try joinPath(a, cfg.root, manifest_name);
@@ -237,7 +236,7 @@ pub fn run(a: std.mem.Allocator, io: Io, cfg: Config) !Report {
     }
     var recheck: std.ArrayList([]const u8) = .empty;
     for (dirs.items) |dir| {
-        if (try checkDir(io, dir)) |msg| try recheck.append(a, try a.dupe(u8, msg));
+        if (try checkDir(a, io, dir)) |msg| try recheck.append(a, msg);
     }
     if (recheck.items.len > 0) return .{ .conflicts = recheck.items };
 

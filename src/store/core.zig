@@ -1456,7 +1456,7 @@ pub fn setGoal(s: *Store, a: std.mem.Allocator, cmd_in: GoalCmd, now: Timestamp)
     _ = date_buf;
     if (cmd.start_on.len == 0) {
         var dbuf: [10]u8 = undefined;
-        cmd.start_on = try dup(a, timeutil.date(now, &dbuf));
+        cmd.start_on = try dup(a, timeutil.localDate(now, &dbuf));
     }
     _ = timeutil.parseDate(cmd.start_on) catch return errors.invalid("start_on must be YYYY-MM-DD", .{});
     if (cmd.end_on.len > 0) {
@@ -1724,7 +1724,7 @@ pub fn prepare(s: *Store, a: std.mem.Allocator, b: domain.Binding, date_in: []co
     var date = date_in;
     if (date.len == 0) {
         var dbuf: [10]u8 = undefined;
-        date = try dup(a, timeutil.date(now, &dbuf));
+        date = try dup(a, timeutil.localDate(now, &dbuf));
     }
     _ = timeutil.parseDate(date) catch return errors.invalid("date must be YYYY-MM-DD", .{});
     {
@@ -4466,6 +4466,10 @@ pub fn exportTo(s: *Store, a: std.mem.Allocator, io: std.Io, out: []const u8) !v
     try o.str("format", "ztd-export");
     try o.int("version", 2);
     var tables = try o.obj("tables");
+    // One read transaction: without it each SELECT takes its own WAL snapshot
+    // and a concurrent writer can leave a torn export that restores cleanly.
+    try s.begin();
+    errdefer s.rollback();
     for (defs) |def| {
         const sql = try std.fmt.allocPrint(a, "SELECT * FROM {s} ORDER BY {s}", .{ def.name, def.pk });
         var stmt = try s.db.prepare(sql);
@@ -4487,6 +4491,7 @@ pub fn exportTo(s: *Store, a: std.mem.Allocator, io: std.Io, out: []const u8) !v
         }
         try arr.end();
     }
+    try s.commit();
     try tables.end();
     try o.end();
     std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out, .data = aw.written() }) catch |e|
@@ -4620,11 +4625,10 @@ pub fn restoreFrom(s: *Store, a: std.mem.Allocator, io: std.Io, from: []const u8
         const cols = try columnSet(s, a, def.name);
         var n: i64 = 0;
         if (tables_obj.get(def.name)) |rows_val| {
-            if (rows_val == .array) {
-                for (rows_val.array.items) |row| {
-                    try insertExportRow(s, a, def.name, cols, row);
-                    n += 1;
-                }
+            if (rows_val != .array) return errors.fail(.unsupported_format, "table {s} is not an array", .{def.name});
+            for (rows_val.array.items) |row| {
+                try insertExportRow(s, a, def.name, cols, row);
+                n += 1;
             }
         }
         try counts.append(a, .{ .name = def.name, .count = n });

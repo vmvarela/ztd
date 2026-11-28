@@ -1325,7 +1325,7 @@ fn cmdRoutines(c: *Cli, args: []const []const u8) !void {
     const date_text = blk: {
         const given = parsed.get("date", "");
         if (given.len > 0) break :blk given;
-        break :blk timeutil.date(nowSeconds(c), &date_buf);
+        break :blk timeutil.localDate(nowSeconds(c), &date_buf);
     };
     var opened = try bound(c, oneScope(parsed.get("scope", "")));
     defer opened.st.close();
