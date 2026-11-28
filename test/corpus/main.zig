@@ -280,7 +280,8 @@ fn sessionJson(a: std.mem.Allocator, steps: []const harness.Obs, tables: []const
             const parsed = std.json.parseFromSlice(std.json.Value, a, env_text, .{}) catch return error.BadEnvelope;
             try obj.put(a, "envelope", parsed.value);
         }
-        if (s.stderr_text.len > 0) try obj.put(a, "stderr", .{ .string = s.stderr_text });
+        // Always recorded: a stray warning on a successful command is a defect.
+        try obj.put(a, "stderr", .{ .string = s.stderr_text });
         try steps_arr.append(.{ .object = obj });
     }
     try root.put(a, "steps", .{ .array = steps_arr });

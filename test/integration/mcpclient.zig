@@ -158,7 +158,15 @@ pub const Client = struct {
             stdin.close(self.ctx.io);
             self.child.stdin = null;
         }
-        _ = self.child.wait(self.ctx.io) catch {};
+        // A server that answers everything and then dies is still broken.
+        const term = self.child.wait(self.ctx.io) catch |e| {
+            self.ctx.err("mcp: waiting for the server: {s}", .{@errorName(e)});
+            return;
+        };
+        switch (term) {
+            .exited => |code| if (code != 0) self.ctx.err("mcp: server exited with status {d}", .{code}),
+            else => self.ctx.err("mcp: server ended with {s}", .{@tagName(term)}),
+        }
     }
 
     const Req = struct {

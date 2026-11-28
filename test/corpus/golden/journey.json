@@ -21,7 +21,8 @@
             }
           ]
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -41,7 +42,8 @@
           "binding": null,
           "warning": ".ztd.json not found in the current directory"
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -58,7 +60,8 @@
           "processing_state": "pending",
           "revision": 1
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -75,7 +78,8 @@
           "processing_state": "pending",
           "revision": 1
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -92,7 +96,8 @@
           "processing_state": "pending",
           "revision": 1
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -109,7 +114,8 @@
           "processing_state": "pending",
           "revision": 1
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -126,7 +132,8 @@
           "processing_state": "pending",
           "revision": 1
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -185,7 +192,8 @@
             "revision": 1
           }
         ]
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -223,7 +231,8 @@
             }
           ]
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -246,7 +255,8 @@
             "revision": 2
           }
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -269,7 +279,8 @@
             "revision": 2
           }
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -292,7 +303,8 @@
             "revision": 2
           }
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -316,7 +328,8 @@
             "revision": 2
           }
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -335,7 +348,8 @@
             "updated_at": "<ts>"
           }
         ]
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -353,7 +367,8 @@
           "updated_at": "<ts>",
           "checkpoint": null
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -373,7 +388,8 @@
           "created_at": "<ts>",
           "updated_at": "<ts>"
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -388,7 +404,8 @@
           "statement": "Ship ztd v3",
           "status": "active"
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -424,7 +441,8 @@
           ],
           "waiting": null
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -448,7 +466,8 @@
           "created_at": "<ts>",
           "updated_at": "<ts>"
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -465,7 +484,8 @@
             "started_at": "<ts>"
           }
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -480,7 +500,8 @@
           "created_at": "<ts>",
           "revision": 1
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -495,7 +516,8 @@
           "started_at": "<ts>",
           "ended_at": "<ts>"
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -512,7 +534,8 @@
           "completion_state": "complete",
           "created_at": "<ts>"
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -531,7 +554,8 @@
           "created_at": "<ts>",
           "updated_at": "<ts>"
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -550,7 +574,8 @@
           "created_at": "<ts>",
           "updated_at": "<ts>"
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -575,7 +600,8 @@
             "snippet": "One binary over [SQLite]."
           }
         ]
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -598,7 +624,8 @@
           "outlinks": [],
           "backlinks": []
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -619,7 +646,8 @@
             "updated_at": "<ts>"
           }
         ]
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -637,7 +665,8 @@
             "slug": "notes/architecture"
           }
         ]
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -667,7 +696,8 @@
             }
           ]
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -690,7 +720,8 @@
           "created_at": "<ts>",
           "updated_at": "<ts>"
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -715,7 +746,8 @@
             "updated_at": "<ts>"
           }
         ]
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -759,7 +791,8 @@
             "created_at": "<ts>"
           }
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -786,7 +819,8 @@
             "last_reported_at": "<ts>"
           }
         ]
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -801,7 +835,8 @@
           "active": true,
           "revision": 1
         }
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -818,7 +853,8 @@
             "revision": 1
           }
         ]
-      }
+      },
+      "stderr": ""
     },
     {
       "exit": 0,
@@ -828,7 +864,8 @@
         "data": {
           "ok": true
         }
-      }
+      },
+      "stderr": ""
     }
   ],
   "db": {

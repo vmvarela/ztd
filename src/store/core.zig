@@ -1057,25 +1057,8 @@ pub fn getWorkItemWithCheckpoint(
     id: []const u8,
 ) !struct { item: domain.WorkItem, checkpoint: ?domain.Checkpoint } {
     const item = try getWorkItem(s, a, b, id);
-    var stmt = try s.db.prepare(
-        "SELECT id, scope_id, work_item_id, result, evidence_json, uncertainties, next_action, revision, created_at " ++
-            "FROM checkpoints WHERE work_item_id = ? AND scope_id = ? ORDER BY revision DESC LIMIT 1",
-    );
-    defer stmt.finalize();
-    try stmt.bindText(1, item.id);
-    try stmt.bindText(2, item.scope);
-    if (!try stmt.step()) return .{ .item = item, .checkpoint = null };
-    return .{ .item = item, .checkpoint = .{
-        .id = try dup(a, stmt.text(0)),
-        .scope = try dup(a, stmt.text(1)),
-        .work_item_id = try dup(a, stmt.text(2)),
-        .result = try dup(a, stmt.text(3)),
-        .evidence_refs_json = try dupOpt(a, stmt.optText(4)),
-        .uncertainties = try dup(a, stmt.text(5)),
-        .next_action = try dup(a, stmt.text(6)),
-        .created_at = try reformat(a, stmt.text(8), "checkpoints.created_at"),
-        .revision = stmt.int(7),
-    } };
+    // Same decoder as `prepare`/`focus start`: one row, one shape.
+    return .{ .item = item, .checkpoint = try lastCheckpoint(s, a, item.id) };
 }
 
 pub const ListFilter = struct {
@@ -1227,16 +1210,8 @@ pub fn moveWorkItem(s: *Store, a: std.mem.Allocator, cmd: MoveCmd, now: Timestam
         return workItemFromValueFull(a, parsed.value);
     }
 
-    var item = blk: {
-        const clause = try scopeFilter(a, cmd.binding.scopes.len);
-        const sql = try std.fmt.allocPrint(a, "SELECT " ++ work_item_columns ++ " FROM work_items WHERE id = ? AND scope_id IN ({s})", .{clause});
-        var stmt = try s.db.prepare(sql);
-        defer stmt.finalize();
-        try stmt.bindText(1, cmd.id);
-        _ = try scopeArgs(stmt, 2, cmd.binding);
-        if (!try stmt.step()) return errors.fail(.not_found, "work item {s} not found", .{cmd.id});
-        break :blk try scanWorkItem(a, stmt);
-    };
+    // Same loader as `show`, so a foreign id answers scope_denied either way.
+    var item = try getWorkItem(s, a, cmd.binding, cmd.id);
     if (cmd.expected != 0 and cmd.expected != item.revision) {
         return errors.fail(.stale_revision, "work item {s} is at revision {d}, expected {d}", .{ item.id, item.revision, cmd.expected });
     }
@@ -2781,7 +2756,11 @@ pub fn runCheck(s: *Store, a: std.mem.Allocator, b: ?domain.Binding) !CheckRepor
     // 7. Capa de documentos.
     for (try run.collect(try cat(a, "SELECT id FROM documents WHERE NOT EXISTS (SELECT 1 FROM scopes WHERE scopes.id = documents.scope_id)", scope_sql), b, null)) |id|
         try run.fail("document {s} references a missing scope", .{id});
-    for (try run.collect(try cat(a, "SELECT id FROM documents WHERE kind NOT IN ('knowledge','knowledge_index','project_note','plan_daily','plan_weekly','review','journal','calendar','adoption','passion','routine')", scope_sql), b, null)) |id|
+    // Built from the one list, so a new kind cannot make `check` (and the
+    // restore that runs it) reject valid documents.
+    const kinds_in = try std.fmt.allocPrint(a, "'{s}'", .{try std.mem.join(a, "','", &document_kinds)});
+    const unknown_kind_sql = try std.fmt.allocPrint(a, "SELECT id FROM documents WHERE kind NOT IN ({s})", .{kinds_in});
+    for (try run.collect(try cat(a, unknown_kind_sql, scope_sql), b, null)) |id|
         try run.fail("document {s} has an unknown kind", .{id});
     for (try run.collect(try cat(a, "SELECT id FROM documents WHERE status NOT IN ('draft','verified','superseded')", scope_sql), b, null)) |id|
         try run.fail("document {s} has an unknown status", .{id});
