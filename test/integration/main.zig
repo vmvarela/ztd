@@ -30,6 +30,8 @@ const tests = [_]Test{
     .{ .name = "TestInstallOpenCodeForReal", .func = install_tests.testInstallOpenCodeForReal },
     .{ .name = "TestInstallConflictEnvelope", .func = install_tests.testInstallConflictEnvelope },
     .{ .name = "TestRoutineAliases", .func = cli_tests.testRoutineAliases },
+    .{ .name = "TestBooleanFlagValue", .func = cli_tests.testBooleanFlagValue },
+    .{ .name = "TestProcessReplayKeepsFields", .func = cli_tests.testProcessReplayKeepsFields },
 };
 
 pub fn main(init: std.process.Init) !void {

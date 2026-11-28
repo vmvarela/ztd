@@ -992,7 +992,8 @@ fn writeProcessRequest(w: *std.Io.Writer, cmd: ProcessCmd, decision: []const u8)
     var o = try jsonw.Obj.init(w);
     try writeBinding(&o, cmd.binding);
     try o.str("Key", cmd.key);
-    try o.str("Decision", decision);
+    // Emitted only when set so a request of the pre-v3 shape hashes as it did.
+    if (decision.len > 0) try o.str("Decision", decision);
     try o.str("ID", cmd.id);
     try o.int("Expected", cmd.expected);
     var inner = try o.obj("Outcome");
@@ -1007,21 +1008,9 @@ fn parseProcessResult(a: std.mem.Allocator, stored: []const u8) !ProcessResult {
     const cap_val = jsonw.field(parsed.value, "capture") orelse return errors.fail(.io_error, "stored result is unreadable", .{});
     var items = std.ArrayList(domain.WorkItem).empty;
     if (jsonw.arrField(parsed.value, "work_items")) |list| {
-        for (list) |v| try items.append(a, try workItemFromValue(a, v));
+        for (list) |v| try items.append(a, try workItemFromValueFull(a, v));
     }
     return .{ .capture = try captureFromValue(a, cap_val), .work_items = items.items };
-}
-
-fn workItemFromValue(a: std.mem.Allocator, v: std.json.Value) !domain.WorkItem {
-    return .{
-        .id = try dup(a, jsonw.strField(v, "id") orelse ""),
-        .scope = try dup(a, jsonw.strField(v, "scope") orelse ""),
-        .title = try dup(a, jsonw.strField(v, "title") orelse ""),
-        .lifecycle = try dup(a, jsonw.strField(v, "lifecycle") orelse "next"),
-        .revision = jsonw.intField(v, "revision") orelse 1,
-        .created_at = try dup(a, jsonw.strField(v, "created_at") orelse ""),
-        .updated_at = try dup(a, jsonw.strField(v, "updated_at") orelse ""),
-    };
 }
 
 // --------------------------------------------------------- work items
@@ -1629,7 +1618,7 @@ fn writeCommitPlanRequest(w: *std.Io.Writer, cmd: CommitPlanCmd, decision: []con
     var o = try jsonw.Obj.init(w);
     try writeBinding(&o, cmd.binding);
     try o.str("Key", cmd.key);
-    try o.str("Decision", decision);
+    if (decision.len > 0) try o.str("Decision", decision);
     try o.str("Kind", cmd.kind);
     try o.str("Period", cmd.period);
     try o.int("Expected", cmd.expected);
@@ -1908,10 +1897,8 @@ pub fn commitPlan(s: *Store, a: std.mem.Allocator, cmd: CommitPlanCmd, decision:
         _ = timeutil.parseDate(cmd.period) catch
             return errors.invalid("period must be a real YYYY-MM-DD date, got \"{s}\"", .{cmd.period});
     } else {
-        if (cmd.period.len != 8 or cmd.period[4] != '-' or cmd.period[5] != 'W' or
-            std.fmt.parseInt(u8, cmd.period[6..8], 10) == error.InvalidCharacter)
-        {
-            return errors.invalid("period must be YYYY-Www, got \"{s}\"", .{cmd.period});
+        if (!validWeekPeriod(cmd.period)) {
+            return errors.invalid("period must be a real YYYY-Www week, got \"{s}\"", .{cmd.period});
         }
     }
     var aw = std.Io.Writer.Allocating.init(a);
@@ -2383,8 +2370,8 @@ fn writeReviewRequest(w: *std.Io.Writer, cmd: ReviewCmd, derive: bool, calendar_
     var o = try jsonw.Obj.init(w);
     try writeBinding(&o, cmd.binding);
     try o.str("Key", cmd.key);
-    try o.boolean("Derive", derive);
-    try o.str("CalendarAssert", calendar_assert);
+    if (derive) try o.boolean("Derive", true);
+    if (calendar_assert.len > 0) try o.str("CalendarAssert", calendar_assert);
     try o.str("Kind", cmd.kind);
     try o.str("Period", cmd.period);
     try o.str("Outcomes", cmd.outcomes);
@@ -3046,6 +3033,14 @@ pub fn putDocument(s: *Store, a: std.mem.Allocator, cmd: DocumentCmd, now: Times
         try s.commit();
         return doc;
     }
+    // Releases before the hash was part of the key stored it without it; a retry
+    // of a write that succeeded then must replay instead of bumping the revision.
+    const legacy_key = try std.fmt.allocPrint(a, "{s}|{s}|{s}|{d}", .{ scope, cmd.kind, cmd.slug, cmd.expected });
+    if (try lookupIdemStmt(s, a, "doc put", legacy_key, &hash)) |stored| {
+        const doc = try docFromStored(a, stored);
+        try s.commit();
+        return doc;
+    }
     try requireScopeDeclared(s, scope);
 
     var existing: ?domain.Document = null;
@@ -3603,7 +3598,10 @@ fn validateSourceReviewCmd(cmd: SourceReviewCmd) !void {
     if (cmd.items.len > 500) return errors.invalid("source batch exceeds 500 items", .{});
     for (cmd.items, 0..) |item, i| {
         validateSourceItem(item) catch |e| {
-            if (e == error.Ztd) return errors.invalid("source item {d}: {s}", .{ i, errors.detail() });
+            if (e == error.Ztd) {
+                var tmp: [4096]u8 = undefined;
+                return errors.invalid("source item {d}: {s}", .{ i, errors.detailCopy(&tmp) });
+            }
             return e;
         };
     }
@@ -3937,17 +3935,6 @@ fn readPrefix(a: std.mem.Allocator, io: std.Io, path: []const u8, limit: usize) 
     return fr.interface.readAllocShort(a, limit);
 }
 
-/// Drops a partial UTF-8 sequence at the end, for reads cut at a byte limit.
-fn trimUtf8Tail(s: []const u8) []const u8 {
-    var n = s.len;
-    while (n > 0 and (s[n - 1] & 0xC0) == 0x80) n -= 1;
-    if (n == 0) return s[0..0];
-    const lead = s[n - 1];
-    const need: usize = if (lead < 0x80) 1 else if (lead >= 0xF0) 4 else if (lead >= 0xE0) 3 else if (lead >= 0xC0) 2 else 1;
-    if (n - 1 + need > s.len) n -= 1;
-    return s[0..n];
-}
-
 /// Walks a directory source and records one observed review. The cursor only
 /// moves when the window is complete: every root resolved and listed, no read
 /// failures, nothing truncated. A suspicious path (a symlink leaving its root)
@@ -3965,6 +3952,22 @@ pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Bind
     var complete = true;
     var truncated = false;
     var max_mtime: Timestamp = 0;
+
+    // Files this source already ingested are skipped before the per-scan cap,
+    // so a tree larger than the cap drains across scans instead of re-reading
+    // the same head forever.
+    {
+        var q = try s.db.prepare(
+            "SELECT external_id, external_revision FROM captures WHERE scope_id = ? AND source_id = ? AND external_id IS NOT NULL",
+        );
+        defer q.finalize();
+        try q.bindText(1, src.scope);
+        try q.bindText(2, src.id);
+        while (try q.step()) {
+            const key = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ q.text(0), q.text(1) });
+            try seen.put(key, {});
+        }
+    }
 
     for (roots) |root| {
         const real_root = realpathAlloc(a, root) catch {
@@ -4006,8 +4009,6 @@ pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Bind
                 complete = false;
                 continue;
             }
-            const over_cap = items.items.len >= 500;
-            if (over_cap) truncated = true;
             const st = std.Io.Dir.statFile(dir, io, entry.path, .{}) catch {
                 try failures.append(a, try std.fmt.allocPrint(a, "path {s} cannot be read", .{full}));
                 complete = false;
@@ -4016,26 +4017,25 @@ pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Bind
             if (st.kind == .directory) continue;
             const seconds = st.mtime.toSeconds();
             const revision = try std.fmt.allocPrint(a, "{d}:{d}", .{ seconds, st.size });
+            // `seen` starts with the files this source already ingested, so the
+            // cap below counts new items and a rescan drains the tail.
             const dedupe_key = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ real, revision });
             if (seen.contains(dedupe_key)) continue;
             try seen.put(dedupe_key, {});
+            if (items.items.len >= 500) {
+                truncated = true;
+                continue;
+            }
             const text = readPrefix(a, io, real, 64 * 1024) catch {
                 try failures.append(a, try std.fmt.allocPrint(a, "path {s} cannot be read", .{full}));
                 complete = false;
                 continue;
             };
-            // One unreadable file is a failure for that file, never for the
-            // batch: a single .png must not make the source unusable.
-            if (!std.unicode.utf8ValidateSlice(text)) {
-                try failures.append(a, try std.fmt.allocPrint(a, "path {s} is not valid UTF-8", .{full}));
-                complete = false;
-                continue;
-            }
-            const tail = if (st.size > 64 * 1024) trimUtf8Tail(text) else text;
+            // A binary file in an approved tree is simply not a capture: skip it
+            // without failing the window, or one .png freezes the cursor forever.
+            if (!std.unicode.utf8ValidateSlice(text)) continue;
+            const tail = if (st.size > 64 * 1024) errors.utf8Prefix(text, text.len) else text;
             if (trimmed(tail).len == 0) continue;
-            // The window stays complete past the cap: the cursor must advance
-            // so the tail arrives on the next scan instead of never.
-            if (over_cap) continue;
             try items.append(a, .{
                 .external_id = real,
                 .external_revision = revision,
@@ -4792,13 +4792,13 @@ fn firstLineTitle(id: []const u8, text: []const u8, buf: []u8) ![]const u8 {
         if (line_trimmed.len == 0) continue;
         const stripped = std.mem.trim(u8, std.mem.trimStart(u8, line_trimmed, "#"), " \t");
         const chosen = if (stripped.len > 0) stripped else line_trimmed;
-        const n = @min(chosen.len, 80);
-        @memcpy(buf[0..n], chosen[0..n]);
-        return buf[0..n];
+        const cut = errors.utf8Prefix(chosen, 80);
+        @memcpy(buf[0..cut.len], cut);
+        return buf[0..cut.len];
     }
-    const n = @min(id.len, 80);
-    @memcpy(buf[0..n], id[0..n]);
-    return buf[0..n];
+    const cut = errors.utf8Prefix(id, 80);
+    @memcpy(buf[0..cut.len], cut);
+    return buf[0..cut.len];
 }
 
 // ------------------------------------------------------------ provenance
@@ -4851,9 +4851,7 @@ fn traceLabel(a: std.mem.Allocator, s: *Store, id: []const u8) ![]const u8 {
 
 pub fn clip(a: std.mem.Allocator, text: []const u8, max: usize) ![]const u8 {
     if (text.len <= max) return dup(a, text);
-    var cut = max;
-    while (cut > 0 and (text[cut] & 0xc0) == 0x80) cut -= 1;
-    return dup(a, text[0..cut]);
+    return dup(a, errors.utf8Prefix(text, max));
 }
 
 /// One hop of the provenance graph around `id`, both directions.
@@ -5142,6 +5140,21 @@ const PeriodRange = struct {
     end_date: []const u8,
 };
 
+/// ISO weeks in a year: 28 December always falls in the last one.
+fn isoWeeks(year: i32) u8 {
+    return timeutil.isoWeek(timeutil.daysFromCivil(year, 12, 28) * 86400).week;
+}
+
+/// A weekly period must be a real ISO week of that year: W53 exists only when
+/// the year has 53 weeks, and 2025-W53 would otherwise alias 2026-W01.
+fn validWeekPeriod(period: []const u8) bool {
+    if (period.len != 8 or period[4] != '-' or period[5] != 'W') return false;
+    const year = std.fmt.parseInt(i32, period[0..4], 10) catch return false;
+    const week = std.fmt.parseInt(u8, period[6..8], 10) catch return false;
+    if (week < 1 or week > isoWeeks(year)) return false;
+    return true;
+}
+
 fn periodRange(a: std.mem.Allocator, kind: []const u8, period: []const u8) !PeriodRange {
     var start_days: i64 = 0;
     var end_days: i64 = 0;
@@ -5156,9 +5169,9 @@ fn periodRange(a: std.mem.Allocator, kind: []const u8, period: []const u8) !Peri
         }
         const year = std.fmt.parseInt(i32, period[0..4], 10) catch
             return errors.invalid("period must be YYYY-Www for weekly reviews", .{});
+        if (!validWeekPeriod(period)) return errors.invalid("period must be YYYY-Www for weekly reviews", .{});
         const week = std.fmt.parseInt(i64, period[6..8], 10) catch
             return errors.invalid("period must be YYYY-Www for weekly reviews", .{});
-        if (week < 1 or week > 53) return errors.invalid("period must be YYYY-Www for weekly reviews", .{});
         // ISO week 1 is the week holding January 4th.
         const jan4 = timeutil.daysFromCivil(year, 1, 4);
         const monday_offset = @mod(jan4 + 3, 7);

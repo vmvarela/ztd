@@ -155,6 +155,8 @@ fn parseFlags(a: std.mem.Allocator, args: []const []const u8, specs: []const Spe
                 return flagError("invalid value \"{s}\" for flag -{s}: parse error", .{ v, name });
             }
             try parsed.values.put(name, v);
+            // `--flag=false` must read as absent: every boolean consumer asks has().
+            if (std.mem.eql(u8, v, "false")) _ = parsed.seen.remove(name);
         } else {
             try parsed.values.put(name, "true");
         }
@@ -1813,7 +1815,7 @@ fn docArchive(c: *Cli, args: []const []const u8) !void {
         const buf: [10]u8 = undefined;
         var day_buf = buf;
         body = try std.fmt.allocPrint(c.arena, "# {s}\n\nQuestion: {s}\nArchived: {s}\n\n{s}", .{
-            title, question, timeutil.date(nowSeconds(c), &day_buf), body,
+            title, question, timeutil.localDate(nowSeconds(c), &day_buf), body,
         });
     }
     const expected = try intFlag("expected", p.get("expected", "0"));

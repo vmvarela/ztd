@@ -191,19 +191,13 @@ fn firstLineTitle(id: []const u8, text: []const u8, buf: []u8) []const u8 {
         if (trimmed.len == 0) continue;
         const stripped = std.mem.trim(u8, std.mem.trimStart(u8, trimmed, "#"), " \t");
         const chosen = if (stripped.len > 0) stripped else trimmed;
-        // Cut on a character boundary: half a codepoint is not a title.
-        var n = @min(chosen.len, 80);
-        while (n > 0 and (chosen[n - 1] & 0xC0) == 0x80) n -= 1;
-        if (n > 0 and chosen[n - 1] >= 0xC0) {
-            const need: usize = if (chosen[n - 1] >= 0xF0) 4 else if (chosen[n - 1] >= 0xE0) 3 else 2;
-            if (n - 1 + need > chosen.len) n -= 1;
-        }
-        @memcpy(buf[0..n], chosen[0..n]);
-        return buf[0..n];
+        const cut = errors.utf8Prefix(chosen, 80);
+        @memcpy(buf[0..cut.len], cut);
+        return buf[0..cut.len];
     }
-    const n = @min(id.len, 80);
-    @memcpy(buf[0..n], id[0..n]);
-    return buf[0..n];
+    const cut = errors.utf8Prefix(id, 80);
+    @memcpy(buf[0..cut.len], cut);
+    return buf[0..cut.len];
 }
 
 fn insertKnowledgeDocument(s: *Store, row: *sqlite.Statement) errors.Ztd!void {
