@@ -99,7 +99,13 @@ pub fn date(t: Timestamp, buf: *[10]u8) []const u8 {
 pub fn localDate(t: Timestamp, buf: *[10]u8) []const u8 {
     var secs: c.time_t = @intCast(t);
     var tm: c.struct_tm = undefined;
-    if (c.localtime_r(&secs, &tm) == null) return date(t, buf);
+    if (builtin.os.tag == .windows) {
+        // mingw has no localtime_r; localtime returns a static struct, which is
+        // fine for this single-threaded CLI.
+        tm = (c.localtime(&secs) orelse return date(t, buf)).*;
+    } else if (c.localtime_r(&secs, &tm) == null) {
+        return date(t, buf);
+    }
     return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}", .{
         @as(u32, @intCast(tm.tm_year + 1900)), @as(u8, @intCast(tm.tm_mon + 1)), @as(u8, @intCast(tm.tm_mday)),
     }) catch unreachable;
