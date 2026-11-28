@@ -178,6 +178,15 @@ pub fn fmtIsoWeek(t: Timestamp, buf: *[8]u8) []const u8 {
 /// Zone name from /etc/localtime's symlink target, falling back to "Local".
 pub fn localTimezone(buf: []u8) []const u8 {
     if (builtin.os.tag == .windows) return "Local";
+    // localtime_r honours TZ, so the recorded name must come from there first;
+    // otherwise the profile claims a zone the dates are not computed in.
+    if (c.getenv("TZ")) |raw| {
+        const tz = std.mem.span(raw);
+        if (tz.len > 0 and tz.len <= buf.len and !std.mem.startsWith(u8, tz, ":")) {
+            @memcpy(buf[0..tz.len], tz);
+            return buf[0..tz.len];
+        }
+    }
     const n = c.readlink("/etc/localtime", buf.ptr, buf.len);
     if (n > 0) {
         const target = buf[0..@intCast(n)];

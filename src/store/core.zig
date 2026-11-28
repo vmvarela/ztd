@@ -839,7 +839,7 @@ pub fn process(s: *Store, a: std.mem.Allocator, cmd: ProcessCmd, decision: []con
     try validateOutcome(cmd.outcome);
 
     var aw = std.Io.Writer.Allocating.init(a);
-    try writeProcessRequest(&aw.writer, cmd);
+    try writeProcessRequest(&aw.writer, cmd, decision);
     const hash = sha256hex(aw.written());
     const now_s = try fmtTs(a, now);
 
@@ -994,10 +994,11 @@ fn checkSameScope(s: *Store, table: []const u8, noun: []const u8, id: []const u8
     }
 }
 
-fn writeProcessRequest(w: *std.Io.Writer, cmd: ProcessCmd) !void {
+fn writeProcessRequest(w: *std.Io.Writer, cmd: ProcessCmd, decision: []const u8) !void {
     var o = try jsonw.Obj.init(w);
     try writeBinding(&o, cmd.binding);
     try o.str("Key", cmd.key);
+    try o.str("Decision", decision);
     try o.str("ID", cmd.id);
     try o.int("Expected", cmd.expected);
     var inner = try o.obj("Outcome");
@@ -1570,8 +1571,8 @@ pub fn activeGoal(s: *Store, a: std.mem.Allocator, b: domain.Binding) !?domain.G
 
 fn primaryGoal(s: *Store, a: std.mem.Allocator, profile: []const u8) !?domain.Goal {
     var stmt = try s.db.prepare(
-        "SELECT " ++ goal_columns ++ " FROM goals WHERE profile_id = ? AND kind = 'primary' " ++
-            "ORDER BY status = 'active' DESC, created_at DESC, id DESC LIMIT 1",
+        "SELECT " ++ goal_columns ++ " FROM goals WHERE profile_id = ? AND kind = 'primary' AND status = 'active' " ++
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
     );
     defer stmt.finalize();
     try stmt.bindText(1, profile);
@@ -1632,10 +1633,11 @@ pub const CommitPlanCmd = struct {
     override_id: []const u8 = "",
 };
 
-fn writeCommitPlanRequest(w: *std.Io.Writer, cmd: CommitPlanCmd) !void {
+fn writeCommitPlanRequest(w: *std.Io.Writer, cmd: CommitPlanCmd, decision: []const u8) !void {
     var o = try jsonw.Obj.init(w);
     try writeBinding(&o, cmd.binding);
     try o.str("Key", cmd.key);
+    try o.str("Decision", decision);
     try o.str("Kind", cmd.kind);
     try o.str("Period", cmd.period);
     try o.int("Expected", cmd.expected);
@@ -1781,7 +1783,10 @@ pub fn prepare(s: *Store, a: std.mem.Allocator, b: domain.Binding, date_in: []co
         var cps = std.ArrayList(domain.Checkpoint).empty;
         for (p.items) |it| {
             if (!std.mem.eql(u8, it.role, "mit")) continue;
-            const item = getWorkItem(s, a, b, it.work_item_id) catch continue;
+            const item = getWorkItem(s, a, b, it.work_item_id) catch |e| {
+                if (errors.getFamily() == .not_found) continue;
+                return e;
+            };
             try mits.append(a, item);
             var q = try s.db.prepare(
                 "SELECT id, scope_id, work_item_id, result, evidence_json, uncertainties, next_action, revision, created_at " ++
@@ -1918,7 +1923,7 @@ pub fn commitPlan(s: *Store, a: std.mem.Allocator, cmd: CommitPlanCmd, decision:
         }
     }
     var aw = std.Io.Writer.Allocating.init(a);
-    try writeCommitPlanRequest(&aw.writer, cmd);
+    try writeCommitPlanRequest(&aw.writer, cmd, decision);
     const hash = sha256hex(aw.written());
     const now_s = try fmtTs(a, now);
 
@@ -2382,10 +2387,12 @@ pub const ReviewCmd = struct {
     complete: bool = true,
 };
 
-fn writeReviewRequest(w: *std.Io.Writer, cmd: ReviewCmd) !void {
+fn writeReviewRequest(w: *std.Io.Writer, cmd: ReviewCmd, derive: bool, calendar_assert: []const u8) !void {
     var o = try jsonw.Obj.init(w);
     try writeBinding(&o, cmd.binding);
     try o.str("Key", cmd.key);
+    try o.boolean("Derive", derive);
+    try o.str("CalendarAssert", calendar_assert);
     try o.str("Kind", cmd.kind);
     try o.str("Period", cmd.period);
     try o.str("Outcomes", cmd.outcomes);
@@ -2419,7 +2426,7 @@ pub fn recordReview(s: *Store, a: std.mem.Allocator, cmd: ReviewCmd, derive: boo
     if (cmd.outcomes.len == 0) return errors.invalid("outcomes are required", .{});
     if (cmd.coverage.len == 0) return errors.invalid("coverage is required", .{});
     var aw = std.Io.Writer.Allocating.init(a);
-    try writeReviewRequest(&aw.writer, cmd);
+    try writeReviewRequest(&aw.writer, cmd, derive, calendar_assert);
     const hash = sha256hex(aw.written());
     const now_s = try fmtTs(a, now);
 
@@ -2593,10 +2600,10 @@ pub fn addRoutine(s: *Store, a: std.mem.Allocator, cmd: RoutineCmd) !domain.Rout
     defer exists.finalize();
     try exists.bindText(1, scope);
     if (!try exists.step()) return errors.invalid("unknown scope reference {s}", .{scope});
-    var dup_check = try s.db.prepare("SELECT 1 FROM routines WHERE id = ? AND scope_id = ?");
+    // routines.id is the primary key, so the guard has to be global.
+    var dup_check = try s.db.prepare("SELECT 1 FROM routines WHERE id = ?");
     defer dup_check.finalize();
     try dup_check.bindText(1, id);
-    try dup_check.bindText(2, scope);
     if (try dup_check.step()) return errors.fail(.conflict, "routine {s} already exists", .{id});
 
     const last_text: ?[]const u8 = if (last_day) |d| try fmtTs(a, d) else null;
@@ -2920,7 +2927,12 @@ fn documentFromValue(a: std.mem.Allocator, v: std.json.Value) !domain.Document {
         .updated_at = try dup(a, jsonw.strField(v, "updated_at") orelse ""),
         .record_kind = try dupOpt(a, jsonw.strField(v, "record_kind")),
         .rationale = try dupOpt(a, jsonw.strField(v, "rationale")),
-        .options_json = try dupOpt(a, jsonw.strField(v, "options")),
+        .options_json = blk: {
+            const opt = jsonw.field(v, "options") orelse break :blk null;
+            var ow = std.Io.Writer.Allocating.init(a);
+            try jsonw.writeValue(a, &ow.writer, opt);
+            break :blk try dup(a, ow.written());
+        },
         .approved_by = try dupOpt(a, jsonw.strField(v, "approved_by")),
         .approved_at = try dupOpt(a, jsonw.strField(v, "approved_at")),
         .valid_from = try dupOpt(a, jsonw.strField(v, "valid_from")),

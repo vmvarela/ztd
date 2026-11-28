@@ -83,6 +83,11 @@ pub fn documentLinks(a: std.mem.Allocator, body: []const u8) ![]const Link {
     while (std.mem.indexOfPos(u8, stripped, i, "[[")) |open| {
         const close = std.mem.indexOfPos(u8, stripped, open + 2, "]]") orelse break;
         const inner = stripped[open + 2 .. close];
+        // Go's pattern forbids brackets inside, so "[[a [[b]]" links to b.
+        if (std.mem.indexOfAny(u8, inner, "[]") != null) {
+            i = open + 2;
+            continue;
+        }
         i = close + 2;
         const raw = if (std.mem.indexOfScalar(u8, inner, '|')) |p| inner[0..p] else inner;
         const target = normalizeTarget(raw);

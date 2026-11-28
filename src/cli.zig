@@ -469,7 +469,8 @@ fn readBindingHint(c: *Cli) Hint {
     };
     if (parsed.value != .object) return .{ .json = "null", .warning = ".ztd.json is not a JSON object" };
     var aw = Io.Writer.Allocating.init(c.arena);
-    std.json.Stringify.value(parsed.value, .{}, &aw.writer) catch return .{ .json = "null" };
+    // Sorted keys and HTML escaping, exactly like every other JSON we emit.
+    jsonw.writeValue(c.arena, &aw.writer, parsed.value) catch return .{ .json = "null" };
     return .{ .json = aw.written() };
 }
 
