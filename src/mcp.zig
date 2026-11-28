@@ -29,10 +29,8 @@ pub fn serve(arena: std.mem.Allocator, io: Io, w: *Io.Writer, st: *Store, b: dom
     // A doc_put body of 512 KiB escapes to well over 1 MiB on the wire.
     var in_buf: [4 << 20]u8 = undefined;
     var in: Io.File.Reader = .init(.stdin(), io, &in_buf);
-    // Everything a single request allocates comes from here, so a long session
-    // does not grow the process arena.
-    var req_state = std.heap.ArenaAllocator.init(arena);
-    defer req_state.deinit();
+    var tool_catalog: ?std.json.Value = null;
+    var prompt_catalog: ?std.json.Value = null;
     while (true) {
         // takeDelimiterExclusive is broken in 0.17.0; trim inclusive instead.
         const raw = in.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
@@ -45,7 +43,8 @@ pub fn serve(arena: std.mem.Allocator, io: Io, w: *Io.Writer, st: *Store, b: dom
         };
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0) continue;
-        _ = req_state.reset(.retain_capacity);
+        var req_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer req_state.deinit();
         const req = req_state.allocator();
         const parsed = std.json.parseFromSlice(std.json.Value, req, line, .{}) catch {
             try sendError(w, null, -32700, "Parse error");
@@ -110,9 +109,12 @@ pub fn serve(arena: std.mem.Allocator, io: Io, w: *Io.Writer, st: *Store, b: dom
                     else => "",
                 };
             };
-            const texts = std.json.parseFromSlice(std.json.Value, arena, prompt_texts, .{}) catch
-                return sendError(w, id, -32603, "prompt catalog is not available");
-            const found = switch (texts.value) {
+            if (prompt_catalog == null) {
+                const texts = std.json.parseFromSlice(std.json.Value, arena, prompt_texts, .{}) catch
+                    return sendError(w, id, -32603, "prompt catalog is not available");
+                prompt_catalog = texts.value;
+            }
+            const found = switch (prompt_catalog.?) {
                 .object => |o| o.get(name),
                 else => null,
             };
@@ -123,7 +125,7 @@ pub fn serve(arena: std.mem.Allocator, io: Io, w: *Io.Writer, st: *Store, b: dom
                 try w.writeAll("}\n");
                 try w.flush();
             } else {
-                const msg2 = try std.fmt.allocPrint(arena, "unknown prompt \"{s}\"", .{name});
+                const msg2 = try std.fmt.allocPrint(req, "unknown prompt \"{s}\"", .{name});
                 try sendError(w, id, -32602, msg2);
             }
         } else if (std.mem.eql(u8, method, "tools/call")) {
@@ -143,22 +145,26 @@ pub fn serve(arena: std.mem.Allocator, io: Io, w: *Io.Writer, st: *Store, b: dom
                 };
             };
             const args = p.object.get("arguments");
-            const payload = callTool(arena, io, st, b, allow_delete, name, args) catch |err| {
+            if (tool_catalog == null) {
+                const catalog = try std.json.parseFromSlice(std.json.Value, arena, if (allow_delete) tools_delete else tools_default, .{});
+                tool_catalog = catalog.value;
+            }
+            const payload = callTool(req, io, st, b, allow_delete, tool_catalog.?, name, args) catch |err| {
                 if (err == error.Ztd) {
                     // The Go server answered every out-of-scope refusal with the
                     // same not_found, so a model cannot probe other scopes.
                     const msg2 = if (errors.getFamily() == .scope_denied)
                         "not_found: not found"
                     else
-                        try std.fmt.allocPrint(arena, "{s}: {s}", .{ errors.getFamily().text(), errors.detail() });
+                        try std.fmt.allocPrint(req, "{s}: {s}", .{ errors.getFamily().text(), errors.detail() });
                     try errorReply(w, id, msg2);
                 } else {
-                    const msg2 = try std.fmt.allocPrint(arena, "io_error: {s}", .{@errorName(err)});
+                    const msg2 = try std.fmt.allocPrint(req, "io_error: {s}", .{@errorName(err)});
                     try errorReply(w, id, msg2);
                 }
                 continue;
             };
-            const sorted = try sortBytes(arena, payload);
+            const sorted = try sortBytes(req, payload);
             try resultReply(w, id, sorted);
         } else {
             try sendError(w, id, -32601, "Method not found");
@@ -269,6 +275,14 @@ fn argInt(args: ?std.json.Value, name: []const u8) i64 {
     return jsonw.intField(a, name) orelse 0;
 }
 
+fn argRevision(args: ?std.json.Value) !i64 {
+    const value = jsonw.field(args orelse return 0, "expected_revision") orelse return 0;
+    return switch (value) {
+        .integer => |n| if (n >= 0) n else errors.invalid("expected_revision must be a nonnegative integer", .{}),
+        else => errors.invalid("expected_revision must be a nonnegative integer", .{}),
+    };
+}
+
 fn argOptBool(args: ?std.json.Value, name: []const u8) ?bool {
     const a = args orelse return null;
     return jsonw.boolField(a, name);
@@ -277,31 +291,6 @@ fn argOptBool(args: ?std.json.Value, name: []const u8) ?bool {
 fn argArr(args: ?std.json.Value, name: []const u8) ?[]std.json.Value {
     const a = args orelse return null;
     return jsonw.arrField(a, name);
-}
-
-fn parseRetrieval(a: std.mem.Allocator, v: ?std.json.Value) !domain.SourceRetrieval {
-    const none = domain.SourceRetrieval{};
-    const val = v orelse return none;
-    if (val != .object) return none;
-    var out = none;
-    out.window = try core.dup(a, argStr(val, "window"));
-    out.cursor = try core.dup(a, argStr(val, "cursor"));
-    out.requested_limit = argInt(val, "requested_limit");
-    out.provider_returned_limit = argInt(val, "provider_returned_limit");
-    out.complete_window = argOptBool(val, "complete_window") orelse false;
-    out.truncated = argOptBool(val, "truncated") orelse false;
-    out.skipped = @intCast(@max(0, argInt(val, "skipped")));
-    if (argArr(val, "failures")) |items| {
-        const list = try a.alloc([]const u8, items.len);
-        for (items, 0..) |item, i| {
-            list[i] = switch (item) {
-                .string => |s| try core.dup(a, s),
-                else => "",
-            };
-        }
-        out.failures = list;
-    }
-    return out;
 }
 
 fn parseItems(a: std.mem.Allocator, v: ?std.json.Value) ![]const domain.SourceItem {
@@ -328,11 +317,12 @@ fn callTool(
     st: *Store,
     b: domain.Binding,
     allow_delete: bool,
+    catalog: std.json.Value,
     name: []const u8,
     args: ?std.json.Value,
 ) ![]const u8 {
     const now = timeutil.now(io);
-    try validateToolArgs(arena, allow_delete, name, args);
+    try validateToolArgs(catalog, name, args);
     if (std.mem.eql(u8, name, "capture")) return try toolCapture(arena, st, b, args, now);
     if (std.mem.eql(u8, name, "inbox_next")) return try toolInboxNext(arena, st, b, now);
     if (std.mem.eql(u8, name, "process_capture")) return try toolProcess(arena, st, b, args, now);
@@ -350,7 +340,7 @@ fn callTool(
     if (std.mem.eql(u8, name, "doc_get")) return try toolDocGet(arena, st, b, args);
     if (std.mem.eql(u8, name, "doc_related")) return try toolDocRelated(arena, st, b, args);
     if (std.mem.eql(u8, name, "doc_put")) return try toolDocPut(arena, st, b, args, now);
-    if (std.mem.eql(u8, name, "trace")) return try toolTrace(arena, st, args);
+    if (std.mem.eql(u8, name, "trace")) return try toolTrace(arena, st, b, args);
     if (allow_delete and std.mem.eql(u8, name, "delete_source")) return try toolDeleteSource(arena, st, b, args, now);
     return errors.invalid("unknown tool \"{s}\"", .{name});
 }
@@ -359,10 +349,7 @@ fn callTool(
 /// when `additionalProperties` is false, and any missing `required` entry.
 /// Only the two rules the schemas state are enforced; the typed handlers
 /// validate the values themselves.
-fn validateToolArgs(a: std.mem.Allocator, allow_delete: bool, name: []const u8, args: ?std.json.Value) !void {
-    const payload = if (allow_delete) tools_delete else tools_default;
-    const parsed = std.json.parseFromSlice(std.json.Value, a, payload, .{}) catch return;
-    const root = parsed.value;
+fn validateToolArgs(root: std.json.Value, name: []const u8, args: ?std.json.Value) !void {
     if (root != .object) return;
     const tools = jsonw.arrField(root, "tools") orelse return;
     for (tools) |tool| {
@@ -481,7 +468,7 @@ fn toolProcess(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.j
         .binding = b,
         .key = try core.dup(a, argStr(args, "idempotency_key")),
         .id = try core.dup(a, argStr(args, "capture_id")),
-        .expected = argInt(args, "expected_revision"),
+        .expected = try argRevision(args),
         .outcome = outcome,
     }, (try optArg(a, args, "decision")) orelse "", now);
     var aw = Io.Writer.Allocating.init(a);
@@ -532,7 +519,7 @@ fn toolCommitPlan(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?st
         .key = try core.dup(a, argStr(args, "idempotency_key")),
         .kind = try core.dup(a, argStr(args, "kind")),
         .period = try core.dup(a, argStr(args, "period")),
-        .expected = argInt(args, "expected_revision"),
+        .expected = try argRevision(args),
         .override_id = try core.dup(a, argStr(args, "override_id")),
         .items = items,
     }, (try optArg(a, args, "decision")) orelse "", now);
@@ -651,7 +638,7 @@ fn toolSourceReview(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?
         .batch_id = try core.dup(a, argStr(args, "batch_id")),
         .key = try core.dup(a, argStr(args, "idempotency_key")),
         .result_kind = kind,
-        .retrieval = try parseRetrieval(a, args),
+        .retrieval = try domain.SourceRetrieval.fromValue(a, args),
         .items = try parseItems(a, args),
     }, now);
     var full_aw = Io.Writer.Allocating.init(a);
@@ -868,9 +855,9 @@ fn optionsArg(a: std.mem.Allocator, args: ?std.json.Value) ![]const u8 {
     };
 }
 
-fn toolTrace(a: std.mem.Allocator, st: *Store, args: ?std.json.Value) ![]const u8 {
+fn toolTrace(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.json.Value) ![]const u8 {
     const id = argStr(args, "id");
-    const t = try core.traceEntity(st, a, id);
+    const t = core.traceEntity(st, a, b, id) catch |err| return readError(err);
     var edges = t.edges;
     var omitted: i64 = 0;
     var data = try renderTrace(a, t, edges, omitted);
@@ -935,7 +922,7 @@ fn toolDocPut(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?std.js
         .title = try core.dup(a, title),
         .body = try core.dup(a, body),
         .status = "draft",
-        .expected = argInt(args, "expected_revision"),
+        .expected = try argRevision(args),
         .draft_only = true,
         .record_kind = (try optArg(a, args, "record_kind")) orelse "",
         .rationale = (try optArg(a, args, "rationale")) orelse "",

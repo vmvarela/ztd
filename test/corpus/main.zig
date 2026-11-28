@@ -29,6 +29,13 @@ pub fn main(init: process.Init) !void {
     const bin = resolveBin(io, gpa, a, args, env) orelse std.process.exit(1);
 
     var failed: usize = 0;
+    var fixture = try harness.Runner.init(io, gpa, a, bin, env, sys_tmp);
+    defer fixture.deinit();
+    defer fixture.cleanup();
+    dbdump.checkWal(io, a, fixture.db, sys_tmp) catch |e| {
+        std.debug.print("corpus: WAL fixture failed: {s}\n", .{@errorName(e)});
+        failed += 1;
+    };
     var steps_done: usize = 0;
     var tables_done: usize = 0;
 
@@ -210,6 +217,7 @@ fn errorSteps(r: *harness.Runner) anyerror!void {
 // --------------------------------------------------------- golden record/rep
 
 fn finish(r: *harness.Runner, io: std.Io, a: std.mem.Allocator, name: []const u8, update: bool) anyerror!Report {
+    if (std.mem.eql(u8, name, "journey")) try dbdump.checkJourney(a, r.db);
     const tables = dbdump.dump(io, a, r.db, r.sys_tmp) catch |e| {
         std.debug.print("{s}: db dump failed: {s}\n", .{ name, @errorName(e) });
         return e;

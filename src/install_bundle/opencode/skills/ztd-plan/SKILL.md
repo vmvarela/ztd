@@ -52,8 +52,10 @@ source.
    (`ztd goal show`). Choose few Big Rocks: 4–6 as a guide.
 3. Commit the week plan with `ztd plan commit --kind weekly --period
    YYYY-Www --item ID:big_rock ...` (roles `big_rock` and `batch` only), with
-   IDs and proposed blocks according to capacity. Honor real dates from every
-   client. Omit items that have nothing to record.
+   IDs and proposed blocks according to capacity. This creates a new plan;
+   replacing one requires `--expected <revision>` from its last successful
+   commit. If the revision is unknown or stale, do not guess. Honor real dates
+   from every client. Omit items that have nothing to record.
 
 ## Goal
 

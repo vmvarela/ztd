@@ -26,17 +26,18 @@ pub const Db = struct {
         var handle: ?*c.sqlite3 = null;
         if (c.sqlite3_open(path, &handle) != c.SQLITE_OK) {
             if (handle) |h| {
+                defer _ = c.sqlite3_close(h);
                 const msg = std.mem.span(c.sqlite3_errmsg(h));
-                _ = c.sqlite3_close(h);
                 return errors.fromSqlite(msg, true);
             }
             return errors.fail(.db_incompatible, "cannot open SQLite database", .{});
         }
-        const db = Db{ .handle = handle.? };
-        db.exec("PRAGMA foreign_keys = ON") catch |e| return e;
-        db.exec("PRAGMA journal_mode = WAL") catch |e| return e;
-        db.exec("PRAGMA busy_timeout = 5000") catch |e| return e;
-        db.exec("PRAGMA synchronous = FULL") catch |e| return e;
+        var db = Db{ .handle = handle.? };
+        errdefer db.close();
+        try db.exec("PRAGMA busy_timeout = 5000");
+        try db.exec("PRAGMA foreign_keys = ON");
+        try db.exec("PRAGMA journal_mode = WAL");
+        try db.exec("PRAGMA synchronous = FULL");
         return db;
     }
 
