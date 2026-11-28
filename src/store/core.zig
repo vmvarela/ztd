@@ -316,14 +316,40 @@ pub const CaptureCmd = struct {
     occurred_at: ?Timestamp = null,
 };
 
+fn outcomeFromValue(a: std.mem.Allocator, stored: []const u8) !domain.Outcome {
+    const parsed = std.json.parseFromSlice(std.json.Value, a, stored, .{}) catch
+        return .{ .kind = try dup(a, stored) };
+    const v = parsed.value;
+    if (v != .object) return .{ .kind = try dup(a, stored) };
+    var out = domain.Outcome{ .kind = try dup(a, jsonw.strField(v, "kind") orelse "") };
+    out.project_id = try dupOpt(a, jsonw.strField(v, "project_id"));
+    out.area_id = try dupOpt(a, jsonw.strField(v, "area_id"));
+    out.context_id = try dupOpt(a, jsonw.strField(v, "context_id"));
+    out.waiting_on = try dup(a, jsonw.strField(v, "waiting_on") orelse "");
+    out.review_after = try dupOpt(a, jsonw.strField(v, "review_after"));
+    out.reason = try dup(a, jsonw.strField(v, "reason") orelse "");
+    out.result_evidence = try dup(a, jsonw.strField(v, "result_evidence") orelse "");
+    if (jsonw.arrField(v, "titles")) |titles| {
+        var list: std.ArrayList([]const u8) = .empty;
+        for (titles) |t| if (t == .string) try list.append(a, try dup(a, t.string));
+        out.titles = list.items;
+    }
+    return out;
+}
+
 fn scanCapture(a: std.mem.Allocator, stmt: sqlite.Statement) !domain.Capture {
     const occurred: ?[]const u8 = if (stmt.optText(8)) |occ| try reformat(a, occ, "captures.occurred_at") else null;
     const review_after = try dupOpt(a, stmt.optText(12));
     var outcome: ?*const domain.Outcome = null;
-    if (stmt.optText(11)) |kind| {
+    if (stmt.optText(11)) |stored| {
         const out = try a.create(domain.Outcome);
-        out.* = .{ .kind = try dup(a, kind) };
-        if (std.mem.eql(u8, kind, "defer")) out.review_after = review_after;
+        if (stored.len > 0 and stored[0] == '{') {
+            out.* = try outcomeFromValue(a, stored);
+        } else {
+            // Rows written before the outcome was stored whole hold its kind.
+            out.* = .{ .kind = try dup(a, stored) };
+            if (std.mem.eql(u8, stored, "defer")) out.review_after = review_after;
+        }
         outcome = out;
     }
     return .{
@@ -907,7 +933,13 @@ pub fn process(s: *Store, a: std.mem.Allocator, cmd: ProcessCmd, decision: []con
         );
         defer upd.finalize();
         try upd.bindText(1, state);
-        try upd.bindText(2, cmd.outcome.kind);
+        // The whole outcome, not just its kind: the reason and evidence the
+        // command demanded must survive somewhere a reader can see them.
+        var oj = std.Io.Writer.Allocating.init(a);
+        var oo = try jsonw.Obj.init(&oj.writer);
+        try cmd.outcome.write(&oo);
+        try oo.end();
+        try upd.bindText(2, oj.written());
         try upd.bindOptText(3, review_after);
         try upd.bindInt(4, cap.revision + 1);
         try upd.bindText(5, cap.id);

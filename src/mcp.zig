@@ -26,20 +26,37 @@ const trace_cap = 1024;
 const max_doc_put_bytes = 512 << 10;
 
 pub fn serve(arena: std.mem.Allocator, io: Io, w: *Io.Writer, st: *Store, b: domain.Binding, allow_delete: bool) !void {
-    var in_buf: [1 << 20]u8 = undefined;
+    // A doc_put body of 512 KiB escapes to well over 1 MiB on the wire.
+    var in_buf: [4 << 20]u8 = undefined;
     var in: Io.File.Reader = .init(.stdin(), io, &in_buf);
+    // Everything a single request allocates comes from here, so a long session
+    // does not grow the process arena.
+    var req_state = std.heap.ArenaAllocator.init(arena);
+    defer req_state.deinit();
     while (true) {
         // takeDelimiterExclusive is broken in 0.17.0; trim inclusive instead.
         const raw = in.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
             error.EndOfStream => break,
+            error.StreamTooLong => {
+                try sendError(w, null, -32600, "Request too large");
+                return error.StreamTooLong;
+            },
             else => return err,
         };
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0) continue;
-        const parsed = std.json.parseFromSlice(std.json.Value, arena, line, .{}) catch continue;
+        _ = req_state.reset(.retain_capacity);
+        const req = req_state.allocator();
+        const parsed = std.json.parseFromSlice(std.json.Value, req, line, .{}) catch {
+            try sendError(w, null, -32700, "Parse error");
+            continue;
+        };
         const msg = switch (parsed.value) {
             .object => |o| o,
-            else => continue,
+            else => {
+                try sendError(w, null, -32600, "Invalid Request");
+                continue;
+            },
         };
         const method = blk: {
             const m = msg.get("method") orelse break :blk "";
@@ -51,6 +68,7 @@ pub fn serve(arena: std.mem.Allocator, io: Io, w: *Io.Writer, st: *Store, b: dom
         const id = msg.get("id");
         const params: ?std.json.Value = msg.get("params");
         if (std.mem.startsWith(u8, method, "notifications/")) continue;
+        if (id == null) continue;
 
         if (std.mem.eql(u8, method, "initialize")) {
             var requested: []const u8 = "2025-06-18";
