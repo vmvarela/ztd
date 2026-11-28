@@ -123,28 +123,6 @@ pub fn sha256hex(s: []const u8) [64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
-/// The idempotency contract: same key and same payload replays the stored
-/// JSON; same key with another payload is idempotency_conflict.
-pub fn lookupIdem(
-    stmt: *sqlite.Statement,
-    key: []const u8,
-    hash: []const u8,
-) errors.Ztd!?[]const u8 {
-    try stmt.bindText(1, key);
-    if (!try stmt.step()) {
-        stmt.reset();
-        return null;
-    }
-    const stored_hash = stmt.text(0);
-    const result = stmt.text(1);
-    // The stored JSON lives in SQLite's buffer until the statement is reset,
-    // so copy it before that happens.
-    if (!std.mem.eql(u8, stored_hash, hash)) {
-        return errors.fail(.idempotency_conflict, "idempotency key \"{s}\" was already used with a different payload", .{key});
-    }
-    return result;
-}
-
 /// Returns the first unused numeric suffix after prefix, e.g. "T-20261119-".
 pub fn nextDailySeq(db: sqlite.Db, table: []const u8, prefix: []const u8) errors.Ztd!i64 {
     var sql_buf: [160]u8 = undefined;

@@ -966,3 +966,28 @@ fn toolDeleteSource(a: std.mem.Allocator, st: *Store, b: domain.Binding, args: ?
     try o.end();
     return aw.written();
 }
+
+test "the delete bundle is the default bundle plus delete_source" {
+    // Two hand-maintained files drift; this is the check that catches it.
+    const a = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(a);
+    defer arena_state.deinit();
+    const ar = arena_state.allocator();
+
+    const base = try std.json.parseFromSlice(std.json.Value, ar, tools_default, .{});
+    const with_delete = try std.json.parseFromSlice(std.json.Value, ar, tools_delete, .{});
+    const base_tools = base.value.object.get("tools").?.array.items;
+    const del_tools = with_delete.value.object.get("tools").?.array.items;
+    try std.testing.expectEqual(base_tools.len + 1, del_tools.len);
+
+    var names = std.StringHashMap(void).init(ar);
+    for (base_tools) |tool| try names.put(tool.object.get("name").?.string, {});
+    var extra: ?[]const u8 = null;
+    for (del_tools) |tool| {
+        const name = tool.object.get("name").?.string;
+        if (names.contains(name)) continue;
+        try std.testing.expect(extra == null);
+        extra = name;
+    }
+    try std.testing.expectEqualStrings("delete_source", extra.?);
+}

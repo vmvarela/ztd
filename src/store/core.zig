@@ -388,10 +388,6 @@ pub fn capture(s: *Store, a: std.mem.Allocator, cmd: CaptureCmd, now: Timestamp)
     var hash_req = std.Io.Writer.Allocating.init(a);
     try writeCaptureRequest(&hash_req.writer, 2, cmd, cmd.source_id);
     const hash = sha256hex(hash_req.written());
-    var legacy_req = std.Io.Writer.Allocating.init(a);
-    try writeCaptureRequest(&legacy_req.writer, 2, cmd, "manual");
-    const legacy_hash = sha256hex(legacy_req.written());
-    _ = legacy_hash;
 
     try s.begin();
     errdefer s.rollback();
@@ -683,8 +679,6 @@ fn writeCaptureRequest(w: *std.Io.Writer, version: i64, cmd: CaptureCmd, source:
     try writeOptString(&inner, "ExternalRev", cmd.external_rev);
     try writeOptString(&inner, "SourceURI", cmd.source_uri);
     if (cmd.occurred_at) |t| {
-        const buf = std.fmt.allocPrint(std.heap.page_allocator, "", .{}) catch unreachable;
-        _ = buf;
         var tb: [20]u8 = undefined;
         try inner.str("OccurredAt", timeutil.fmtTime(t, &tb));
     } else {
@@ -1485,8 +1479,6 @@ pub fn setGoal(s: *Store, a: std.mem.Allocator, cmd_in: GoalCmd, now: Timestamp)
     }
     if (trimmed(cmd_in.statement).len == 0) return errors.invalid("goal statement is required", .{});
     var cmd = cmd_in;
-    const date_buf = try idDate(a, now);
-    _ = date_buf;
     if (cmd.start_on.len == 0) {
         var dbuf: [10]u8 = undefined;
         cmd.start_on = try dup(a, timeutil.localDate(now, &dbuf));
@@ -3290,41 +3282,6 @@ fn ftsQuery(a: std.mem.Allocator, query: []const u8) ![]const u8 {
     return aw.written();
 }
 
-pub fn searchDocuments(s: *Store, a: std.mem.Allocator, b: domain.Binding, query: []const u8, kind: []const u8, limit: i64) ![]const DocumentSearchHit {
-    try validateBinding(b);
-    const match = try ftsQuery(a, query);
-    if (match.len == 0) return errors.invalid("search query is required", .{});
-    if (kind.len > 0 and !validDocumentKind(kind)) return errors.invalid("unknown document kind \"{s}\"", .{kind});
-    const n: i64 = if (limit <= 0) 10 else if (limit > 50) 50 else limit;
-
-    var sql_buf = std.Io.Writer.Allocating.init(a);
-    try sql_buf.writer.print(
-        "SELECT " ++ joined_document_columns ++ ", bm25(documents_fts), snippet(documents_fts, 5, '[', ']', '…', 20) " ++
-            "FROM documents_fts JOIN documents ON documents.id = documents_fts.doc_id " ++
-            "WHERE documents_fts MATCH ? AND documents_fts.scope_id IN ({s})",
-        .{try scopeFilter(a, b.scopes.len)},
-    );
-    if (kind.len > 0) try sql_buf.writer.writeAll(" AND documents_fts.kind = ?");
-    try sql_buf.writer.writeAll(" ORDER BY bm25(documents_fts) ASC, documents.kind, documents.slug LIMIT ?");
-    var q = try s.db.prepare(sql_buf.written());
-    defer q.finalize();
-    try q.bindText(1, match);
-    var idx = try scopeArgs(q, 2, b);
-    if (kind.len > 0) {
-        try q.bindText(idx, kind);
-        idx += 1;
-    }
-    try q.bindInt(idx, n);
-    var out: std.ArrayList(DocumentSearchHit) = .empty;
-    while (try q.step()) {
-        try out.append(a, .{
-            .document = try scanDocument(a, q),
-            .rank = q.real(17),
-            .snippet = try dup(a, q.text(18)),
-        });
-    }
-    return out.items;
-}
 
 pub const DocumentLogEntry = struct {
     seq: i64,
@@ -5362,7 +5319,7 @@ fn linkMeasured(s: *Store, a: std.mem.Allocator, b: domain.Binding, kind: []cons
     }
     const range = try periodRange(a, kind, period);
     var q = try s.db.prepare(
-        "SELECT DISTINCT w.project_id, w.project_id FROM plan_items pi JOIN plans p ON p.id = pi.plan_id " ++
+        "SELECT DISTINCT w.project_id FROM plan_items pi JOIN plans p ON p.id = pi.plan_id " ++
             "JOIN work_items w ON w.id = pi.work_item_id " ++
             "WHERE p.profile_id = ? AND p.kind = 'daily' AND p.period >= ? AND p.period <= ? AND w.project_id IS NOT NULL",
     );

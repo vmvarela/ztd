@@ -93,10 +93,7 @@ pub const Db = struct {
         try self.execClassified("BEGIN IMMEDIATE");
     }
 
-    pub fn beginStmt(self: Db) errors.Ztd!void {
-        try self.begin();
-    }
-
+    
     pub fn commit(self: Db) errors.Ztd!void {
         try self.execClassified("COMMIT");
     }
@@ -107,10 +104,7 @@ pub const Db = struct {
         _ = c.sqlite3_exec(self.handle, "ROLLBACK", null, null, null);
     }
 
-    pub fn lastInsertRowid(self: Db) i64 {
-        return c.sqlite3_last_insert_rowid(self.handle);
-    }
-
+    
     /// Number of rows changed by the most recent INSERT/UPDATE/DELETE, used to
     /// detect a concurrent writer that invalidated a revision guard.
     pub fn changes(self: Db) i64 {
