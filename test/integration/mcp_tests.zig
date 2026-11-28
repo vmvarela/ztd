@@ -1156,26 +1156,44 @@ pub fn testMCPDocPut(ctx: *Ctx) anyerror!void {
         return ctx.fatal("opensource doc get = {s}, want the written body", .{harness.dump(ctx.arena, json.Value{ .string = osGot.body })});
 
     // Draft-only write cannot change a non-draft document.
-    const seeded_cases = [_]struct { slug: []const u8, status: []const u8, body: []const u8 }{
-        .{ .slug = "komorebi/verified-card", .status = "verified", .body = "verified body" },
-        .{ .slug = "komorebi/superseded-card", .status = "superseded", .body = "superseded body" },
+    const seeded_cases = [_]struct { slug: []const u8, status: []const u8, body: []const u8, superseded: bool }{
+        .{ .slug = "komorebi/verified-card", .status = "verified", .body = "verified body", .superseded = false },
+        .{ .slug = "komorebi/superseded-card", .status = "superseded", .body = "superseded body", .superseded = true },
     };
     for (seeded_cases) |tc| {
-        _ = try ctx.wantOK(try ctx.run(db, &.{
-            "doc",     "put",   "--kind", "knowledge", "--slug",   tc.slug,
-            "--title", tc.slug, "--body", tc.body,     "--status", tc.status,
-        }), "doc put");
+        if (tc.superseded) {
+            // Only `doc supersede` may mark a document superseded.
+            const successor = try std.fmt.allocPrint(ctx.arena, "{s}-next", .{tc.slug});
+            _ = try ctx.wantOK(try ctx.run(db, &.{
+                "doc",     "put",    "--kind", "knowledge", "--slug",   tc.slug,
+                "--title", tc.slug,  "--body", tc.body,
+            }), "doc put");
+            _ = try ctx.wantOK(try ctx.run(db, &.{
+                "doc",     "put",    "--kind", "knowledge", "--slug",   successor,
+                "--title", successor, "--body", "successor body",
+            }), "doc put");
+            _ = try ctx.wantOK(try ctx.run(db, &.{
+                "doc", "supersede", "--kind", "knowledge", tc.slug, successor,
+            }), "doc supersede");
+        } else {
+            _ = try ctx.wantOK(try ctx.run(db, &.{
+                "doc",     "put",   "--kind", "knowledge", "--slug",   tc.slug,
+                "--title", tc.slug, "--body", tc.body,     "--status", tc.status,
+            }), "doc put");
+        }
         const seeded = try ctx.decode(Document, try ctx.wantOK(try ctx.run(db, &.{
             "doc", "get", "--kind", "knowledge", "--slug", tc.slug,
         }), "doc get"));
+        const want_rev: i64 = if (tc.superseded) 2 else 1;
         if (!std.mem.eql(u8, seeded.status, tc.status) or !std.mem.eql(u8, seeded.body, tc.body) or
-            seeded.revision != 1)
-            return ctx.fatal("seeded {s} = {s}, want {s} revision 1", .{ tc.slug, seeded.status, tc.status });
+            seeded.revision != want_rev)
+            return ctx.fatal("seeded {s} = {s} revision {d}, want {s} revision {d}", .{ tc.slug, seeded.status, seeded.revision, tc.status, want_rev });
         const seedLog = try ctx.decode([]LogEntry, try ctx.wantOK(try ctx.run(db, &.{
             "doc", "log", "--slug", tc.slug,
         }), "doc log"));
-        if (seedLog.len != 1)
-            return ctx.fatal("seed history for {s} = {d} entries, want one created event", .{ tc.slug, seedLog.len });
+        const want_events: usize = if (tc.superseded) 2 else 1;
+        if (seedLog.len != want_events)
+            return ctx.fatal("seed history for {s} = {d} entries, want {d}", .{ tc.slug, seedLog.len, want_events });
 
         const res = try call(ctx, cs, "doc_put", try mcp.obj(ctx.arena, &.{
             .{ "slug", mcp.val(tc.slug) },
@@ -1198,8 +1216,8 @@ pub fn testMCPDocPut(ctx: *Ctx) anyerror!void {
         const afterLog = try ctx.decode([]LogEntry, try ctx.wantOK(try ctx.run(db, &.{
             "doc", "log", "--slug", tc.slug,
         }), "doc log"));
-        if (afterLog.len != 1)
-            return ctx.fatal("history for {s} after refused write = {d} entries, want still one created event", .{ tc.slug, afterLog.len });
+        if (afterLog.len != want_events)
+            return ctx.fatal("history for {s} after refused write = {d} entries, want still {d}", .{ tc.slug, afterLog.len, want_events });
     }
 
     // Two-step capture flow: a failed draft write leaves the capture pending,

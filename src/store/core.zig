@@ -2939,6 +2939,11 @@ fn validateDocumentCmd(cmd: DocumentCmd) !void {
     if (!validDocumentStatus(cmd.status)) {
         return errors.invalid("unknown document status \"{s}\" (want draft, verified or superseded)", .{cmd.status});
     }
+    // Superseded is a verdict produced by `doc supersede`, never a plain write:
+    // setting it directly can leave a dead document or two live versions.
+    if (std.mem.eql(u8, cmd.status, "superseded")) {
+        return errors.invalid("use `doc supersede OLD NEW` to supersede a document", .{});
+    }
     if (!validDocumentSlug(cmd.slug)) {
         return errors.invalid("document slug must be non-empty and use only letters, digits, -, _, / and .", .{});
     }
@@ -3032,6 +3037,9 @@ pub fn putDocument(s: *Store, a: std.mem.Allocator, cmd: DocumentCmd, now: Times
         if (cmd.draft_only and !std.mem.eql(u8, e.status, "draft")) {
             return errors.fail(.invalid_transition, "document {s}/{s} is {s}, so a draft-only write cannot update it", .{ cmd.kind, cmd.slug, e.status });
         }
+        if (std.mem.eql(u8, e.status, "superseded")) {
+            return errors.fail(.invalid_transition, "document {s}/{s} is superseded; write its successor instead", .{ cmd.kind, cmd.slug });
+        }
         break :blk "updated";
     } else blk: {
         if (cmd.expected != 0) {
@@ -3043,7 +3051,14 @@ pub fn putDocument(s: *Store, a: std.mem.Allocator, cmd: DocumentCmd, now: Times
     const rec_kind: ?[]const u8 = if (cmd.record_kind.len > 0) try dup(a, cmd.record_kind) else if (existing) |e| e.record_kind else null;
     const rationale: ?[]const u8 = if (cmd.rationale.len > 0) try dup(a, cmd.rationale) else if (existing) |e| e.rationale else null;
     const options: ?[]const u8 = if (cmd.options_json.len > 0) try dup(a, cmd.options_json) else if (existing) |e| e.options_json else null;
-    const approved_by: ?[]const u8 = if (cmd.approved_by.len > 0) try dup(a, cmd.approved_by) else if (existing) |e| e.approved_by else null;
+    // An approval covers the exact body that was approved, nothing else.
+    const same_body = if (existing) |e| std.mem.eql(u8, e.body, cmd.body) else false;
+    const approved_by: ?[]const u8 = if (cmd.approved_by.len > 0)
+        try dup(a, cmd.approved_by)
+    else if (existing) |e|
+        (if (same_body) e.approved_by else null)
+    else
+        null;
     const valid_from: ?[]const u8 = if (cmd.valid_from.len > 0) try dup(a, cmd.valid_from) else if (existing) |e| e.valid_from else null;
     const approved_at: ?[]const u8 = if (approved_by != null and std.mem.eql(u8, cmd.status, "verified")) now_s else null;
     if (approved_by == null and std.mem.eql(u8, cmd.status, "verified") and
