@@ -365,7 +365,6 @@ pub fn dump(io: std.Io, a: std.mem.Allocator, db_path: []const u8, sys_tmp: []co
         };
         if (std.mem.startsWith(u8, name, "sqlite_") or
             std.mem.indexOf(u8, name, "_fts") != null or
-            std.mem.eql(u8, name, "links") or
             std.mem.eql(u8, name, "knowledge_records"))
             continue;
         const rootpage: u32 = switch (mrow.items[3]) {

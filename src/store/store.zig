@@ -315,3 +315,61 @@ fn migrateKnowledge(s: *Store) errors.Ztd!void {
     }
     try s.db.exec("DROP TABLE knowledge_records");
 }
+
+test "an existing v7 database upgrades in place with its rows" {
+    // The upgrade path (0009 rebuilds `sources`, 0010 copies knowledge) is the
+    // only code that can destroy user data, so it runs here on real rows.
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var f = try tmp.dir.createFile(io, "ztd.db", .{});
+        f.close(io);
+    }
+    const path = try tmp.dir.realPathFileAlloc(io, "ztd.db", a);
+    defer a.free(path);
+
+    {
+        const zpath = try a.dupeSentinel(u8, path, 0);
+        defer a.free(zpath);
+        var db = try sqlite.Db.open(zpath);
+        defer db.close();
+        for (migrations[0..7]) |m| try db.exec(m.sql);
+        try db.exec(
+            \\INSERT INTO scopes (id, name, kind, created_at) VALUES ('personal','Personal','personal','2026-01-01T00:00:00Z');
+            \\INSERT INTO profiles (id, name, kind, owner_actor_id, timezone, status) VALUES ('personal','Personal','personal','me','UTC','active');
+            \\INSERT INTO sources (id,name,scope_id,kind,connector,provider,connection_ref,non_secret_query,cadence,auth_state,coverage_state,cursor,created_at,updated_at)
+            \\  VALUES ('feed','Feed','personal','capture','manual','','','','','unknown','unknown','','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+            \\INSERT INTO source_reviews (id,source_id,batch_id,idempotency_key,request_hash,result_kind,coverage_state,retrieval_json,created_at)
+            \\  VALUES ('SR-20260101-001','feed','b1','k1','h','reported','unverified','{}','2026-01-01T00:00:00Z');
+            \\INSERT INTO captures (id,scope_id,source_id,external_id,external_revision,original_text,content_hash,captured_at,processing_state,revision)
+            \\  VALUES ('C-20260101-001','personal','feed','e1','1','old capture','hash','2026-01-01T00:00:00Z','pending',1);
+            \\INSERT INTO knowledge_records (id,scope_id,kind,text,state,review_state,revision,created_at)
+            \\  VALUES ('K1','personal','fact','Revisar café','current','draft',1,'2026-01-01T00:00:00Z');
+            \\INSERT INTO knowledge_records (id,scope_id,kind,text,state,review_state,supersedes_id,revision,created_at)
+            \\  VALUES ('K2','personal','fact','Revisar café otra vez','current','draft','K1',1,'2026-01-02T00:00:00Z');
+            \\PRAGMA user_version = 7;
+        );
+    }
+
+    var s = try Store.open(path);
+    defer s.close();
+    try std.testing.expectEqual(@as(i64, 12), try s.userVersion());
+
+    var q = try s.db.prepare("SELECT count(*) FROM captures WHERE id = 'C-20260101-001'");
+    try std.testing.expect(try q.step());
+    try std.testing.expectEqual(@as(i64, 1), q.int(0));
+    q.finalize();
+
+    q = try s.db.prepare("SELECT title, supersedes_id FROM documents WHERE id = 'K2'");
+    try std.testing.expect(try q.step());
+    try std.testing.expectEqualStrings("Revisar café otra vez", q.text(0));
+    try std.testing.expectEqualStrings("K1", q.text(1));
+    q.finalize();
+
+    q = try s.db.prepare("SELECT reported_cursor FROM sources WHERE id = 'feed'");
+    try std.testing.expect(try q.step());
+    try std.testing.expectEqualStrings("", q.text(0));
+    q.finalize();
+}

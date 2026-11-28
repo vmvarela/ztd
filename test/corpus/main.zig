@@ -19,6 +19,12 @@ pub fn main(init: process.Init) !void {
     const env = init.environ_map;
 
     const update = std.mem.eql(u8, env.get("ZTD_UPDATE") orelse "", "1");
+    // Recording rewrites the oracle and reports success, so it must never be a
+    // stray environment variable in CI (it once was in a shell profile).
+    if (update and env.get("CI") != null) {
+        std.debug.print("corpus: refusing ZTD_UPDATE=1 under CI; record locally and commit the goldens\n", .{});
+        std.process.exit(1);
+    }
     const sys_tmp = env.get("TMPDIR") orelse "/tmp";
     const bin = resolveBin(io, gpa, a, args, env) orelse std.process.exit(1);
 

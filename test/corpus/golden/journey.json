@@ -1400,6 +1400,53 @@
     ],
     "import_runs": null,
     "legacy_records": null,
+    "links": [
+      {
+        "created_at": "<ts>",
+        "from_id": "<cid>",
+        "from_type": "capture",
+        "relation": "produced",
+        "scope_id": "personal",
+        "to_id": "<tid>",
+        "to_type": "work_item"
+      },
+      {
+        "created_at": "<ts>",
+        "from_id": "P-personal-weekly-<week>",
+        "from_type": "plan",
+        "relation": "produced",
+        "scope_id": "personal",
+        "to_id": "<tid>",
+        "to_type": "work_item"
+      },
+      {
+        "created_at": "<ts>",
+        "from_id": "<tid>",
+        "from_type": "work_item",
+        "relation": "produced",
+        "scope_id": "personal",
+        "to_id": "<fid>",
+        "to_type": "focus_session"
+      },
+      {
+        "created_at": "<ts>",
+        "from_id": "<fid>",
+        "from_type": "focus_session",
+        "relation": "produced",
+        "scope_id": "personal",
+        "to_id": "<cpid>",
+        "to_type": "checkpoint"
+      },
+      {
+        "created_at": "<ts>",
+        "from_id": "<srid>",
+        "from_type": "source_review",
+        "relation": "produced",
+        "scope_id": "personal",
+        "to_id": "<cid>",
+        "to_type": "capture"
+      }
+    ],
     "plan_items": [
       {
         "plan_id": "P-personal-weekly-<week>",
