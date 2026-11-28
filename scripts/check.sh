@@ -1,7 +1,7 @@
 #!/bin/sh
 # Full check for the Zig product and its Zig conformance harness.
 set -eu
-zig=${ZIG:-/Users/victor/bin/zig}
+zig=${ZIG:-zig}
 
 "$zig" fmt --check src test build.zig
 "$zig" build --release=fast

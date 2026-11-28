@@ -39,8 +39,9 @@ try {
     Write-Host "ztd: installed $(Join-Path $InstallDir 'ztd.exe')"
 
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if (($userPath -split ";") -notcontains $InstallDir) {
-        [Environment]::SetEnvironmentVariable("Path", "$userPath;$InstallDir", "User")
+    if (($userPath -split ";" | Where-Object { $_ }) -notcontains $InstallDir) {
+        $newPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
+        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
         Write-Host "ztd: added $InstallDir to the user PATH"
     }
 }

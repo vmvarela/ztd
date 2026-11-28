@@ -458,7 +458,7 @@ read.
   a no-op; a different configuration is `conflict`. `--repo-url` must be an
   absolute URL without credentials, and `--clone-path`, when set, must be an
   absolute path with no `..` segment.
-- `migrate documents --source COPY [--mapping FILE] [--workspace DIR]
+- `migrate` (archived Go build only, tag `v2-go-final`) documents --source COPY [--mapping FILE] [--workspace DIR]
   [--dry-run]` fills this layer from a verified copy of the legacy Markdown
   store before the skills are ported: each file becomes one `verified`
   document named by its first `# ` heading, ambiguous or invalid files are
@@ -492,5 +492,5 @@ read.
 - Sources are registered and batches are fed by hand: no connector contacts a
   provider, and nothing runs in the background.
 - There are no background reminders, no daemon and no web UI.
-- The legacy Markdown store is read-only and only through `migrate import`
-  and `migrate documents`.
+- The legacy Markdown store is read-only, and only the archived Go build
+  (tag `v2-go-final`) can import it; this binary has no `migrate` command.

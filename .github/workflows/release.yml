@@ -659,6 +659,9 @@ jobs:
     name: Update WinGet manifest
     needs: publish-release
     runs-on: ubuntu-latest
+    # The action only updates an existing package; the first manifest is sent by
+    # hand, so this job must not fail the release before that happens.
+    continue-on-error: true
     env:
       HAS_WINGET_TOKEN: ${{ secrets.PACKAGE_DISTRIBUTION_TOKEN != '' }}
     steps:

@@ -116,8 +116,9 @@ COMMANDS
 	*export --out FILE* | *restore --from FILE* | *snapshot --out FILE*
 	*recover*
 		Compatibility no-op; SQLite has no Markdown journal.
-	*migrate import|verify --source COPY --legacy-check ok*
-	*migrate documents --source COPY* [--mapping FILE] [--workspace DIR] [--dry-run]
+	*migrate*
+		Not in this binary: the Markdown importer ships with the archived Go
+		build, tagged v2-go-final.
 	*version*
 		Print the version.
 	*mcp* [--scope S] [--allow-delete-source]

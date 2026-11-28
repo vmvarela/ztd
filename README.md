@@ -163,13 +163,17 @@ one of them and is rejected when it is outside that view.
 | `move` | Move a work item between `next`, `waiting`, `someday` and `archive`, with `--field` custom fields |
 | `status` | Report database, profile, actor, scopes and the `.ztd.json` binding hint |
 | `due`, `routine done`, `routine add` | Aliases of `routines due`, `routines done` and `routines add` |
-| `migrate import\|verify` | Import a verified copy of the legacy store |
-| `migrate documents` | Populate the document layer and project repositories from a verified legacy copy |
+| `trace` | Walk the provenance edges around one id |
+| `override add` | Record the daily-limit exception a plan needs |
+| `learn propose` | Turn a review into a draft knowledge card |
+| `doc supersede` | Mark one document as superseded by another |
+| `source scan` | Read a directory source as an observed batch |
+| `review show`, `review --derive` | Read or derive the metrics of a period |
 | `mcp` | Run the local stdio MCP server for an agent |
 | `export`, `restore`, `snapshot` | Move and preserve the database |
 | `check` | Verify database invariants, or validate the `.ztd.json` routing hint with `--bindings` |
 
-Run `./ztd <command> -h` for flags.
+Run `ztd --help` for the command list; each command rejects unknown flags with `invalid_input`.
 
 ## Documentation
 
