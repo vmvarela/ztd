@@ -1165,11 +1165,11 @@ pub fn testMCPDocPut(ctx: *Ctx) anyerror!void {
             // Only `doc supersede` may mark a document superseded.
             const successor = try std.fmt.allocPrint(ctx.arena, "{s}-next", .{tc.slug});
             _ = try ctx.wantOK(try ctx.run(db, &.{
-                "doc",     "put",    "--kind", "knowledge", "--slug",   tc.slug,
-                "--title", tc.slug,  "--body", tc.body,
+                "doc",     "put",   "--kind", "knowledge", "--slug", tc.slug,
+                "--title", tc.slug, "--body", tc.body,
             }), "doc put");
             _ = try ctx.wantOK(try ctx.run(db, &.{
-                "doc",     "put",    "--kind", "knowledge", "--slug",   successor,
+                "doc",     "put",     "--kind", "knowledge",      "--slug", successor,
                 "--title", successor, "--body", "successor body",
             }), "doc put");
             _ = try ctx.wantOK(try ctx.run(db, &.{
