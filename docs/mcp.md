@@ -211,6 +211,10 @@ narrated confidently.
   `not_found` result, byte for byte.
 - `commit_plan` still requires an override when a day exceeds three MITs;
   that path returns `rules_acknowledgement_required`.
+- For `commit_plan`, omit `expected_revision` or set it to `0` to create a
+  plan. To replace a plan, pass its current revision as an integer and use a
+  binding that can see every existing item. `prepare` only shows visible items;
+  its result may be a partial view of the plan.
 
 OpenCode permission keys use the `server_tool` form, for example
 `ztd_commit_plan`. The deny/allow check was verified on OpenCode 2.3.2 with

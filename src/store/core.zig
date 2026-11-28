@@ -2,7 +2,6 @@
 //! idempotency, history and id-sequence helpers.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const sqlite = @import("../sqlite.zig");
 const errors = @import("../errors.zig");
 const timeutil = @import("../timeutil.zig");
@@ -388,14 +387,29 @@ pub fn capture(s: *Store, a: std.mem.Allocator, cmd: CaptureCmd, now: Timestamp)
     var hash_req = std.Io.Writer.Allocating.init(a);
     try writeCaptureRequest(&hash_req.writer, 2, cmd, cmd.source_id);
     const hash = sha256hex(hash_req.written());
+    var legacy_req = std.Io.Writer.Allocating.init(a);
+    try writeCaptureRequest(&legacy_req.writer, 0, cmd, if (cmd.source_id.len == 0) "manual" else cmd.source_id);
+    const legacy_hash = sha256hex(legacy_req.written());
 
     try s.begin();
     errdefer s.rollback();
 
-    const replay = try lookupIdemStmt(s, a, "capture", cmd.key, &hash);
-    if (replay) |result| {
-        try s.commit();
-        return parseCaptureResult(a, result);
+    {
+        var q = try s.db.prepare("SELECT request_hash, result_json FROM idempotency_records WHERE command = 'capture' AND idempotency_key = ?");
+        defer q.finalize();
+        try q.bindText(1, cmd.key);
+        if (try q.step()) {
+            const cap = try parseCaptureResult(a, q.text(1));
+            const legacy_source = if (cmd.source_id.len == 0)
+                std.mem.eql(u8, cap.source_id, "manual") or std.mem.eql(u8, cap.source_id, "MANUAL")
+            else
+                std.mem.eql(u8, cap.source_id, cmd.source_id);
+            if (!std.mem.eql(u8, q.text(0), &hash) and
+                !(std.mem.eql(u8, q.text(0), &legacy_hash) and legacy_source))
+                return errors.fail(.idempotency_conflict, "idempotency key \"{s}\" was already used with a different payload", .{cmd.key});
+            try s.commit();
+            return cap;
+        }
     }
 
     if (cmd.source_id.len != 0) {
@@ -653,33 +667,14 @@ fn lookupLegacyIdem(
     key: []const u8,
     hash: *const [64]u8,
 ) !?[]const u8 {
-    var stored: ?[]const u8 = null;
-    var superseded = false;
-    {
-        var stmt = try s.db.prepare(
-            "SELECT request_hash, result_json FROM idempotency_records WHERE command = ? AND idempotency_key = ?",
-        );
-        defer stmt.finalize();
-        try stmt.bindText(1, command);
-        try stmt.bindText(2, key);
-        if (try stmt.step()) {
-            if (std.mem.eql(u8, stmt.text(0), hash)) {
-                stored = try dup(a, stmt.text(1));
-            } else {
-                superseded = true;
-            }
-        }
-    }
-    if (superseded) {
-        // The request moved on: drop the pre-split row so a later retry of the
-        // old payload cannot replay a revision the store has superseded.
-        var del = try s.db.prepare("DELETE FROM idempotency_records WHERE command = ? AND idempotency_key = ?");
-        defer del.finalize();
-        try del.bindText(1, command);
-        try del.bindText(2, key);
-        _ = try del.step();
-    }
-    return stored;
+    var stmt = try s.db.prepare(
+        "SELECT request_hash, result_json FROM idempotency_records WHERE command = ? AND idempotency_key = ?",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, command);
+    try stmt.bindText(2, key);
+    if (try stmt.step() and std.mem.eql(u8, stmt.text(0), hash)) return try dup(a, stmt.text(1));
+    return null;
 }
 
 pub fn writeIdem(
@@ -707,24 +702,34 @@ pub fn writeIdem(
 }
 
 fn writeCaptureRequest(w: *std.Io.Writer, version: i64, cmd: CaptureCmd, source: []const u8) !void {
+    if (version == 0) {
+        var o = try jsonw.Obj.init(w);
+        try writeCaptureFields(&o, cmd, source);
+        try o.end();
+        return;
+    }
     var o = try jsonw.Obj.init(w);
     try o.int("Version", version);
     var inner = try o.obj("Cmd");
-    try writeBinding(&inner, cmd.binding);
+    try writeCaptureFields(&inner, cmd, source);
+    try inner.end();
+    try o.end();
+}
+
+fn writeCaptureFields(inner: *jsonw.Obj, cmd: CaptureCmd, source: []const u8) !void {
+    try writeBinding(inner, cmd.binding);
     try inner.str("Key", cmd.key);
     try inner.str("Text", cmd.text);
     try inner.str("SourceID", source);
-    try writeOptString(&inner, "ExternalID", cmd.external_id);
-    try writeOptString(&inner, "ExternalRev", cmd.external_rev);
-    try writeOptString(&inner, "SourceURI", cmd.source_uri);
+    try writeOptString(inner, "ExternalID", cmd.external_id);
+    try writeOptString(inner, "ExternalRev", cmd.external_rev);
+    try writeOptString(inner, "SourceURI", cmd.source_uri);
     if (cmd.occurred_at) |t| {
         var tb: [20]u8 = undefined;
         try inner.str("OccurredAt", timeutil.fmtTime(t, &tb));
     } else {
         try inner.raw("OccurredAt", "null");
     }
-    try inner.end();
-    try o.end();
 }
 
 pub fn writeBinding(o: *jsonw.Obj, b: domain.Binding) !void {
@@ -1426,6 +1431,33 @@ test "capture writes one pending row and replays idempotently" {
     try std.testing.expectEqual(errors.Family.idempotency_conflict, errors.getFamily());
 }
 
+test "capture pre-split replay keeps source identity" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    _ = try applyConfig(&s, a, &.{.{ .id = "personal", .kind = "personal" }}, &.{
+        .{ .id = "personal", .kind = "personal", .actor = "tester", .scopes = &.{"personal"} },
+    }, 1_700_000_000);
+    const b = domain.Binding{ .profile = "personal", .actor = "tester", .scopes = &.{"personal"} };
+    const cmd = CaptureCmd{ .binding = b, .key = "legacy", .text = "hello" };
+    const original = try capture(&s, a, cmd, 1_700_000_000);
+    var request = std.Io.Writer.Allocating.init(a);
+    try writeCaptureRequest(&request.writer, 0, cmd, "manual");
+    const legacy_hash = sha256hex(request.written());
+    var update = try s.db.prepare("UPDATE idempotency_records SET request_hash = ? WHERE command = 'capture' AND idempotency_key = 'legacy'");
+    defer update.finalize();
+    try update.bindText(1, &legacy_hash);
+    _ = try update.step();
+    const replay = try capture(&s, a, cmd, 1_700_000_000);
+    try std.testing.expectEqualStrings(original.id, replay.id);
+    var explicit = cmd;
+    explicit.source_id = "manual";
+    try std.testing.expectError(error.Ztd, capture(&s, a, explicit, 1_700_000_000));
+    try std.testing.expectEqual(errors.Family.idempotency_conflict, errors.getFamily());
+}
+
 // ---------------------------------------------------------------- goals
 
 const goal_columns = "id, profile_id, kind, start_on, end_on, statement, status";
@@ -1773,10 +1805,16 @@ pub fn prepare(s: *Store, a: std.mem.Allocator, b: domain.Binding, date_in: []co
     const sources = try listSources(s, a, b);
     if (sources.len > 0) brief.sources = sources;
     if (try loadPlan(s, a, b.profile, "daily", date)) |p| {
-        brief.plan = p;
+        var visible = std.ArrayList(domain.PlanItem).empty;
+        for (p.items) |it| {
+            if (try entityVisible(s, b, "work_item", it.work_item_id)) try visible.append(a, it);
+        }
+        var scoped = p;
+        scoped.items = visible.items;
+        brief.plan = scoped;
         var mits = std.ArrayList(domain.WorkItem).empty;
         var cps = std.ArrayList(domain.Checkpoint).empty;
-        for (p.items) |it| {
+        for (scoped.items) |it| {
             if (!std.mem.eql(u8, it.role, "mit")) continue;
             const item = getWorkItem(s, a, b, it.work_item_id) catch |e| {
                 if (errors.getFamily() == .not_found) continue;
@@ -1924,12 +1962,6 @@ pub fn commitPlan(s: *Store, a: std.mem.Allocator, cmd: CommitPlanCmd, decision:
     errdefer s.rollback();
     if (decision.len > 0) try requireDecision(s, decision, cmd.binding.scopes[0]);
 
-    if (try lookupIdemStmt(s, a, "commit_plan", cmd.key, &hash)) |stored| {
-        try s.commit();
-        const parsed = std.json.parseFromSlice(std.json.Value, a, stored, .{}) catch
-            return errors.fail(.io_error, "stored result is unreadable", .{});
-        return planFromValue(a, parsed.value);
-    }
     const owned = profileScopes(s, a, cmd.binding.profile) catch |e| {
         if (errors.getFamily() == .not_found) return errors.fail(.not_found, "profile {s} not found", .{cmd.binding.profile});
         return e;
@@ -1941,10 +1973,25 @@ pub fn commitPlan(s: *Store, a: std.mem.Allocator, cmd: CommitPlanCmd, decision:
         };
         if (!found) return errors.fail(.scope_denied, "scope {s} is not part of profile {s}", .{ sc, cmd.binding.profile });
     }
+    if (try lookupIdemStmt(s, a, "commit_plan", cmd.key, &hash)) |stored| {
+        const parsed = std.json.parseFromSlice(std.json.Value, a, stored, .{}) catch
+            return errors.fail(.io_error, "stored result is unreadable", .{});
+        const plan = try planFromValue(a, parsed.value);
+        for (plan.items) |it| {
+            if (!try entityVisible(s, cmd.binding, "work_item", it.work_item_id))
+                return errors.fail(.scope_denied, "plan contains items outside this binding", .{});
+        }
+        try s.commit();
+        return plan;
+    }
     const existing = try loadPlan(s, a, cmd.binding.profile, cmd.kind, cmd.period);
     if (existing) |p| {
-        if (cmd.expected != 0 and cmd.expected != p.revision) {
+        if (cmd.expected != p.revision) {
             return errors.fail(.stale_revision, "plan {s} is at revision {d}, expected {d}", .{ p.id, p.revision, cmd.expected });
+        }
+        for (p.items) |it| {
+            if (!try entityVisible(s, cmd.binding, "work_item", it.work_item_id))
+                return errors.fail(.scope_denied, "plan contains items outside this binding", .{});
         }
     } else if (cmd.expected != 0) {
         return errors.fail(.stale_revision, "no plan exists for profile {s} {s} {s}, so expected must be 0", .{ cmd.binding.profile, cmd.kind, cmd.period });
@@ -1962,7 +2009,7 @@ pub fn commitPlan(s: *Store, a: std.mem.Allocator, cmd: CommitPlanCmd, decision:
         if (std.mem.eql(u8, cmd.kind, "weekly") and std.mem.eql(u8, it.role, "mit")) {
             return errors.invalid("weekly plans accept big_rock and batch roles, not mit", .{});
         }
-        const item = getWorkItem(s, a, .{ .profile = cmd.binding.profile, .actor = cmd.binding.actor, .scopes = owned }, it.work_item_id) catch |e| {
+        const item = getWorkItem(s, a, cmd.binding, it.work_item_id) catch |e| {
             if (errors.getFamily() == .not_found) return errors.fail(.not_found, "work item {s} not found", .{it.work_item_id});
             return e;
         };
@@ -2044,6 +2091,53 @@ pub fn commitPlan(s: *Store, a: std.mem.Allocator, cmd: CommitPlanCmd, decision:
     try writeIdem(s, a, "commit_plan", cmd.key, &hash, .{ .plan = plan }, now);
     try s.commit();
     return plan;
+}
+
+test "plan replay reauthorizes historical items and profile scopes" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    _ = try applyConfig(&s, a, &.{
+        .{ .id = "personal", .kind = "personal" },
+        .{ .id = "opensource", .kind = "opensource" },
+    }, &.{.{
+        .id = "personal",
+        .kind = "personal",
+        .actor = "tester",
+        .scopes = &.{ "personal", "opensource" },
+    }}, 1_700_000_000);
+    try s.db.exec(
+        \\INSERT INTO work_items (id, scope_id, title, lifecycle, revision, created_at, updated_at)
+        \\VALUES ('T-1', 'personal', 'one', 'next', 1, '2023-11-14T00:00:00Z', '2023-11-14T00:00:00Z'),
+        \\       ('T-2', 'personal', 'two', 'next', 1, '2023-11-14T00:00:00Z', '2023-11-14T00:00:00Z');
+    );
+    const binding = domain.Binding{ .profile = "personal", .actor = "tester", .scopes = &.{"personal"} };
+    const items = [_]PlanItemCmd{
+        .{ .work_item_id = "T-1", .role = "batch", .position = 0 },
+        .{ .work_item_id = "T-2", .role = "batch", .position = 1 },
+    };
+    const original = CommitPlanCmd{ .binding = binding, .key = "old", .kind = "weekly", .period = "2026-W01", .items = &items };
+    _ = try commitPlan(&s, a, original, "", 1_700_000_000);
+    _ = try commitPlan(&s, a, .{
+        .binding = binding,
+        .key = "new",
+        .kind = "weekly",
+        .period = "2026-W01",
+        .expected = 1,
+        .items = items[0..1],
+    }, "", 1_700_000_001);
+    const replay = try commitPlan(&s, a, original, "", 1_700_000_002);
+    try std.testing.expectEqual(@as(i64, 1), replay.revision);
+    try std.testing.expectEqual(@as(usize, 2), replay.items.len);
+    try s.db.exec("UPDATE work_items SET scope_id = 'opensource' WHERE id = 'T-2'");
+    try std.testing.expectError(error.Ztd, commitPlan(&s, a, original, "", 1_700_000_003));
+    try std.testing.expectEqual(errors.Family.scope_denied, errors.getFamily());
+    try s.db.exec("UPDATE work_items SET scope_id = 'personal' WHERE id = 'T-2'");
+    try s.db.exec("DELETE FROM profile_scopes WHERE profile_id = 'personal' AND scope_id = 'personal'");
+    try std.testing.expectError(error.Ztd, commitPlan(&s, a, original, "", 1_700_000_004));
+    try std.testing.expectEqual(errors.Family.scope_denied, errors.getFamily());
 }
 
 // ---------------------------------------------------------------- focus
@@ -2404,6 +2498,7 @@ fn reviewFromValue(a: std.mem.Allocator, v: std.json.Value) !domain.Review {
         .coverage = try dup(a, jsonw.strField(v, "coverage") orelse ""),
         .completion_state = try dup(a, jsonw.strField(v, "completion_state") orelse ""),
         .created_at = try dup(a, jsonw.strField(v, "created_at") orelse ""),
+        .metrics_json = try metricsFromValue(a, v),
     };
 }
 
@@ -3044,11 +3139,6 @@ fn validateDocumentCmd(cmd: DocumentCmd) !void {
         defer parsed.deinit();
         if (parsed.value != .array) return errors.invalid("options must be a JSON array", .{});
     }
-    if (cmd.status.len > 0 and std.mem.eql(u8, cmd.status, "verified") and
-        std.mem.eql(u8, cmd.record_kind, "decision") and cmd.approved_by.len == 0)
-    {
-        return errors.invalid("approved_by is required to verify a decision", .{});
-    }
     for (cmd.evidence) |id| {
         if (trimmed(id).len == 0) return errors.invalid("evidence id must not be blank", .{});
     }
@@ -3075,31 +3165,26 @@ fn writeDocumentRequest(w: *std.Io.Writer, cmd: DocumentCmd) !void {
 }
 
 pub fn putDocument(s: *Store, a: std.mem.Allocator, cmd: DocumentCmd, now: Timestamp) !domain.Document {
+    try s.begin();
+    errdefer s.rollback();
+    const out = try putDocumentInTransaction(s, a, cmd, now);
+    try s.commit();
+    return out;
+}
+
+fn putDocumentInTransaction(s: *Store, a: std.mem.Allocator, cmd: DocumentCmd, now: Timestamp) !domain.Document {
     try validateDocumentCmd(cmd);
     const scope = if (cmd.scope.len > 0) cmd.scope else cmd.binding.scopes[0];
 
     var aw = std.Io.Writer.Allocating.init(a);
     try writeDocumentRequest(&aw.writer, cmd);
     const hash = sha256hex(aw.written());
-    // The key carries the payload hash: an unconditional put of the same slug
-    // is a new request, while an exact retry still replays.
     const key = try std.fmt.allocPrint(a, "{s}|{s}|{s}|{d}|{s}", .{ scope, cmd.kind, cmd.slug, cmd.expected, &hash });
-
-    try s.begin();
-    errdefer s.rollback();
-    if (try lookupIdemStmt(s, a, "doc put", key, &hash)) |stored| {
-        const doc = try docFromStored(a, stored);
-        try s.commit();
-        return doc;
-    }
-    // Releases before the hash was part of the key stored it without it. Only
-    // an exact retry replays; a different body under the same key is a new
-    // write, not the conflict an unconditional put would otherwise be.
-    const legacy_key = try std.fmt.allocPrint(a, "{s}|{s}|{s}|{d}", .{ scope, cmd.kind, cmd.slug, cmd.expected });
-    if (try lookupLegacyIdem(s, a, "doc put", legacy_key, &hash)) |stored| {
-        const doc = try docFromStored(a, stored);
-        try s.commit();
-        return doc;
+    const keyed = cmd.expected != 0 or cmd.draft_only;
+    if (keyed) {
+        if (try lookupIdemStmt(s, a, "doc put", key, &hash)) |stored| return docFromStored(a, stored);
+        const legacy_key = try std.fmt.allocPrint(a, "{s}|{s}|{s}|{d}", .{ scope, cmd.kind, cmd.slug, cmd.expected });
+        if (try lookupLegacyIdem(s, a, "doc put", legacy_key, &hash)) |stored| return docFromStored(a, stored);
     }
     try requireScopeDeclared(s, scope);
 
@@ -3142,21 +3227,50 @@ pub fn putDocument(s: *Store, a: std.mem.Allocator, cmd: DocumentCmd, now: Times
     const rec_kind: ?[]const u8 = if (cmd.record_kind.len > 0) try dup(a, cmd.record_kind) else if (existing) |e| e.record_kind else null;
     const rationale: ?[]const u8 = if (cmd.rationale.len > 0) try dup(a, cmd.rationale) else if (existing) |e| e.rationale else null;
     const options: ?[]const u8 = if (cmd.options_json.len > 0) try dup(a, cmd.options_json) else if (existing) |e| e.options_json else null;
-    // An approval covers the exact body that was approved, nothing else.
-    const same_body = if (existing) |e| std.mem.eql(u8, e.body, cmd.body) else false;
-    const approved_by: ?[]const u8 = if (cmd.approved_by.len > 0)
+    const valid_from: ?[]const u8 = if (cmd.valid_from.len > 0) try dup(a, cmd.valid_from) else if (existing) |e| e.valid_from else null;
+    var evidence_changed = false;
+    for (cmd.evidence) |ev_id| {
+        const ev_kind = entityKind(ev_id) orelse return errors.invalid("unknown evidence id \"{s}\"", .{ev_id});
+        if (!try entityLinkedInScope(s, ev_kind, ev_id, scope)) return errors.fail(.not_found, "evidence {s} not found", .{ev_id});
+        if (existing) |e| {
+            var q = try s.db.prepare("SELECT 1 FROM links WHERE from_type = 'document' AND from_id = ? AND to_type = ? AND to_id = ? AND relation = 'evidence'");
+            defer q.finalize();
+            try q.bindText(1, e.id);
+            try q.bindText(2, ev_kind);
+            try q.bindText(3, ev_id);
+            if (!try q.step()) evidence_changed = true;
+        } else evidence_changed = true;
+    }
+    const same_content = if (existing) |e| std.mem.eql(u8, e.title, cmd.title) and
+        std.mem.eql(u8, e.body, cmd.body) and optionalEqual(e.record_kind, rec_kind) and
+        optionalEqual(e.rationale, rationale) and optionalEqual(e.options_json, options) and
+        optionalEqual(e.valid_from, valid_from) and !evidence_changed else false;
+    const verified = std.mem.eql(u8, cmd.status, "verified");
+    const was_decision = if (existing) |e| std.mem.eql(u8, e.record_kind orelse "", "decision") else false;
+    const protected = was_decision or std.mem.eql(u8, rec_kind orelse "", "decision");
+    const existing_approval = if (existing) |e| same_content and
+        std.mem.eql(u8, e.status, "verified") and e.approved_by != null and e.approved_at != null and
+        (cmd.approved_by.len == 0 or std.mem.eql(u8, cmd.approved_by, e.approved_by.?)) else false;
+    if (verified and protected and !existing_approval) {
+        if (trimmed(cmd.approved_by).len == 0)
+            return errors.invalid("approved_by is required to verify a decision", .{});
+        if (existing == null or cmd.expected == 0)
+            return errors.invalid("decision approval requires the current document revision", .{});
+    }
+    const approved_by: ?[]const u8 = if (!verified) null else if (cmd.approved_by.len > 0)
         try dup(a, cmd.approved_by)
     else if (existing) |e|
-        (if (same_body) e.approved_by else null)
+        (if (same_content and std.mem.eql(u8, e.status, "verified")) e.approved_by else null)
     else
         null;
-    const valid_from: ?[]const u8 = if (cmd.valid_from.len > 0) try dup(a, cmd.valid_from) else if (existing) |e| e.valid_from else null;
-    const approved_at: ?[]const u8 = if (approved_by != null and std.mem.eql(u8, cmd.status, "verified")) now_s else null;
-    if (approved_by == null and std.mem.eql(u8, cmd.status, "verified") and
-        rec_kind != null and std.mem.eql(u8, rec_kind.?, "decision"))
-    {
-        return errors.invalid("approved_by is required to verify a decision", .{});
-    }
+    const approved_at: ?[]const u8 = if (approved_by == null) null else if (existing) |e|
+        (if (same_content and std.mem.eql(u8, e.status, "verified") and optionalEqual(approved_by, e.approved_by)) e.approved_at else now_s)
+    else
+        now_s;
+    if (!keyed) if (existing) |e| {
+        if (same_content and std.mem.eql(u8, e.status, cmd.status) and
+            optionalEqual(e.approved_by, approved_by) and optionalEqual(e.approved_at, approved_at)) return e;
+    };
 
     var out: domain.Document = undefined;
     if (existing) |e| {
@@ -3246,18 +3360,43 @@ pub fn putDocument(s: *Store, a: std.mem.Allocator, cmd: DocumentCmd, now: Times
         _ = try ins.step();
     }
 
-    for (cmd.evidence) |ev_id| {
-        const ev_kind = entityKind(ev_id) orelse return errors.invalid("unknown evidence id \"{s}\"", .{ev_id});
-        if (!try entityLinkedInScope(s, ev_kind, ev_id, scope)) {
-            return errors.fail(.not_found, "evidence {s} not found", .{ev_id});
-        }
-        try insertLink(s, a, "document", out.id, ev_kind, ev_id, "evidence", scope, now);
-    }
+    try addDocumentEvidence(s, a, out.id, scope, cmd.evidence, now);
 
     try insertHistory(s, a, "document", out.id, event, scope, "", out.revision, .{ .document = out }, now);
-    try writeIdem(s, a, "doc put", key, &hash, .{ .document = out }, now);
-    try s.commit();
+    if (keyed) try writeIdem(s, a, "doc put", key, &hash, .{ .document = out }, now);
     return out;
+}
+
+fn optionalEqual(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a) |x| return if (b) |y| std.mem.eql(u8, x, y) else false;
+    return b == null;
+}
+
+test "unconditional document put compares current state" {
+    var s = try Store.open(":memory:");
+    defer s.close();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    _ = try applyConfig(&s, a, &.{.{ .id = "personal", .kind = "personal" }}, &.{
+        .{ .id = "personal", .kind = "personal", .actor = "tester", .scopes = &.{"personal"} },
+    }, 1_700_000_000);
+    const b = domain.Binding{ .profile = "personal", .actor = "tester", .scopes = &.{"personal"} };
+    var cmd = DocumentCmd{ .binding = b, .kind = "knowledge", .slug = "example", .title = "Example", .body = "A" };
+    try std.testing.expectEqual(@as(i64, 1), (try putDocument(&s, a, cmd, 1_700_000_000)).revision);
+    cmd.body = "B";
+    try std.testing.expectEqual(@as(i64, 2), (try putDocument(&s, a, cmd, 1_700_000_001)).revision);
+    cmd.body = "A";
+    try std.testing.expectEqual(@as(i64, 3), (try putDocument(&s, a, cmd, 1_700_000_002)).revision);
+    try std.testing.expectEqual(@as(i64, 3), (try putDocument(&s, a, cmd, 1_700_000_003)).revision);
+}
+
+fn addDocumentEvidence(s: *Store, a: std.mem.Allocator, doc_id: []const u8, scope: []const u8, evidence: []const []const u8, now: Timestamp) !void {
+    for (evidence) |ev_id| {
+        const ev_kind = entityKind(ev_id) orelse return errors.invalid("unknown evidence id \"{s}\"", .{ev_id});
+        if (!try entityLinkedInScope(s, ev_kind, ev_id, scope)) return errors.fail(.not_found, "evidence {s} not found", .{ev_id});
+        try insertLink(s, a, "document", doc_id, ev_kind, ev_id, "evidence", scope, now);
+    }
 }
 
 fn docFromStored(a: std.mem.Allocator, stored: []const u8) !domain.Document {
@@ -3726,22 +3865,33 @@ fn writeSourceReviewResult(w: *std.Io.Writer, r: SourceReviewResult) !void {
 
 pub fn recordSourceReview(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd, now: Timestamp) !SourceReviewResult {
     try validateSourceReviewCmd(cmd);
+    if (!std.mem.eql(u8, cmd.result_kind, "reported")) return errors.invalid("observed reviews require a directory scan", .{});
     var req = std.Io.Writer.Allocating.init(a);
     try writeSourceReviewRequest(&req.writer, cmd);
     const hash = sha256hex(req.written());
+    return recordSourceReviewWithHash(s, a, cmd, &hash, null, now);
+}
+
+fn recordSourceReviewWithHash(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd, hash: *const [64]u8, source_snapshot: ?domain.Source, now: Timestamp) !SourceReviewResult {
+    try validateSourceReviewCmd(cmd);
     const now_s = try fmtTs(a, now);
     const date = try idDate(a, now);
 
     try s.begin();
     errdefer s.rollback();
-    if (try lookupIdemStmt(s, a, "source_review", cmd.key, &hash)) |stored| {
+    const src = try loadSourceScope(s, a, cmd.binding, cmd.source_id);
+    if (try lookupIdemStmt(s, a, "source_review", cmd.key, hash)) |stored| {
         const parsed = std.json.parseFromSlice(std.json.Value, a, stored, .{}) catch
             return errors.invalid("stored source review result is not valid JSON", .{});
         const out = try sourceReviewResultFromValue(a, parsed.value);
         try s.commit();
         return out;
     }
-    const src = try loadSourceScope(s, a, cmd.binding, cmd.source_id);
+    if (source_snapshot) |original| {
+        if (!std.mem.eql(u8, src.scope, original.scope) or !std.mem.eql(u8, src.connector, original.connector) or
+            !std.mem.eql(u8, src.connection_ref, original.connection_ref))
+            return errors.fail(.conflict, "source configuration changed during scan", .{});
+    }
     const coverage = sourceReviewCoverage(cmd);
 
     const failure_count = if (cmd.retrieval.failures) |f| f.len else 0;
@@ -3749,7 +3899,9 @@ pub fn recordSourceReview(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd,
     if (std.mem.eql(u8, cmd.result_kind, "observed") and cmd.retrieval.complete_window and
         !cmd.retrieval.truncated and failure_count == 0)
     {
-        cursor = try dup(a, cmd.retrieval.cursor);
+        if (cmd.retrieval.cursor.len > 0 and
+            (src.cursor.len == 0 or std.mem.order(u8, cmd.retrieval.cursor, src.cursor) == .gt))
+            cursor = try dup(a, cmd.retrieval.cursor);
     }
     var last_success = src.last_success_at;
     if (std.mem.eql(u8, cmd.result_kind, "observed") and failure_count == 0) {
@@ -3777,6 +3929,10 @@ pub fn recordSourceReview(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd,
         .capture_ids = null,
         .created_at = now_s,
     };
+    if (source_snapshot != null) {
+        review.retrieval.cursor = cursor;
+        review.retrieval.window = try std.fmt.allocPrint(a, "{s}..{s}", .{ src.cursor, cursor });
+    }
 
     var ins = try s.db.prepare(
         "INSERT INTO source_reviews (id, source_id, batch_id, idempotency_key, request_hash, result_kind, coverage_state, retrieval_json, created_at) " ++
@@ -3787,12 +3943,12 @@ pub fn recordSourceReview(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd,
     try ins.bindText(2, review.source_id);
     try ins.bindText(3, review.batch_id);
     try ins.bindText(4, cmd.key);
-    try ins.bindText(5, &hash);
+    try ins.bindText(5, hash);
     try ins.bindText(6, review.result_kind);
     try ins.bindText(7, review.coverage);
     var rj = std.Io.Writer.Allocating.init(a);
     var rjo = try jsonw.Obj.init(&rj.writer);
-    try cmd.retrieval.write(&rjo);
+    try review.retrieval.write(&rjo);
     try rjo.end();
     try ins.bindText(8, rj.written());
     try ins.bindText(9, review.created_at);
@@ -3891,30 +4047,8 @@ pub fn recordSourceReview(s: *Store, a: std.mem.Allocator, cmd: SourceReviewCmd,
 
     try insertHistory(s, a, "source_review", review.id, "recorded", src.scope, "", 1, .{ .source_review = review }, now);
     const out = SourceReviewResult{ .review = review, .captures = captures.items };
-    try writeIdem(s, a, "source_review", cmd.key, &hash, .{ .source_review_result = out }, now);
+    try writeIdem(s, a, "source_review", cmd.key, hash, .{ .source_review_result = out }, now);
     try s.commit();
-    return out;
-}
-
-fn retrievalFromValue(a: std.mem.Allocator, v: std.json.Value) !domain.SourceRetrieval {
-    if (v != .object) return .{};
-    var out = domain.SourceRetrieval{
-        .window = try dup(a, jsonw.strField(v, "window") orelse ""),
-        .cursor = try dup(a, jsonw.strField(v, "cursor") orelse ""),
-        .requested_limit = jsonw.intField(v, "requested_limit") orelse 0,
-        .provider_returned_limit = jsonw.intField(v, "provider_returned_limit") orelse 0,
-        .complete_window = jsonw.boolField(v, "complete_window") orelse false,
-        .truncated = jsonw.boolField(v, "truncated") orelse false,
-        .skipped = @intCast(@max(0, jsonw.intField(v, "skipped") orelse 0)),
-    };
-    if (jsonw.arrField(v, "failures")) |list| {
-        var failures: std.ArrayList([]const u8) = .empty;
-        for (list) |f| {
-            if (f != .string) continue;
-            try failures.append(a, try dup(a, f.string));
-        }
-        out.failures = failures.items;
-    }
     return out;
 }
 
@@ -3926,7 +4060,7 @@ fn sourceReviewResultFromValue(a: std.mem.Allocator, v: std.json.Value) !SourceR
         .batch_id = try dup(a, jsonw.strField(rev_value, "batch_id") orelse ""),
         .result_kind = try dup(a, jsonw.strField(rev_value, "result_kind") orelse ""),
         .coverage = try dup(a, jsonw.strField(rev_value, "coverage") orelse ""),
-        .retrieval = try retrievalFromValue(a, jsonw.field(rev_value, "retrieval") orelse .null),
+        .retrieval = try domain.SourceRetrieval.fromValue(a, jsonw.field(rev_value, "retrieval")),
         .capture_ids = null,
         .created_at = try dup(a, jsonw.strField(rev_value, "created_at") orelse ""),
     };
@@ -3961,39 +4095,25 @@ fn parseDirectoryRoots(a: std.mem.Allocator, id: []const u8, connection_ref: []c
         if (!std.Io.Dir.path.isAbsolute(item.string)) {
             return errors.invalid("directory root {s} must be an absolute path", .{item.string});
         }
-        // A trailing slash would make the containment test see "//file".
-        var root = item.string;
-        while (root.len > 1 and root[root.len - 1] == '/') root = root[0 .. root.len - 1];
-        try roots.append(a, try dup(a, root));
+        try roots.append(a, try dup(a, item.string));
     }
     if (roots.items.len == 0) return errors.invalid("directory source {s} needs at least one root", .{id});
     return roots.items;
 }
 
-fn realpathAlloc(a: std.mem.Allocator, path: []const u8) ![]const u8 {
-    const z = try a.dupeSentinel(u8, path, 0);
-    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    // Windows has no realpath; _fullpath absolutizes without resolving links.
-    const resolved = if (builtin.os.tag == .windows)
-        c._fullpath(&buf, z.ptr, buf.len)
-    else
-        c.realpath(z.ptr, &buf);
-    if (resolved == null) return error.RealpathFailed;
-    return a.dupe(u8, std.mem.span(resolved.?));
-}
-
 fn insideRoot(path: []const u8, root: []const u8) bool {
     if (std.mem.eql(u8, path, root)) return true;
-    if (std.mem.eql(u8, root, "/")) return path.len > 0 and path[0] == '/';
-    return std.mem.startsWith(u8, path, root) and path.len > root.len and path[root.len] == '/';
+    if (root.len > 0 and std.fs.path.isSep(root[root.len - 1])) return std.mem.startsWith(u8, path, root);
+    return std.mem.startsWith(u8, path, root) and path.len > root.len and std.fs.path.isSep(path[root.len]);
 }
 
-fn readPrefix(a: std.mem.Allocator, io: std.Io, path: []const u8, limit: usize) ![]const u8 {
+fn readPrefix(io: std.Io, path: []const u8, output: []u8) ![]const u8 {
     var file = try std.Io.Dir.openFileAbsolute(io, path, .{});
     defer file.close(io);
     var buf: [4096]u8 = undefined;
     var fr = file.reader(io, &buf);
-    return fr.interface.readAllocShort(a, limit);
+    const n = try fr.interface.readSliceShort(output);
+    return output[0..n];
 }
 
 /// True when this source already has a capture for that file revision. Reads
@@ -4010,14 +4130,44 @@ fn alreadyCaptured(s: *Store, scope: []const u8, source: []const u8, external_id
     return try q.step();
 }
 
+fn legacyCaptureMatches(s: *Store, scope: []const u8, source: []const u8, id: []const u8, revision: []const u8, text: []const u8) !bool {
+    var q = try s.db.prepare(
+        "SELECT content_hash FROM captures WHERE scope_id = ? AND source_id = ? AND external_id = ? AND external_revision = ?",
+    );
+    defer q.finalize();
+    try q.bindText(1, scope);
+    try q.bindText(2, source);
+    try q.bindText(3, id);
+    try q.bindText(4, revision);
+    if (!try q.step()) return false;
+    const hash = sha256hex(text);
+    return std.mem.eql(u8, q.text(0), &hash);
+}
+
 /// Walks a directory source and records one observed review. The cursor only
 /// moves when the window is complete: every root resolved and listed, no read
 /// failures, nothing truncated. A suspicious path (a symlink leaving its root)
 /// counts as a failure and never as content.
 pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Binding, source_id: []const u8, key_in: []const u8, now: Timestamp) !SourceReviewResult {
+    try validateBinding(b);
     const src = try loadSourceScope(s, a, b, source_id);
     if (!std.mem.eql(u8, src.connector, "directory")) {
         return errors.invalid("source {s} is not a directory source", .{src.id});
+    }
+    const stamp = std.Io.Timestamp.now(io, .real).nanoseconds;
+    const key = if (key_in.len > 0) key_in else try std.fmt.allocPrint(a, "scan:{s}:{d}", .{ src.id, stamp });
+    try requireKey(key);
+    var request = std.Io.Writer.Allocating.init(a);
+    var object = try jsonw.Obj.init(&request.writer);
+    try object.str("operation", "directory_scan_v1");
+    try writeBinding(&object, b);
+    try object.str("source", src.id);
+    try object.end();
+    const hash = sha256hex(request.written());
+    if (try lookupIdemStmt(s, a, "source_review", key, &hash)) |stored| {
+        const parsed = std.json.parseFromSlice(std.json.Value, a, stored, .{}) catch
+            return errors.invalid("stored source review result is not valid JSON", .{});
+        return sourceReviewResultFromValue(a, parsed.value);
     }
     const roots = try parseDirectoryRoots(a, src.id, src.connection_ref);
 
@@ -4027,9 +4177,10 @@ pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Bind
     var truncated = false;
     var skipped: usize = 0;
     var max_mtime: Timestamp = 0;
+    var prefix: [64 * 1024 + 3]u8 = undefined;
 
     for (roots) |root| {
-        const real_root = realpathAlloc(a, root) catch {
+        const real_root = std.Io.Dir.cwd().realPathFileAlloc(io, root, a) catch {
             try failures.append(a, try std.fmt.allocPrint(a, "root {s} cannot be resolved", .{root}));
             complete = false;
             continue;
@@ -4057,8 +4208,8 @@ pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Bind
                 break;
             } orelse break;
             if (entry.kind != .file and entry.kind != .sym_link) continue;
-            const full = try std.fmt.allocPrint(a, "{s}/{s}", .{ real_root, entry.path });
-            const real = realpathAlloc(a, full) catch {
+            const full = try std.fs.path.join(a, &.{ real_root, entry.path });
+            const real = std.Io.Dir.cwd().realPathFileAlloc(io, full, a) catch {
                 try failures.append(a, try std.fmt.allocPrint(a, "path {s} cannot be resolved", .{full}));
                 complete = false;
                 continue;
@@ -4074,50 +4225,65 @@ pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Bind
                 continue;
             };
             if (st.kind == .directory) continue;
+            if (st.kind != .file) {
+                try failures.append(a, try std.fmt.allocPrint(a, "path {s} cannot be read", .{full}));
+                complete = false;
+                continue;
+            }
             const seconds = st.mtime.toSeconds();
-            const revision = try std.fmt.allocPrint(a, "{d}:{d}", .{ seconds, st.size });
+            if (seconds > max_mtime) max_mtime = seconds;
+            const revision = try std.fmt.allocPrint(a, "ns:{d}:{d}", .{ st.mtime.nanoseconds, st.size });
             // Files this source already ingested are skipped before the cap, so
             // a tree larger than the cap drains across scans instead of
             // re-reading the same head forever.
             if (try alreadyCaptured(s, src.scope, src.id, real, revision)) continue;
-            if (items.items.len >= 500) {
+            const legacy_revision = try std.fmt.allocPrint(a, "{d}:{d}", .{ seconds, st.size });
+            if (items.items.len >= 500 and !try alreadyCaptured(s, src.scope, src.id, real, legacy_revision)) {
                 truncated = true;
                 continue;
             }
-            const text = readPrefix(a, io, real, 64 * 1024) catch {
+            const text = readPrefix(io, real, &prefix) catch {
                 try failures.append(a, try std.fmt.allocPrint(a, "path {s} cannot be read", .{full}));
                 complete = false;
                 continue;
             };
             // Trim before validating: the cut can split a character, and that
             // repaired tail is what decides whether the file is text at all.
-            const tail = if (st.size > 64 * 1024) errors.utf8Prefix(text, text.len) else text;
-            // utf8Prefix stops at the first invalid byte anywhere, so a binary
-            // file with an ASCII header would survive as a truncated capture.
-            // Only a split character at the cut (at most 3 bytes) is a trim.
-            if (text.len - tail.len > 3) {
-                skipped += 1;
-                continue;
-            }
-            // A binary file in an approved tree is simply not a capture: skip it
-            // without failing the window, or one .png freezes the cursor forever.
-            if (!std.unicode.utf8ValidateSlice(tail)) {
-                skipped += 1;
-                continue;
+            const limit = @min(text.len, 64 * 1024);
+            const tail = errors.utf8Prefix(text, limit);
+            if (tail.len < limit) {
+                const n = std.unicode.utf8ByteSequenceLength(text[tail.len]) catch 0;
+                if (n == 0 or tail.len + n <= limit or tail.len + n > text.len or
+                    !std.unicode.utf8ValidateSlice(text[tail.len .. tail.len + n]))
+                {
+                    skipped += 1;
+                    continue;
+                }
             }
             if (trimmed(tail).len == 0) continue;
+            if (try legacyCaptureMatches(s, src.scope, src.id, real, legacy_revision, tail)) continue;
+            if (items.items.len >= 500) {
+                truncated = true;
+                continue;
+            }
+            const uri = try std.fmt.allocPrint(a, "file://{s}", .{real});
+            var metadata: ?[]const u8 = null;
+            if (st.size > 64 * 1024) {
+                var json = std.Io.Writer.Allocating.init(a);
+                var m = try jsonw.Obj.init(&json.writer);
+                try m.str("body_ref", uri);
+                try m.int("bytes", @intCast(st.size));
+                try m.end();
+                metadata = json.written();
+            }
             try items.append(a, .{
                 .external_id = real,
                 .external_revision = revision,
-                .original_text = tail,
-                .source_uri = try std.fmt.allocPrint(a, "file://{s}", .{real}),
+                .original_text = try dup(a, tail),
+                .source_uri = uri,
                 .occurred_at = null,
-                .provider_metadata_summary = if (st.size > 64 * 1024)
-                    try std.fmt.allocPrint(a, "{{\"body_ref\":\"file://{s}\",\"bytes\":{d}}}", .{ real, st.size })
-                else
-                    null,
+                .provider_metadata_summary = metadata,
             });
-            if (seconds > max_mtime) max_mtime = seconds;
         }
     }
 
@@ -4131,10 +4297,8 @@ pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Bind
     const cursor = if (max_mtime > 0) try fmtTs(a, max_mtime) else src.cursor;
     // One batch per scan: the nanosecond stamp keeps two scans in the same
     // second from colliding on the (source, batch) unique key.
-    const stamp = std.Io.Timestamp.now(io, .real).nanoseconds;
-    const key = if (key_in.len > 0) key_in else try std.fmt.allocPrint(a, "scan:{s}:{d}", .{ src.id, stamp });
     const batch_id = try std.fmt.allocPrint(a, "scan:{s}:{d}", .{ src.id, stamp });
-    return recordSourceReview(s, a, .{
+    return recordSourceReviewWithHash(s, a, .{
         .binding = b,
         .source_id = src.id,
         .batch_id = batch_id,
@@ -4151,7 +4315,7 @@ pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Bind
             .failures = if (failures.items.len > 0) failures.items else null,
         },
         .items = items.items,
-    }, now);
+    }, &hash, src, now);
 }
 
 // --------------------------------------------------- scopes, contexts, projects
@@ -4616,8 +4780,15 @@ pub fn exportTo(s: *Store, a: std.mem.Allocator, io: std.Io, out: []const u8) !v
     try s.commit();
     try tables.end();
     try o.end();
-    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out, .data = aw.written() }) catch |e|
+    var file = std.Io.Dir.cwd().createFileAtomic(io, out, .{}) catch |e|
+        return errors.fail(.io_error, "create export: {s}", .{@errorName(e)});
+    defer file.deinit(io);
+    file.file.writeStreamingAll(io, aw.written()) catch |e|
         return errors.fail(.io_error, "write export: {s}", .{@errorName(e)});
+    file.link(io) catch |e| {
+        if (e == error.PathAlreadyExists) return errors.fail(.destination_not_empty, "export destination already exists", .{});
+        return errors.fail(.io_error, "link export: {s}", .{@errorName(e)});
+    };
 }
 
 pub const TableCount = struct { name: []const u8, count: i64 };
@@ -4691,6 +4862,30 @@ fn knownTable(name: []const u8) bool {
     return false;
 }
 
+fn validateLegacyKnowledgeRow(row: std.json.Value) !void {
+    if (row != .object) return errors.fail(.unsupported_format, "invalid knowledge_records row", .{});
+    const obj = row.object;
+    const required_strings = [_][]const u8{ "id", "scope_id", "kind", "text", "state", "review_state", "source_refs", "created_at" };
+    for (required_strings) |name| {
+        const v = obj.get(name) orelse return errors.fail(.unsupported_format, "knowledge_records row is missing {s}", .{name});
+        if (v != .string) return errors.fail(.unsupported_format, "knowledge_records {s} is not a string", .{name});
+    }
+    for ([_][]const u8{ "valid_from", "reviewed_at", "supersedes_id" }) |name| {
+        const v = obj.get(name) orelse continue;
+        if (v != .null and v != .string) return errors.fail(.unsupported_format, "knowledge_records {s} is not a string", .{name});
+    }
+    const rev = obj.get("revision") orelse return errors.fail(.unsupported_format, "knowledge_records row is missing revision", .{});
+    if (rev != .integer) return errors.fail(.unsupported_format, "knowledge_records revision is not an integer", .{});
+    // The document reader parses these columns on every read, so a row that
+    // stores anything else would restore successfully and then fail forever.
+    for ([_][]const u8{ "created_at", "reviewed_at" }) |name| {
+        const v = obj.get(name) orelse continue;
+        if (v != .string) continue;
+        _ = timeutil.parseTime(v.string) catch
+            return errors.fail(.unsupported_format, "knowledge_records {s} is not an RFC3339 timestamp", .{name});
+    }
+}
+
 pub fn restoreFrom(s: *Store, a: std.mem.Allocator, io: std.Io, from: []const u8) ![]const TableCount {
     if (trimmed(from).len == 0) return errors.invalid("restore source is required", .{});
     const raw = std.Io.Dir.cwd().readFileAlloc(io, from, a, .limited(1 << 31)) catch |e|
@@ -4716,6 +4911,11 @@ pub fn restoreFrom(s: *Store, a: std.mem.Allocator, io: std.Io, from: []const u8
     // A version 1 export predates the knowledge consolidation: it carries
     // knowledge_records and has no links table. Both are accepted and mapped.
     const legacy = version == 1;
+    const legacy_rows = if (legacy) tables_obj.get("knowledge_records") orelse
+        return errors.fail(.unsupported_format, "export is missing table knowledge_records", .{}) else null;
+    if (legacy_rows) |rows| {
+        if (rows != .array) return errors.fail(.unsupported_format, "table knowledge_records is not an array", .{});
+    }
     for (canonical_tables) |def| {
         if (legacy and std.mem.eql(u8, def.name, "links")) continue;
         if (!tables_obj.contains(def.name)) {
@@ -4755,11 +4955,22 @@ pub fn restoreFrom(s: *Store, a: std.mem.Allocator, io: std.Io, from: []const u8
         }
         try counts.append(a, .{ .name = def.name, .count = n });
     }
-    if (legacy) {
-        if (tables_obj.get("knowledge_records")) |rows_val| {
-            if (rows_val == .array) {
-                for (rows_val.array.items) |row| try insertLegacyKnowledge(s, row);
-            }
+    if (legacy_rows) |rows| {
+        for (rows.array.items) |row| {
+            try validateLegacyKnowledgeRow(row);
+            const knowledge = std.json.parseFromValueLeaky(store.LegacyKnowledgeRow, a, row, .{}) catch
+                return errors.fail(.unsupported_format, "invalid knowledge_records row", .{});
+            const kind_ok = std.mem.eql(u8, knowledge.kind, "fact") or std.mem.eql(u8, knowledge.kind, "decision") or
+                std.mem.eql(u8, knowledge.kind, "constraint") or std.mem.eql(u8, knowledge.kind, "procedure") or std.mem.eql(u8, knowledge.kind, "reference");
+            if (!kind_ok or knowledge.id.len == 0 or knowledge.scope_id.len == 0 or knowledge.revision <= 0 or
+                (!std.mem.eql(u8, knowledge.state, "current") and !std.mem.eql(u8, knowledge.state, "superseded")) or
+                (!std.mem.eql(u8, knowledge.review_state, "draft") and !std.mem.eql(u8, knowledge.review_state, "verified")))
+                return errors.fail(.unsupported_format, "invalid knowledge_records row", .{});
+            store.insertKnowledgeDocument(s, knowledge) catch
+                return errors.fail(.unsupported_format, "cannot restore knowledge_records row", .{});
+        }
+        for (counts.items) |*count| {
+            if (std.mem.eql(u8, count.name, "documents")) count.count += @intCast(rows.array.items.len);
         }
     }
     const report = try runCheck(s, a, null);
@@ -4810,66 +5021,6 @@ pub fn inboxStats(s: *Store, a: std.mem.Allocator, b: domain.Binding, now: Times
     const pending = stmt.int(0);
     const due = stmt.int(1);
     return .{ .pending = pending, .due = due, .remaining = pending + due };
-}
-
-/// Maps one version 1 knowledge_records row into the consolidated documents
-/// table, exactly like migration 0010 does.
-fn insertLegacyKnowledge(s: *Store, row: std.json.Value) !void {
-    const id = jsonw.strField(row, "id") orelse return errors.fail(.unsupported_format, "knowledge row has no id", .{});
-    var slug_buf: [128]u8 = undefined;
-    const slug = std.fmt.bufPrint(&slug_buf, "kr/{s}", .{id}) catch
-        return errors.fail(.unsupported_format, "knowledge id is too long: {s}", .{id});
-    const text = jsonw.strField(row, "text") orelse "";
-    var title_buf: [80]u8 = undefined;
-    const title = try firstLineTitle(id, text, &title_buf);
-    const state = jsonw.strField(row, "state") orelse "";
-    const review = jsonw.strField(row, "review_state") orelse "";
-    const status = if (std.mem.eql(u8, state, "superseded"))
-        "superseded"
-    else if (std.mem.eql(u8, review, "verified"))
-        "verified"
-    else
-        "draft";
-    const reviewed = jsonw.strField(row, "reviewed_at");
-    const created = jsonw.strField(row, "created_at") orelse "";
-    const updated = reviewed orelse created;
-    var ins = try s.db.prepare(
-        "INSERT INTO documents (id, scope_id, kind, slug, title, body, status, revision, " ++
-            "created_at, updated_at, record_kind, approved_at, valid_from, source_refs, supersedes_id) " ++
-            "VALUES (?, ?, 'knowledge', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    );
-    defer ins.finalize();
-    try ins.bindText(1, id);
-    try ins.bindText(2, jsonw.strField(row, "scope_id") orelse "");
-    try ins.bindText(3, slug);
-    try ins.bindText(4, title);
-    try ins.bindText(5, text);
-    try ins.bindText(6, status);
-    try ins.bindInt(7, jsonw.intField(row, "revision") orelse 1);
-    try ins.bindText(8, created);
-    try ins.bindText(9, updated);
-    try ins.bindText(10, jsonw.strField(row, "kind") orelse "fact");
-    try ins.bindOptText(11, reviewed);
-    try ins.bindOptText(12, jsonw.strField(row, "valid_from"));
-    try ins.bindText(13, jsonw.strField(row, "source_refs") orelse "[]");
-    try ins.bindOptText(14, jsonw.strField(row, "supersedes_id"));
-    _ = try ins.step();
-}
-
-fn firstLineTitle(id: []const u8, text: []const u8, buf: []u8) ![]const u8 {
-    var it = std.mem.splitScalar(u8, text, '\n');
-    while (it.next()) |line| {
-        const line_trimmed = std.mem.trim(u8, line, " \t\r");
-        if (line_trimmed.len == 0) continue;
-        const stripped = std.mem.trim(u8, std.mem.trimStart(u8, line_trimmed, "#"), " \t");
-        const chosen = if (stripped.len > 0) stripped else line_trimmed;
-        const cut = errors.utf8Prefix(chosen, 80);
-        @memcpy(buf[0..cut.len], cut);
-        return buf[0..cut.len];
-    }
-    const cut = errors.utf8Prefix(id, 80);
-    @memcpy(buf[0..cut.len], cut);
-    return buf[0..cut.len];
 }
 
 // ------------------------------------------------------------ provenance
@@ -4928,7 +5079,9 @@ pub fn clip(a: std.mem.Allocator, text: []const u8, max: usize) ![]const u8 {
 /// One hop of the provenance graph around `id`, both directions.
 /// Edges of a document that point at entities other than documents; the
 /// compact extension `doc related` uses for its `links` field.
-pub fn externalEdges(s: *Store, a: std.mem.Allocator, id: []const u8) ![]const TraceEdge {
+pub fn externalEdges(s: *Store, a: std.mem.Allocator, b: domain.Binding, id: []const u8) ![]const TraceEdge {
+    try validateBinding(b);
+    if (!try entityVisible(s, b, "document", id)) return errors.fail(.not_found, "{s} not found", .{id});
     var q = try s.db.prepare(
         "SELECT relation, from_type, from_id, to_type, to_id FROM links " ++
             "WHERE (from_id = ? AND to_type <> 'document') OR (to_id = ? AND from_type <> 'document') " ++
@@ -4939,6 +5092,7 @@ pub fn externalEdges(s: *Store, a: std.mem.Allocator, id: []const u8) ![]const T
     try q.bindText(2, id);
     var edges: std.ArrayList(TraceEdge) = .empty;
     while (try q.step()) {
+        if (!try entityVisible(s, b, q.text(1), q.text(2)) or !try entityVisible(s, b, q.text(3), q.text(4))) continue;
         try edges.append(a, .{
             .relation = try dup(a, q.text(0)),
             .from_type = try dup(a, q.text(1)),
@@ -4950,9 +5104,10 @@ pub fn externalEdges(s: *Store, a: std.mem.Allocator, id: []const u8) ![]const T
     return edges.items;
 }
 
-pub fn traceEntity(s: *Store, a: std.mem.Allocator, id: []const u8) !TraceResult {
+pub fn traceEntity(s: *Store, a: std.mem.Allocator, b: domain.Binding, id: []const u8) !TraceResult {
+    try validateBinding(b);
     const kind = entityKind(id) orelse return errors.invalid("unknown id \"{s}\"", .{id});
-    if (!try entityExists(s, kind, id)) return errors.fail(.not_found, "{s} not found", .{id});
+    if (!try entityVisible(s, b, kind, id)) return errors.fail(.not_found, "{s} not found", .{id});
     var q = try s.db.prepare(
         "SELECT relation, from_type, from_id, to_type, to_id FROM links WHERE from_id = ? OR to_id = ? " ++
             "ORDER BY relation, from_id, to_id",
@@ -4962,6 +5117,7 @@ pub fn traceEntity(s: *Store, a: std.mem.Allocator, id: []const u8) !TraceResult
     try q.bindText(2, id);
     var edges: std.ArrayList(TraceEdge) = .empty;
     while (try q.step()) {
+        if (!try entityVisible(s, b, q.text(1), q.text(2)) or !try entityVisible(s, b, q.text(3), q.text(4))) continue;
         try edges.append(a, .{
             .relation = try dup(a, q.text(0)),
             .from_type = try dup(a, q.text(1)),
@@ -4971,6 +5127,40 @@ pub fn traceEntity(s: *Store, a: std.mem.Allocator, id: []const u8) !TraceResult
         });
     }
     return .{ .id = try dup(a, id), .kind = try dup(a, kind), .label = try traceLabel(a, s, id), .edges = edges.items };
+}
+
+fn entityVisible(s: *Store, b: domain.Binding, kind: []const u8, id: []const u8) !bool {
+    const sql = if (std.mem.eql(u8, kind, "source_review"))
+        "SELECT sources.scope_id, NULL FROM source_reviews JOIN sources ON sources.id = source_reviews.source_id WHERE source_reviews.id = ?"
+    else if (std.mem.eql(u8, kind, "focus_session"))
+        "SELECT work_items.scope_id, focus_sessions.profile_id FROM focus_sessions JOIN work_items ON work_items.id = focus_sessions.work_item_id WHERE focus_sessions.id = ?"
+    else if (std.mem.eql(u8, kind, "plan"))
+        "SELECT NULL, profile_id FROM plans WHERE id = ?"
+    else if (std.mem.eql(u8, kind, "review"))
+        "SELECT NULL, profile_id FROM reviews WHERE id = ?"
+    else if (std.mem.eql(u8, kind, "goal"))
+        "SELECT NULL, profile_id FROM goals WHERE id = ?"
+    else if (std.mem.eql(u8, kind, "capture"))
+        "SELECT scope_id, NULL FROM captures WHERE id = ?"
+    else if (std.mem.eql(u8, kind, "work_item"))
+        "SELECT scope_id, NULL FROM work_items WHERE id = ?"
+    else if (std.mem.eql(u8, kind, "checkpoint"))
+        "SELECT checkpoints.scope_id, NULL FROM checkpoints JOIN work_items ON work_items.id = checkpoints.work_item_id AND work_items.scope_id = checkpoints.scope_id WHERE checkpoints.id = ?"
+    else if (std.mem.eql(u8, kind, "document"))
+        "SELECT scope_id, NULL FROM documents WHERE id = ?"
+    else if (std.mem.eql(u8, kind, "source"))
+        "SELECT scope_id, NULL FROM sources WHERE id = ?"
+    else if (std.mem.eql(u8, kind, "project"))
+        "SELECT scope_id, NULL FROM projects WHERE id = ?"
+    else
+        return false;
+    var q = try s.db.prepare(sql);
+    defer q.finalize();
+    try q.bindText(1, id);
+    if (!try q.step()) return false;
+    if (q.optText(0)) |scope| if (!b.allows(scope)) return false;
+    if (q.optText(1)) |profile| if (!std.mem.eql(u8, profile, b.profile)) return false;
+    return true;
 }
 
 /// Evidence and trace checks only need existence inside the document's scope;
@@ -4983,36 +5173,15 @@ fn requireDecision(s: *Store, decision: []const u8, scope: []const u8) !void {
     }
 }
 
-fn entityTable(kind: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, kind, "capture")) return "captures";
-    if (std.mem.eql(u8, kind, "work_item")) return "work_items";
-    if (std.mem.eql(u8, kind, "checkpoint")) return "checkpoints";
-    if (std.mem.eql(u8, kind, "document")) return "documents";
-    if (std.mem.eql(u8, kind, "plan")) return "plans";
-    if (std.mem.eql(u8, kind, "review")) return "reviews";
-    if (std.mem.eql(u8, kind, "focus_session")) return "focus_sessions";
-    if (std.mem.eql(u8, kind, "goal")) return "goals";
-    if (std.mem.eql(u8, kind, "source_review")) return "source_reviews";
-    return null;
-}
-
-fn entityExists(s: *Store, kind: []const u8, id: []const u8) !bool {
-    const table = entityTable(kind) orelse return false;
-    const sql = try std.fmt.allocPrint(std.heap.page_allocator, "SELECT 1 FROM {s} WHERE id = ?", .{table});
-    var q = try s.db.prepare(sql);
-    defer q.finalize();
-    try q.bindText(1, id);
-    return try q.step();
-}
-
 fn entityLinkedInScope(s: *Store, kind: []const u8, id: []const u8, scope: []const u8) !bool {
     const has_scope = std.mem.eql(u8, kind, "capture") or std.mem.eql(u8, kind, "work_item") or
         std.mem.eql(u8, kind, "checkpoint") or std.mem.eql(u8, kind, "document");
     const table = if (std.mem.eql(u8, kind, "capture")) "captures" else if (std.mem.eql(u8, kind, "work_item")) "work_items" else if (std.mem.eql(u8, kind, "checkpoint")) "checkpoints" else if (std.mem.eql(u8, kind, "document")) "documents" else if (std.mem.eql(u8, kind, "plan")) "plans" else if (std.mem.eql(u8, kind, "review")) "reviews" else if (std.mem.eql(u8, kind, "focus_session")) "focus_sessions" else if (std.mem.eql(u8, kind, "goal")) "goals" else if (std.mem.eql(u8, kind, "source_review")) "source_reviews" else return false;
+    var buf: [128]u8 = undefined;
     const sql = if (has_scope)
-        try std.fmt.allocPrint(std.heap.page_allocator, "SELECT 1 FROM {s} WHERE id = ? AND scope_id = ?", .{table})
+        std.fmt.bufPrint(&buf, "SELECT 1 FROM {s} WHERE id = ? AND scope_id = ?", .{table}) catch unreachable
     else
-        try std.fmt.allocPrint(std.heap.page_allocator, "SELECT 1 FROM {s} WHERE id = ?", .{table});
+        std.fmt.bufPrint(&buf, "SELECT 1 FROM {s} WHERE id = ?", .{table}) catch unreachable;
     var q = try s.db.prepare(sql);
     defer q.finalize();
     try q.bindText(1, id);
@@ -5042,6 +5211,9 @@ pub fn supersedeDocument(
     var new = try getDocument(s, a, b, kind, new_slug, scope);
     if (new.supersedes_id != null) {
         return errors.fail(.invalid_transition, "document {s}/{s} already supersedes another document", .{ kind, new_slug });
+    }
+    if (std.mem.eql(u8, new.status, "superseded")) {
+        return errors.fail(.invalid_transition, "document {s}/{s} is already superseded", .{ kind, new_slug });
     }
     if (std.mem.eql(u8, old.status, "superseded")) {
         return errors.fail(.invalid_transition, "document {s}/{s} is already superseded", .{ kind, old_slug });
@@ -5090,6 +5262,8 @@ pub fn proposeLearning(s: *Store, a: std.mem.Allocator, cmd: LearnCmd, now: Time
     try validateBinding(cmd.binding);
     if (cmd.review.len == 0) return errors.invalid("--review is required", .{});
     if (cmd.slug.len == 0) return errors.invalid("--slug is required", .{});
+    try s.begin();
+    errdefer s.rollback();
 
     var profile: ?[]const u8 = null;
     {
@@ -5123,11 +5297,13 @@ pub fn proposeLearning(s: *Store, a: std.mem.Allocator, cmd: LearnCmd, now: Time
         if (std.mem.eql(u8, e.title, want_title) and std.mem.eql(u8, e.body, cmd.body) and
             std.mem.eql(u8, cur_kind, cmd.record_kind))
         {
+            try addDocumentEvidence(s, a, e.id, scope, cmd.evidence, now);
             try insertLink(s, a, "review", cmd.review, "document", e.id, "learned", scope, now);
+            try s.commit();
             return e;
         }
     }
-    const doc = try putDocument(s, a, .{
+    const doc = try putDocumentInTransaction(s, a, .{
         .binding = cmd.binding,
         .kind = "knowledge",
         .slug = cmd.slug,
@@ -5140,6 +5316,7 @@ pub fn proposeLearning(s: *Store, a: std.mem.Allocator, cmd: LearnCmd, now: Time
     }, now);
     // Reached on replay too: putDocument returns early there, the edge is still owed.
     try insertLink(s, a, "review", cmd.review, "document", doc.id, "learned", scope, now);
+    try s.commit();
     return doc;
 }
 

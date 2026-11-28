@@ -114,6 +114,7 @@ COMMANDS
 	*check* [--scope S] [--bindings]
 		Verify database invariants, or validate the .ztd.json hint.
 	*export --out FILE* | *restore --from FILE* | *snapshot --out FILE*
+		Export requires a new path and never replaces a file.
 	*recover*
 		Compatibility no-op; SQLite has no Markdown journal.
 	*migrate*

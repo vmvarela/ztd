@@ -282,6 +282,30 @@ pub fn testMCPStdioJourney(ctx: *Ctx) anyerror!void {
             nextEnv.stats.pending, nextEnv.stats.due, nextEnv.stats.remaining,
         });
 
+    for ([_]json.Value{ mcp.num(-1), .{ .float = 1.5 }, mcp.val("1") }) |revision| {
+        const rejected = try call(ctx, cs, "process_capture", try mcp.obj(ctx.arena, &.{
+            .{ "idempotency_key", mcp.val("invalid-process") },
+            .{ "capture_id", mcp.val(cap.id) },
+            .{ "outcome", mcp.val("work_items") },
+            .{ "titles", try mcp.arr(ctx.arena, &.{mcp.val("must not create")}) },
+            .{ "expected_revision", revision },
+        }));
+        if (!rejected.is_error or !contains(rejected.text, "invalid_input"))
+            return ctx.fatal("invalid process revision accepted: {s}", .{rejected.text});
+    }
+    const stale_process = try call(ctx, cs, "process_capture", try mcp.obj(ctx.arena, &.{
+        .{ "idempotency_key", mcp.val("stale-process") },
+        .{ "capture_id", mcp.val(cap.id) },
+        .{ "outcome", mcp.val("work_items") },
+        .{ "titles", try mcp.arr(ctx.arena, &.{mcp.val("must not create")}) },
+        .{ "expected_revision", mcp.num(99) },
+    }));
+    if (!stale_process.is_error or !contains(stale_process.text, "stale_revision"))
+        return ctx.fatal("stale process revision accepted: {s}", .{stale_process.text});
+    const untouched = try scDecode(ctx, NextEnv, "inbox_next", try call(ctx, cs, "inbox_next", null));
+    if (untouched.capture.revision != cap.revision or !std.mem.eql(u8, untouched.capture.processing_state, "pending"))
+        return ctx.fatal("invalid process revision changed capture", .{});
+
     // process_capture: one work item from the pending capture.
     const title = "Draft quarterly report";
     const pr = try scDecode(ctx, ProcessData, "process_capture", try call(ctx, cs, "process_capture", try mcp.obj(ctx.arena, &.{
@@ -311,11 +335,49 @@ pub fn testMCPStdioJourney(ctx: *Ctx) anyerror!void {
     if (!containsID(brief.next, item.id))
         return ctx.fatal("prepare next = {s}, want {s}", .{ harness.dump(ctx.arena, briefRes.structured.?), item.id });
 
-    // commit_plan: one MIT for today.
+    for ([_]json.Value{ mcp.num(-1), .{ .float = 1.5 }, mcp.val("1") }) |revision| {
+        const rejected = try call(ctx, cs, "commit_plan", try mcp.obj(ctx.arena, &.{
+            .{ "idempotency_key", mcp.val("invalid-plan") },
+            .{ "kind", mcp.val("daily") },
+            .{ "period", mcp.val(period) },
+            .{ "items", try mcp.arr(ctx.arena, &.{try mcp.obj(ctx.arena, &.{
+                .{ "work_item_id", mcp.val(item.id) }, .{ "role", mcp.val("mit") },
+            })}) },
+            .{ "expected_revision", revision },
+        }));
+        if (!rejected.is_error or !contains(rejected.text, "invalid_input"))
+            return ctx.fatal("invalid plan revision accepted: {s}", .{rejected.text});
+    }
+    // Create through the CLI, then try the same creation revision over MCP.
+    const cli_item = try std.fmt.allocPrint(ctx.arena, "{s}:mit", .{item.id});
+    const cli_other_item = try std.fmt.allocPrint(ctx.arena, "{s}:mit", .{unplanned.id});
+    const created = try ctx.decode(PlanData, try ctx.wantOK(try ctx.run(db, &.{
+        "plan", "commit", "--key", "cli-plan-create", "--expected", "0", "--period", period, "--item", cli_item,
+    }), "plan commit"));
+    if (created.revision != 1 or created.items.len != 1 or !std.mem.eql(u8, created.items[0].work_item_id, item.id))
+        return ctx.fatal("CLI plan creation did not save revision 1", .{});
+    const stale_create = try call(ctx, cs, "commit_plan", try mcp.obj(ctx.arena, &.{
+        .{ "idempotency_key", mcp.val("mcp-plan-create-stale") },
+        .{ "kind", mcp.val("daily") },
+        .{ "period", mcp.val(period) },
+        .{ "expected_revision", mcp.num(0) },
+        .{ "items", try mcp.arr(ctx.arena, &.{try mcp.obj(ctx.arena, &.{
+            .{ "work_item_id", mcp.val(unplanned.id) }, .{ "role", mcp.val("mit") },
+        })}) },
+    }));
+    if (!stale_create.is_error or !contains(stale_create.text, "stale_revision"))
+        return ctx.fatal("MCP create after CLI create: {s}", .{stale_create.text});
+    const after_create = try scDecode(ctx, PrepareData, "prepare", try call(ctx, cs, "prepare", try mcp.obj(ctx.arena, &.{.{ "date", mcp.val(period) }})));
+    const saved_create = after_create.plan orelse return ctx.fatal("stale MCP create removed plan", .{});
+    if (saved_create.revision != 1 or saved_create.items.len != 1 or !std.mem.eql(u8, saved_create.items[0].work_item_id, item.id) or !std.mem.eql(u8, saved_create.items[0].role, "mit"))
+        return ctx.fatal("stale MCP create changed plan", .{});
+
+    // MCP advances revision 1; a CLI writer with the same expectation loses.
     const planRes = try call(ctx, cs, "commit_plan", try mcp.obj(ctx.arena, &.{
         .{ "idempotency_key", mcp.val("mcp-plan-1") },
         .{ "kind", mcp.val("daily") },
         .{ "period", mcp.val(period) },
+        .{ "expected_revision", mcp.num(1) },
         .{ "items", try mcp.arr(ctx.arena, &.{try mcp.obj(ctx.arena, &.{
             .{ "work_item_id", mcp.val(item.id) },
             .{ "role", mcp.val("mit") },
@@ -324,11 +386,33 @@ pub fn testMCPStdioJourney(ctx: *Ctx) anyerror!void {
     try wantToolOK(ctx, "commit_plan", planRes);
     const plan = try ctx.decode(PlanData, planRes.structured.?);
     const want_plan_id = try std.fmt.allocPrint(ctx.arena, "P-personal-daily-{s}", .{period});
-    if (!std.mem.eql(u8, plan.id, want_plan_id) or !std.mem.eql(u8, plan.status, "committed") or plan.revision != 1)
-        return ctx.fatal("plan = {s}, want committed revision 1 for {s}", .{ harness.dump(ctx.arena, planRes.structured.?), period });
+    if (!std.mem.eql(u8, plan.id, want_plan_id) or !std.mem.eql(u8, plan.status, "committed") or plan.revision != 2)
+        return ctx.fatal("plan = {s}, want committed revision 2 for {s}", .{ harness.dump(ctx.arena, planRes.structured.?), period });
     if (plan.items.len != 1 or !std.mem.eql(u8, plan.items[0].work_item_id, item.id) or
         !std.mem.eql(u8, plan.items[0].role, "mit"))
         return ctx.fatal("plan items = {s}, want [{s} mit]", .{ harness.dump(ctx.arena, planRes.structured.?), item.id });
+    try ctx.wantErr(try ctx.run(db, &.{
+        "plan", "commit", "--key", "cli-plan-stale", "--expected", "1", "--period", period, "--item", cli_other_item,
+    }), 1, "plan", "stale_revision");
+    const after_cli = try scDecode(ctx, PrepareData, "prepare", try call(ctx, cs, "prepare", try mcp.obj(ctx.arena, &.{.{ "date", mcp.val(period) }})));
+    const saved_cli = after_cli.plan orelse return ctx.fatal("stale CLI update removed plan", .{});
+    if (saved_cli.revision != 2 or saved_cli.items.len != 1 or !std.mem.eql(u8, saved_cli.items[0].work_item_id, item.id) or !std.mem.eql(u8, saved_cli.items[0].role, "mit"))
+        return ctx.fatal("stale CLI update changed plan", .{});
+    const stale_plan = try call(ctx, cs, "commit_plan", try mcp.obj(ctx.arena, &.{
+        .{ "idempotency_key", mcp.val("stale-plan") },
+        .{ "kind", mcp.val("daily") },
+        .{ "period", mcp.val(period) },
+        .{ "items", try mcp.arr(ctx.arena, &.{try mcp.obj(ctx.arena, &.{
+            .{ "work_item_id", mcp.val(unplanned.id) }, .{ "role", mcp.val("mit") },
+        })}) },
+        .{ "expected_revision", mcp.num(99) },
+    }));
+    if (!stale_plan.is_error or !contains(stale_plan.text, "stale_revision"))
+        return ctx.fatal("stale plan revision accepted: {s}", .{stale_plan.text});
+    const after_stale_plan = try scDecode(ctx, PrepareData, "prepare", try call(ctx, cs, "prepare", try mcp.obj(ctx.arena, &.{.{ "date", mcp.val(period) }})));
+    const saved_plan = after_stale_plan.plan orelse return ctx.fatal("stale plan removed plan", .{});
+    if (saved_plan.revision != plan.revision or saved_plan.items.len != 1 or !std.mem.eql(u8, saved_plan.items[0].work_item_id, item.id))
+        return ctx.fatal("stale plan changed saved plan", .{});
 
     // focus: start, checkpoint, finish.
     const fsRes = try call(ctx, cs, "focus_start", try mcp.obj(ctx.arena, &.{
@@ -497,6 +581,12 @@ pub fn testMCPStdioJourney(ctx: *Ctx) anyerror!void {
     }));
     if (!missing_item.is_error or !std.mem.eql(u8, missing_item.text, workItemError))
         return ctx.fatal("foreign work item error \"{s}\" differs from missing work item error \"{s}\"", .{ workItemError, missing_item.text });
+    const trace_visible = try call(ctx, cs, "trace", try mcp.obj(ctx.arena, &.{.{ "id", mcp.val(cap.id) }}));
+    try wantToolOK(ctx, "trace visible", trace_visible);
+    const trace_hidden = try call(ctx, foreign, "trace", try mcp.obj(ctx.arena, &.{.{ "id", mcp.val(cap.id) }}));
+    const trace_missing = try call(ctx, foreign, "trace", try mcp.obj(ctx.arena, &.{.{ "id", mcp.val("C-00000000-000") }}));
+    if (!trace_hidden.is_error or !trace_missing.is_error or !std.mem.eql(u8, trace_hidden.text, trace_missing.text))
+        return ctx.fatal("trace foreign and missing differ: {s}, {s}", .{ trace_hidden.text, trace_missing.text });
 }
 
 /// Go reads `checkpoints` as map[string]*checkpointData: a missing entry and
@@ -1034,6 +1124,17 @@ pub fn testMCPDocPut(ctx: *Ctx) anyerror!void {
         !std.mem.eql(u8, updated.status, "draft"))
         return ctx.fatal("doc_put update = {s}, want revision 2 draft with the new body", .{scJSON(updateRes)});
 
+    for ([_]json.Value{ mcp.num(-1), .{ .float = 1.5 }, mcp.val("2"), .{ .number_string = "9223372036854775808" } }) |revision| {
+        const invalid = try call(ctx, cs, "doc_put", try mcp.obj(ctx.arena, &.{
+            .{ "slug", mcp.val(slug) },
+            .{ "title", mcp.val("MCP draft") },
+            .{ "body", mcp.val("must not write") },
+            .{ "scope", mcp.val("personal") },
+            .{ "expected_revision", revision },
+        }));
+        if (!invalid.is_error or !contains(invalid.text, "invalid_input"))
+            return ctx.fatal("invalid document revision accepted: {s}", .{invalid.text});
+    }
     // stale revision: a wrong expectation is refused without writing.
     const stale = try call(ctx, cs, "doc_put", try docPutArgs(ctx, slug, "third body", 99));
     if (!stale.is_error or !contains(stale.text, "stale_revision"))

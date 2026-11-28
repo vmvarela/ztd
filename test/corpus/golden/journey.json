@@ -1421,13 +1421,6 @@
         "result_json": "{\"id\":\"<rid>\",\"profile\":\"personal\",\"kind\":\"weekly\",\"period\":\"<week>\",\"outcomes\":\"1 completed\",\"coverage\":\"0.5\",\"completion_state\":\"complete\",\"created_at\":\"<ts>\"}"
       },
       {
-        "command": "doc put",
-        "created_at": "<ts>",
-        "idempotency_key": "personal|knowledge|notes/architecture|0|<hash>",
-        "request_hash": "<hash>",
-        "result_json": "{\"id\":\"doc:personal:knowledge:notes/architecture\",\"scope\":\"personal\",\"kind\":\"knowledge\",\"slug\":\"notes/architecture\",\"title\":\"Architecture\",\"body\":\"One binary over SQLite.\",\"status\":\"draft\",\"revision\":1,\"created_at\":\"<ts>\",\"updated_at\":\"<ts>\"}"
-      },
-      {
         "command": "source_review",
         "created_at": "<ts>",
         "idempotency_key": "r1",

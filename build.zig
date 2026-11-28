@@ -34,14 +34,13 @@ pub fn build(b: *std.Build) void {
 
     // The conformance harnesses spawn the installed binary, so both steps
     // depend on the install artifact and pass its absolute path.
-    const corpus = harnessStep(b, target, optimize, "corpus", "Replay the golden corpus", "test/corpus/main.zig", exe);
+    const corpus = harnessStep(b, target, optimize, "corpus", "Replay the golden corpus", "test/corpus/main.zig", exe, c);
     _ = corpus;
-    const integration = harnessStep(b, target, optimize, "integration", "Run the integration suite", "test/integration/main.zig", exe);
+    const integration = harnessStep(b, target, optimize, "integration", "Run the integration suite", "test/integration/main.zig", exe, null);
     _ = integration;
 }
 
-/// A test runner that drives the product binary through its CLI and MCP
-/// surface. It only needs std: no SQLite, no C.
+/// A test runner that drives the product binary through its CLI and MCP surface.
 fn harnessStep(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -50,10 +49,11 @@ fn harnessStep(
     description: []const u8,
     root: []const u8,
     exe: *std.Build.Step.Compile,
+    c: ?*std.Build.Module,
 ) *std.Build.Step {
     const runner = b.addExecutable(.{
         .name = name,
-        .root_module = b.createModule(.{
+        .root_module = if (c) |sqlite| productModule(b, target, optimize, b.path(root), sqlite) else b.createModule(.{
             .root_source_file = b.path(root),
             .target = target,
             .optimize = optimize,

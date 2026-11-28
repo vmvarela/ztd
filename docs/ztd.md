@@ -202,8 +202,11 @@ Commit the plan:
   --item T-20261119-004:big_rock
 ```
 
-A fourth MIT is rejected unless a `DailyLimitOverride` exists. An item outside
-the declared scopes is rejected.
+A fourth MIT is rejected unless a `DailyLimitOverride` exists. Plan items must
+be visible in the current binding. Omitted `--expected` (or zero) creates only;
+to replace a plan, pass its current revision with `--expected N` and use a
+binding that can see all its existing items. Retrying the same key and request
+returns the original result if all its items are still visible.
 
 ## 4. Do one thing
 
@@ -320,6 +323,9 @@ journal to replay, so it reports `recovered: false` and writes nothing.
 ./ztd --db "$DB" snapshot --out /tmp/ztd-snapshot.db
 ```
 
+Export requires a new destination; it never replaces an existing path or a
+database-reserved SQLite file.
+
 Restore only into an empty database:
 
 ```sh
@@ -407,10 +413,12 @@ read.
   again returns the existing row without writing anything. `context list`
   is binding-filtered and ordered by name.
 - A **document** is identified by `(scope, kind, slug)`. `doc put` creates it
-  at revision 1 or updates it with `--expected N`; a wrong expectation is
-  `stale_revision` and writes nothing, and repeating the identical command
-  replays the stored result. Kinds are `knowledge`, `knowledge_index`,
-  `project_note`, `plan_daily`, `plan_weekly`, `review`, `journal`,
+  at revision 1. An edit with `--expected N` checks the current revision;
+  a wrong expectation writes nothing, and retrying an accepted edit returns
+  its original result. Without `--expected`, the edit compares against the
+  current document: identical content and metadata leave it unchanged;
+  restoring earlier content writes a new revision. Kinds are `knowledge`,
+  `knowledge_index`, `project_note`, `plan_daily`, `plan_weekly`, `review`, `journal`,
   `calendar`, `adoption`, `passion` and `routine`. Status is `draft` (the
   default), `verified` or `superseded`. `--file PATH` supplies the body
   instead of `--body TEXT`. `doc list` filters with `--kind`.
@@ -432,7 +440,7 @@ read.
   under `answers/<S>` (an existing `answers/` prefix is not doubled), with the
   title defaulting to the slug. With `--question`, the body gains a short
   header — `# <title>`, the question and today's date — above the answer. It
-  reuses `doc put`'s idempotency and `--expected` revision guard.
+  follows the same write and revision rules as `doc put`.
 - `doc search --query Q [--kind K] [--scope X] [--limit N]` is a read-only
   full-text search over the bound scopes' documents (FTS5). `--query` is
   required; every word must appear, FTS operators in the query are treated as

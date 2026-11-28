@@ -77,10 +77,9 @@ This change does not migrate ambiguous historical rows.
 
 ## User configuration
 
-Sources are user configuration, not product code. ZTD knows only the generic
-fields above; it has no provider list, no provider-specific branches, and it
-never performs retrieval. The host or MCP server the user configured owns the
-actual connector.
+Sources are user configuration, not product code. ZTD scans approved local
+directories on request. For network providers, the host or MCP server you
+configure owns retrieval; ZTD does not contact the provider.
 
 Apply a JSON file to synchronize the registry:
 
@@ -90,7 +89,7 @@ Apply a JSON file to synchronize the registry:
    "kind": "capture", "connector": "host_mcp", "provider": "github",
    "connection_ref": "github-main", "cadence": "daily"},
   {"id": "notes", "name": "Notes directory", "scope": "personal",
-   "kind": "capture", "connector": "directory", "non_secret_query": "~/notes"}
+   "kind": "capture", "connector": "directory", "connection_ref": "[\"/absolute/path/to/notes\"]"}
 ]}
 ```
 
@@ -122,12 +121,9 @@ Every recorded batch has a `result_kind`:
   `record_source_review` tool can only produce `reported`. Coverage is
   stored as `unverified` (or `partial`/`failed`, see below) and **never** as
   `complete`.
-- **`observed`** — a trusted host adapter, configured by the operator outside
-  model-controlled arguments, records the result of an actual provider
-  exchange. No such adapter exists yet, so `observed` is rejected on every
-  model-facing path: the service refuses it with `invalid_input`, and the MCP
-  tool refuses it before reaching the service. Only a direct `Repo` caller
-  acting as the trusted adapter can record it.
+- **`observed`** — the built-in directory scanner records what it read from
+  the roots configured by the operator. Host-supplied batches cannot claim
+  `observed`.
 
 A model cannot upgrade its own trust level. A `provider_execution_ref`, an
 identifier, or any other evidence-like field it supplies stays `reported`.
@@ -143,11 +139,8 @@ Plain prose claiming retrieval success establishes nothing.
 | `complete` | Reserved for an observed batch that provably read its whole window. |
 | `failed` | A batch with no items and at least one failure. |
 
-A directory scan also reports `retrieval.skipped`: the files it did not read
-because they are not text (a picture, an archive, a PDF). That count is
-informational — the window was still walked end to end, so coverage stays
-`complete` and the cursor advances. Only read errors and truncation make a
-window `partial`.
+A directory scan also reports `retrieval.skipped`: files excluded as non-text.
+That count alone does not make coverage partial or block the cursor.
 
 Empty with errors is not the same as empty and complete. A failed or partial
 retrieval keeps its gap visible: `prepare` and the source views surface
@@ -159,20 +152,20 @@ unreviewed source never looks like an empty one.
 The source owns one `cursor`, the last position that was *reliably* read.
 
 - A cursor advances only for an `observed` batch whose window is complete,
-  untruncated, and failure-free. A `reported` batch never moves it.
+  untruncated, and failure-free. A `reported` batch never moves it, and finding
+  a file with an older modification time never moves the cursor backwards.
 - After a partial page, the captures already committed stay durable, the
   incomplete region stays pending, and the cursor does not skip it.
 - A retry reuses the same external identity (`source_id`, `external_id`,
   `external_revision`), so it cannot duplicate captures. A changed
   `external_revision` creates a new capture and leaves the old one intact.
 
-## No provider or network connector yet
+## Scan an approved directory
 
-This release registers sources and ingests batches you feed it. It does not
-call GitHub, Jira, email, calendars, or any network service; there is no
-background scanner and no directory watcher. `directory` and `host_mcp` name
-how a batch will arrive once a trusted host adapter exists, not a process
-running now. Nothing here implies that a configured source has been read.
+Register a `directory` source with absolute roots in `connection_ref`, then
+run `ztd source scan --id notes`. There is no background scanner or watcher.
+Pass `--key` if you need to retry the same scan; use a new key (or omit it) to
+read the directory again.
 
 ## How to feed a batch
 

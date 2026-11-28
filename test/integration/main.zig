@@ -32,6 +32,8 @@ const tests = [_]Test{
     .{ .name = "TestRoutineAliases", .func = cli_tests.testRoutineAliases },
     .{ .name = "TestBooleanFlagValue", .func = cli_tests.testBooleanFlagValue },
     .{ .name = "TestProcessReplayKeepsFields", .func = cli_tests.testProcessReplayKeepsFields },
+    .{ .name = "TestExportNoReplace", .func = cli_tests.testExportNoReplace },
+    .{ .name = "TestScopedPlanAndTrace", .func = cli_tests.testScopedPlanAndTrace },
 };
 
 pub fn main(init: std.process.Init) !void {

@@ -50,53 +50,63 @@ pub const Store = struct {
         var stmt = try self.db.prepare("PRAGMA user_version");
         defer stmt.finalize();
         if (!try stmt.step()) return errors.fail(.db_incompatible, "cannot read PRAGMA user_version", .{});
-        return stmt.int(0);
+        const version = stmt.int(0);
+        if (version < 0) return errors.fail(.db_incompatible, "database schema version {d} is negative", .{version});
+        return version;
     }
 
     fn bootstrap(self: *Store) errors.Ztd!void {
         const version = try self.userVersion();
         const highest: i64 = migrations.len;
+        if (version < 0) {
+            return errors.fail(.db_incompatible, "database schema version {d} is negative", .{version});
+        }
         if (version > highest) {
             return errors.fail(.db_incompatible, "database schema version {d} is newer than the highest supported version {d}", .{ version, highest });
         }
-        if (version == 0) {
-            var stmt = try self.db.prepare(
-                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
-            );
-            defer stmt.finalize();
-            if (!try stmt.step()) return errors.fail(.db_incompatible, "cannot inspect schema", .{});
-            if (stmt.int(0) > 0) {
-                return errors.fail(.db_incompatible, "existing SQLite file has tables but no ZTD schema version; refusing to initialize it", .{});
-            }
-        }
-        var i: usize = @intCast(version);
-        while (i < migrations.len) : (i += 1) {
-            const n = i + 1;
+        if (version == highest) return;
+        while (true) {
             try self.db.begin();
+            errdefer self.db.rollback();
+            const current = try self.userVersion();
+            if (current < 0) {
+                return errors.fail(.db_incompatible, "database schema version {d} is negative", .{current});
+            }
+            if (current > highest) {
+                return errors.fail(.db_incompatible, "database schema version {d} is newer than the highest supported version {d}", .{ current, highest });
+            }
+            if (current == highest) {
+                try self.db.commit();
+                return;
+            }
+            if (current == 0) {
+                var stmt = try self.db.prepare(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                );
+                defer stmt.finalize();
+                if (!try stmt.step()) return errors.fail(.db_incompatible, "cannot inspect schema", .{});
+                if (stmt.int(0) > 0) {
+                    return errors.fail(.db_incompatible, "existing SQLite file has tables but no ZTD schema version; refusing to initialize it", .{});
+                }
+            }
+            const i: usize = @intCast(current);
+            const n = i + 1;
             self.db.exec(migrations[i].sql) catch |e| {
-                self.db.rollback();
                 // Copy the detail: fail() formats over the buffer it came from.
                 var tmp: [4096]u8 = undefined;
                 const detail = errors.detailCopy(&tmp);
                 return errors.fail(.db_incompatible, "migration {d} failed: {s}", .{ n, detail }) catch e;
             };
             if (migrations[i].step) |step| {
-                step(self) catch |e| {
-                    self.db.rollback();
-                    return e;
-                };
+                try step(self);
             }
             try assertForeignKeys(self, n);
             var sql_buf: [48]u8 = undefined;
             const sql = std.fmt.bufPrint(&sql_buf, "PRAGMA user_version = {d}", .{n}) catch unreachable;
             self.db.exec(sql) catch |e| {
-                self.db.rollback();
                 return errors.fail(.db_incompatible, "migration {d} failed to record its version", .{n}) catch e;
             };
-            self.db.commit() catch |e| {
-                self.db.rollback();
-                return e;
-            };
+            try self.db.commit();
         }
     }
 
@@ -161,6 +171,165 @@ test "migrations apply on a fresh database" {
     try std.testing.expectEqual(@as(i64, 1), stmt.int(0));
 }
 
+const BusyMigration = struct {
+    writer: *sqlite.Db,
+    unversioned: bool = false,
+    called: bool = false,
+    failed: bool = false,
+
+    fn complete(raw: ?*anyopaque, _: c_int) callconv(.c) c_int {
+        const ctx: *BusyMigration = @ptrCast(@alignCast(raw.?));
+        ctx.called = true;
+        if (ctx.unversioned) {
+            ctx.writer.exec("CREATE TABLE unrelated (id INTEGER)") catch {
+                ctx.failed = true;
+                return 0;
+            };
+            ctx.writer.commit() catch {
+                ctx.failed = true;
+                return 0;
+            };
+            return 1;
+        }
+        ctx.writer.exec(migrations[0].sql) catch {
+            ctx.failed = true;
+            return 0;
+        };
+        ctx.writer.exec("PRAGMA user_version = 1") catch {
+            ctx.failed = true;
+            return 0;
+        };
+        ctx.writer.commit() catch {
+            ctx.failed = true;
+            return 0;
+        };
+        return 1;
+    }
+};
+
+test "bootstrap rechecks stale version after waiting for another writer" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "race.db", .{});
+    file.close(io);
+    const path = try tmp.dir.realPathFileAlloc(io, "race.db", a);
+    defer a.free(path);
+    const zpath = try a.dupeSentinel(u8, path, 0);
+    defer a.free(zpath);
+    var writer = try sqlite.Db.open(zpath);
+    defer writer.close();
+    var s = Store{ .db = try sqlite.Db.open(zpath) };
+    defer s.close();
+    try writer.begin();
+    var ctx = BusyMigration{ .writer = &writer };
+    try std.testing.expectEqual(@as(c_int, sqlite.c.SQLITE_OK), sqlite.c.sqlite3_busy_handler(s.db.handle, BusyMigration.complete, &ctx));
+    try s.bootstrap();
+    try std.testing.expect(ctx.called and !ctx.failed);
+    try std.testing.expectEqual(@as(i64, migrations.len), try s.userVersion());
+    try assertForeignKeys(&s, migrations.len);
+}
+
+test "bootstrap checks unversioned schema after waiting for another writer" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "unversioned.db", .{});
+    file.close(io);
+    const path = try tmp.dir.realPathFileAlloc(io, "unversioned.db", a);
+    defer a.free(path);
+    const zpath = try a.dupeSentinel(u8, path, 0);
+    defer a.free(zpath);
+    var writer = try sqlite.Db.open(zpath);
+    defer writer.close();
+    var s = Store{ .db = try sqlite.Db.open(zpath) };
+    defer s.close();
+    try writer.begin();
+    var ctx = BusyMigration{ .writer = &writer, .unversioned = true };
+    try std.testing.expectEqual(@as(c_int, sqlite.c.SQLITE_OK), sqlite.c.sqlite3_busy_handler(s.db.handle, BusyMigration.complete, &ctx));
+    try std.testing.expectError(error.Ztd, s.bootstrap());
+    try std.testing.expect(ctx.called and !ctx.failed);
+    try std.testing.expectEqual(errors.Family.db_incompatible, errors.getFamily());
+    try std.testing.expectEqual(@as(i64, 0), try s.userVersion());
+    var stmt = try s.db.prepare("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='unrelated'");
+    defer stmt.finalize();
+    try std.testing.expect(try stmt.step());
+    try std.testing.expectEqual(@as(i64, 1), stmt.int(0));
+}
+
+test "bootstrap rejects a negative version before and after acquiring the lock" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "negative.db", .{});
+    file.close(io);
+    const path = try tmp.dir.realPathFileAlloc(io, "negative.db", a);
+    defer a.free(path);
+    const zpath = try a.dupeSentinel(u8, path, 0);
+    defer a.free(zpath);
+    var writer = try sqlite.Db.open(zpath);
+    defer writer.close();
+    var s = Store{ .db = try sqlite.Db.open(zpath) };
+    defer s.close();
+    const Callback = struct {
+        writer: *sqlite.Db,
+        called: bool = false,
+        failed: bool = false,
+        fn complete(raw: ?*anyopaque, _: c_int) callconv(.c) c_int {
+            const ctx: *@This() = @ptrCast(@alignCast(raw.?));
+            ctx.called = true;
+            ctx.writer.exec("PRAGMA user_version = -1") catch {
+                ctx.failed = true;
+                return 0;
+            };
+            ctx.writer.commit() catch {
+                ctx.failed = true;
+                return 0;
+            };
+            return 1;
+        }
+    };
+    try writer.begin();
+    var ctx = Callback{ .writer = &writer };
+    try std.testing.expectEqual(@as(c_int, sqlite.c.SQLITE_OK), sqlite.c.sqlite3_busy_handler(s.db.handle, Callback.complete, &ctx));
+    try std.testing.expectError(error.Ztd, s.bootstrap());
+    try std.testing.expect(ctx.called and !ctx.failed);
+    try std.testing.expectEqual(errors.Family.db_incompatible, errors.getFamily());
+    try std.testing.expectEqualStrings("database schema version -1 is negative", errors.detail());
+    try s.db.begin();
+    s.db.rollback();
+    try std.testing.expectError(error.Ztd, s.bootstrap());
+    try std.testing.expectEqual(errors.Family.db_incompatible, errors.getFamily());
+    try std.testing.expectEqualStrings("database schema version -1 is negative", errors.detail());
+    var stmt = try s.db.prepare("PRAGMA user_version");
+    defer stmt.finalize();
+    try std.testing.expect(try stmt.step());
+    try std.testing.expectEqual(@as(i64, -1), stmt.int(0));
+}
+
+test "foreign key failure rolls back the whole migration" {
+    var s = Store{ .db = try sqlite.Db.open(":memory:") };
+    defer s.close();
+    try s.db.exec(migrations[0].sql);
+    try s.db.exec(
+        "PRAGMA user_version = 1; PRAGMA foreign_keys = OFF;" ++
+            "INSERT INTO contexts (id, scope_id, name, revision) VALUES ('orphan','missing','test',1);" ++
+            "PRAGMA foreign_keys = ON;",
+    );
+    try std.testing.expectError(error.Ztd, s.bootstrap());
+    try std.testing.expectEqual(errors.Family.db_incompatible, errors.getFamily());
+    try std.testing.expectEqual(@as(i64, 1), try s.userVersion());
+    var stmt = try s.db.prepare("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='focus_sessions'");
+    defer stmt.finalize();
+    try std.testing.expect(try stmt.step());
+    try std.testing.expectEqual(@as(i64, 0), stmt.int(0));
+    try s.db.begin();
+    s.db.rollback();
+}
+
 test "generated ids start at one per day" {
     var s = try Store.open(":memory:");
     defer s.close();
@@ -200,21 +369,36 @@ fn firstLineTitle(id: []const u8, text: []const u8, buf: []u8) []const u8 {
     return buf[0..cut.len];
 }
 
-fn insertKnowledgeDocument(s: *Store, row: *sqlite.Statement) errors.Ztd!void {
-    const id = row.text(0);
+pub const LegacyKnowledgeRow = struct {
+    id: []const u8,
+    scope_id: []const u8,
+    kind: []const u8,
+    text: []const u8,
+    state: []const u8,
+    review_state: []const u8,
+    source_refs: []const u8,
+    valid_from: ?[]const u8,
+    reviewed_at: ?[]const u8,
+    supersedes_id: ?[]const u8,
+    revision: i64,
+    created_at: []const u8,
+};
+
+pub fn insertKnowledgeDocument(s: *Store, row: LegacyKnowledgeRow) errors.Ztd!void {
+    const id = row.id;
     var slug_buf: [128]u8 = undefined;
     const slug = std.fmt.bufPrint(&slug_buf, "kr/{s}", .{id}) catch
         return errors.fail(.db_incompatible, "knowledge id is too long to migrate: {s}", .{id});
     var title_buf: [80]u8 = undefined;
-    const title = firstLineTitle(id, row.text(3), &title_buf);
-    const status = if (std.mem.eql(u8, row.text(4), "superseded"))
+    const title = firstLineTitle(id, row.text, &title_buf);
+    const status = if (std.mem.eql(u8, row.state, "superseded"))
         "superseded"
-    else if (std.mem.eql(u8, row.text(5), "verified"))
+    else if (std.mem.eql(u8, row.review_state, "verified"))
         "verified"
     else
         "draft";
-    const reviewed = row.optText(8);
-    const updated_at = reviewed orelse row.text(11);
+    const reviewed = row.reviewed_at;
+    const updated_at = reviewed orelse row.created_at;
 
     var ins = try s.db.prepare(
         "INSERT INTO documents (id, scope_id, kind, slug, title, body, status, revision, " ++
@@ -223,19 +407,19 @@ fn insertKnowledgeDocument(s: *Store, row: *sqlite.Statement) errors.Ztd!void {
     );
     defer ins.finalize();
     try ins.bindText(1, id);
-    try ins.bindText(2, row.text(1));
+    try ins.bindText(2, row.scope_id);
     try ins.bindText(3, slug);
     try ins.bindText(4, title);
-    try ins.bindText(5, row.text(3));
+    try ins.bindText(5, row.text);
     try ins.bindText(6, status);
-    try ins.bindInt(7, row.int(10));
-    try ins.bindText(8, row.text(11));
+    try ins.bindInt(7, row.revision);
+    try ins.bindText(8, row.created_at);
     try ins.bindText(9, updated_at);
-    try ins.bindText(10, row.text(2));
+    try ins.bindText(10, row.kind);
     try ins.bindOptText(11, reviewed);
-    try ins.bindOptText(12, row.optText(7));
-    try ins.bindText(13, row.optText(6) orelse "[]");
-    try ins.bindOptText(14, row.optText(9));
+    try ins.bindOptText(12, row.valid_from);
+    try ins.bindText(13, row.source_refs);
+    try ins.bindOptText(14, row.supersedes_id);
     _ = try ins.step();
 }
 
@@ -287,7 +471,20 @@ fn migrateKnowledge(s: *Store) errors.Ztd!void {
         );
         defer rows.finalize();
         while (try rows.step()) {
-            try insertKnowledgeDocument(s, &rows);
+            try insertKnowledgeDocument(s, .{
+                .id = rows.text(0),
+                .scope_id = rows.text(1),
+                .kind = rows.text(2),
+                .text = rows.text(3),
+                .state = rows.text(4),
+                .review_state = rows.text(5),
+                .source_refs = rows.text(6),
+                .valid_from = rows.optText(7),
+                .reviewed_at = rows.optText(8),
+                .supersedes_id = rows.optText(9),
+                .revision = rows.int(10),
+                .created_at = rows.text(11),
+            });
             migrated += 1;
         }
     }
@@ -356,6 +553,7 @@ test "an existing v7 database upgrades in place with its rows" {
     var s = try Store.open(path);
     defer s.close();
     try std.testing.expectEqual(@as(i64, 12), try s.userVersion());
+    try assertForeignKeys(&s, 12);
 
     var q = try s.db.prepare("SELECT count(*) FROM captures WHERE id = 'C-20260101-001'");
     try std.testing.expect(try q.step());

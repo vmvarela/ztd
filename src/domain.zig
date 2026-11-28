@@ -555,6 +555,27 @@ pub const SourceRetrieval = struct {
     skipped: usize = 0,
     failures: ?[]const []const u8 = null,
 
+    /// Borrows strings from the parsed value. `a` owns only the failure list.
+    pub fn fromValue(a: std.mem.Allocator, value: ?std.json.Value) !SourceRetrieval {
+        const v = value orelse return .{};
+        var out: SourceRetrieval = .{
+            .window = json.strField(v, "window") orelse "",
+            .cursor = json.strField(v, "cursor") orelse "",
+            .requested_limit = json.intField(v, "requested_limit") orelse 0,
+            .provider_returned_limit = json.intField(v, "provider_returned_limit") orelse 0,
+            .complete_window = json.boolField(v, "complete_window") orelse false,
+            .truncated = json.boolField(v, "truncated") orelse false,
+            .skipped = std.math.cast(usize, @max(0, json.intField(v, "skipped") orelse 0)) orelse std.math.maxInt(usize),
+        };
+        if (json.arrField(v, "failures")) |items| {
+            const failures = try a.alloc([]const u8, items.len);
+            // Keep the CLI/MCP canonical payload (and therefore old hashes).
+            for (items, failures) |item, *failure| failure.* = if (item == .string) item.string else "";
+            out.failures = failures;
+        }
+        return out;
+    }
+
     pub fn write(self: SourceRetrieval, o: *json.Obj) !void {
         try o.str("window", self.window);
         try o.str("cursor", self.cursor);
@@ -572,6 +593,21 @@ pub const SourceRetrieval = struct {
         }
     }
 };
+
+test "source retrieval keeps canonical failure entries and defaults" {
+    const a = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"skipped":3,"failures":["read error",null]}
+    , .{});
+    defer parsed.deinit();
+    const retrieval = try SourceRetrieval.fromValue(a, parsed.value);
+    const failures = retrieval.failures.?;
+    defer a.free(failures);
+    try std.testing.expectEqual(@as(usize, 3), retrieval.skipped);
+    try std.testing.expectEqualStrings("read error", failures[0]);
+    try std.testing.expectEqualStrings("", failures[1]);
+    try std.testing.expectEqual(@as(?[]const []const u8, null), (try SourceRetrieval.fromValue(a, null)).failures);
+}
 
 pub const SourceItem = struct {
     external_id: []const u8 = "",

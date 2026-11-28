@@ -480,10 +480,13 @@ fn measurement(t: *T) !void {
     // turns the database permanently red and blocks every later restore.
     _ = try v3Fail(t, try r.run(&.{ "review", "monthly", "--period", "2026-+1", "--outcomes", "x", "--coverage", "1" }), "invalid_input");
     _ = try v3Fail(t, try r.run(&.{ "review", "yearly", "--period", " 2026", "--outcomes", "x", "--coverage", "1" }), "invalid_input");
-    const rev = try v3OK(t, try r.run(&.{ "review", "daily", "--period", date, "--outcomes", "shipped the release", "--coverage", "1", "--derive" }));
+    const args = [_][]const u8{ "review", "daily", "--period", date, "--outcomes", "shipped the release", "--coverage", "1", "--derive", "--key", "measurement" };
+    const rev = try v3OK(t, try r.run(&args));
     const rd = try v3Data(t, rev);
     v3RFC3339(t, try v3Str(t, rd, "created_at")) catch return error.SubtestFailed;
     try v3Keys(t, try v3Obj(t, rd, "metrics"), &metric_keys);
+    const replay = try v3OK(t, try r.run(&args));
+    if (!std.mem.eql(u8, replay.raw, rev.raw)) return t.fail("review replay changed the response:\n{s}\n{s}", .{ rev.raw, replay.raw });
 
     const show = try v3OK(t, try r.run(&.{ "review", "show", "--period", date }));
     const sd = try v3Data(t, show);
@@ -600,6 +603,10 @@ fn decisions(t: *T) !void {
     v3RFC3339(t, try v3Str(t, pd, "created_at")) catch return error.SubtestFailed;
     const docID = try v3Str(t, pd, "id");
 
+    const unguarded = try r.run(&.{ "doc", "put", "--kind", "knowledge", "--slug", "d/one", "--body", body, "--status", "verified", "--approved-by", "alice" });
+    if (unguarded.code != 1 or (try v3Env(t, unguarded)).ok)
+        return t.fail("decision verification without a revision succeeded", .{});
+
     var verifying: std.ArrayList([]const u8) = .empty;
     defer verifying.deinit(t.a);
     try verifying.appendSlice(t.a, &.{ "doc", "put", "--kind", "knowledge", "--slug", "d/one", "--body", body, "--record-kind", "decision", "--rationale", "r", "--status", "verified", "--expected", "1" });
@@ -608,6 +615,11 @@ fn decisions(t: *T) !void {
     const verified = try v3OK(t, try r.run(verifying.items));
     const status = try v3Str(t, try v3Data(t, verified), "status");
     if (!std.mem.eql(u8, status, "verified")) return t.fail("status \"{s}\", want verified", .{status});
+    _ = try v3Fail(t, try r.run(&.{ "doc", "put", "--kind", "knowledge", "--slug", "d/one", "--body", body, "--status", "verified", "--expected", "2", "--rationale", "changed without approval" }), "invalid_input");
+    _ = try v3Fail(t, try r.run(&.{ "doc", "put", "--kind", "knowledge", "--slug", "d/one", "--body", body, "--status", "verified", "--expected", "2", "--record-kind", "fact" }), "invalid_input");
+    const still_verified = try v3Data(t, try v3OK(t, try r.run(&.{ "doc", "get", "--kind", "knowledge", "--slug", "d/one" })));
+    if ((try v3Num(t, still_verified, "revision")) != 2 or !std.mem.eql(u8, try v3Str(t, still_verified, "record_kind"), "decision"))
+        return t.fail("rejected approval attempts changed the decision", .{});
 
     const hits = try v3DataArr(t, try v3OK(t, try r.run(&.{ "doc", "search", "--query", body, "--record-kind", "decision" })));
     var found = false;
@@ -632,6 +644,16 @@ fn decisions(t: *T) !void {
     if (!std.mem.eql(u8, old_status, "superseded")) return t.fail("old doc status \"{s}\", want superseded", .{old_status});
 
     _ = try v3Fail(t, try r.run(&.{ "doc", "supersede", "d/two", "d/two" }), "invalid_input");
+    _ = try v3Fail(t, try r.run(&.{ "doc", "supersede", "d/two", "d/one" }), "invalid_transition");
+
+    for ([_][]const u8{ "first", "second", "first", "first" }, [_]f64{ 1, 2, 3, 3 }) |text, revision| {
+        const edit = try v3Data(t, try v3OK(t, try r.run(&.{ "doc", "put", "--kind", "knowledge", "--slug", "d/edit", "--body", text })));
+        if ((try v3Num(t, edit, "revision")) != revision)
+            return t.fail("put {s}: want revision {d}", .{ text, revision });
+    }
+    const edited = try v3Data(t, try v3OK(t, try r.run(&.{ "doc", "get", "--kind", "knowledge", "--slug", "d/edit" })));
+    if (!std.mem.eql(u8, try v3Str(t, edited, "body"), "first") or (try v3Num(t, edited, "revision")) != 3)
+        return t.fail("deliberate repeated edit was not persisted", .{});
     T.done(&r);
 }
 
@@ -661,6 +683,13 @@ fn learn(t: *T) !void {
 
     const p2 = try v3Data(t, try v3OK(t, try r.run(&propose_args)));
     if ((try v3Num(t, p2, "revision")) != 1) return t.fail("re-running learn propose raised the revision to {d}, want 1", .{try v3Num(t, p2, "revision")});
+
+    const evidence = try v3WorkItem(t, &r, "lesson-evidence", "a related fix");
+    _ = try v3OK(t, try r.run(&propose_args ++ .{ "--evidence", evidence }));
+    const doc_trace = try v3Data(t, try v3OK(t, try r.run(&.{ "trace", docID })));
+    if (!v3HasEdge(try v3Arr(t, doc_trace, "edges"), "evidence", "document", docID, "work_item", evidence))
+        return t.fail("learn propose did not save evidence of an unchanged draft", .{});
+    _ = try v3Fail(t, try r.run(&propose_args ++ .{ "--evidence", "C-20260101-999" }), "not_found");
 
     _ = try v3OK(t, try r.run(&.{ "doc", "put", "--kind", "knowledge", "--slug", "lessons/x", "--body", lesson, "--status", "verified", "--expected", "1", "--approved-by", "alice" }));
     _ = try v3Fail(t, try r.run(&propose_args), "invalid_transition");
@@ -741,14 +770,28 @@ fn directoryConnector(t: *T) !void {
 
     const tree = try r.path("tree");
     harness.mkdirs(t.io, tree) catch |e| return t.fail("mkdir {s}: {s}", .{ tree, @errorName(e) });
-    try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = try std.fmt.allocPrint(t.a, "{s}/a.md", .{tree}), .data = "alpha note\n" });
-    try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = try std.fmt.allocPrint(t.a, "{s}/b.md", .{tree}), .data = "beta note\n" });
+    const dir = std.Io.Dir.cwd();
+    const alpha = try std.fmt.allocPrint(t.a, "{s}/a.md", .{tree});
+    const beta = try std.fmt.allocPrint(t.a, "{s}/b.md", .{tree});
+    const gamma = try std.fmt.allocPrint(t.a, "{s}/c.md", .{tree});
+    const recent: i96 = 1_775_002_000_000_000_000;
+    const earlier: i96 = 1_775_001_000_000_000_000;
+    try dir.writeFile(t.io, .{ .sub_path = alpha, .data = "alpha note\n" });
+    try dir.setTimestamps(t.io, alpha, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = recent + 100_000_000 } } });
+    try dir.writeFile(t.io, .{ .sub_path = beta, .data = "beta note\n" });
+    try dir.setTimestamps(t.io, beta, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = earlier } } });
     // A text file whose 64 KiB cut lands inside a character must still be a
     // capture: the tail is trimmed before the UTF-8 check, not after.
     var straddle: std.ArrayList(u8) = .empty;
     try straddle.appendNTimes(t.a, 'a', 65535);
-    try straddle.appendSlice(t.a, "é tail\n");
-    try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = try std.fmt.allocPrint(t.a, "{s}/c.md", .{tree}), .data = straddle.items });
+    try straddle.appendSlice(t.a, "📚 tail\n");
+    try dir.writeFile(t.io, .{ .sub_path = gamma, .data = straddle.items });
+    try dir.setTimestamps(t.io, gamma, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = earlier } } });
+    straddle.items[65535] = 0xff;
+    try dir.writeFile(t.io, .{ .sub_path = try std.fmt.allocPrint(t.a, "{s}/bad-end.md", .{tree}), .data = straddle.items });
+    straddle.items[65535] = 0xf0;
+    straddle.items[65536] = 'x';
+    try dir.writeFile(t.io, .{ .sub_path = try std.fmt.allocPrint(t.a, "{s}/bad-split.md", .{tree}), .data = straddle.items });
     // A binary whose header is valid ASCII must be skipped, never captured as
     // truncated text: only the incomplete tail of the cut may be trimmed.
     var blob: std.ArrayList(u8) = .empty;
@@ -770,9 +813,9 @@ fn directoryConnector(t: *T) !void {
     const connector = try v3Str(t, try v3Data(t, add), "connector");
     if (!std.mem.eql(u8, connector, "directory")) return t.fail("connector \"{s}\", want directory", .{connector});
 
-    // The first scan must ask for the full view: the default rendering caps
-    // at 1024 bytes and would only show the first capture of the two.
-    const scan1 = try v3Data(t, try v3OK(t, try r.run(&.{ "source", "scan", "--id", "dir1", "--full" })));
+    const scan_args = &.{ "source", "scan", "--id", "dir1", "--key", "once", "--full" };
+    const first_scan = try r.run(scan_args);
+    const scan1 = try v3Data(t, try v3OK(t, first_scan));
     const caps1 = try v3Arr(t, scan1, "captures");
     if (caps1.items.len != 3) return t.fail("first scan observed {d} captures, want 3", .{caps1.items.len});
     const rev1 = try v3Obj(t, scan1, "review");
@@ -784,7 +827,33 @@ fn directoryConnector(t: *T) !void {
     if (cursor1.len == 0) return t.fail("scan cursor is empty", .{});
     v3RFC3339(t, cursor1) catch return error.SubtestFailed;
     const skipped1 = try v3Num(t, try v3Obj(t, rev1, "retrieval"), "skipped");
-    if (skipped1 != 1) return t.fail("skipped {d}, want 1 (the binary file)", .{skipped1});
+    if (skipped1 != 3) return t.fail("skipped {d}, want 3 (invalid UTF-8)", .{skipped1});
+
+    try dir.writeFile(t.io, .{ .sub_path = alpha, .data = "ALPHA note\n" });
+    try dir.setTimestamps(t.io, alpha, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = recent + 900_000_000 } } });
+    const replay_scan = try r.run(scan_args);
+    _ = try v3OK(t, replay_scan);
+    if (!std.mem.eql(u8, first_scan.raw orelse "", replay_scan.raw orelse ""))
+        return t.fail("a keyed scan did not replay its original result after a file changed", .{});
+    _ = try v3OK(t, try r.run(&.{ "source", "add", "--id", "other-dir", "--name", "Other", "--scope", "personal", "--kind", "capture", "--connector", "directory", "--connection-ref", conn_ref }));
+    _ = try v3Fail(t, try r.run(&.{ "source", "scan", "--id", "other-dir", "--key", "once" }), "idempotency_conflict");
+
+    const edited_scan = try v3Data(t, try v3OK(t, try r.run(&.{ "source", "scan", "--id", "dir1", "--full" })));
+    const edited = try v3Arr(t, edited_scan, "captures");
+    if (edited.items.len != 1 or edited.items[0] != .object)
+        return t.fail("scan missed the same-size edit within one second", .{});
+    const edited_text = try v3Str(t, edited.items[0].object, "original_text");
+    if (!std.mem.eql(u8, edited_text, "ALPHA note\n"))
+        return t.fail("scan returned {s} instead of the edit", .{edited_text});
+
+    const old = try std.fmt.allocPrint(t.a, "{s}/old.md", .{tree});
+    try dir.writeFile(t.io, .{ .sub_path = old, .data = "old note\n" });
+    try dir.setTimestamps(t.io, old, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = earlier } } });
+    const older_scan = try v3Data(t, try v3OK(t, try r.run(&.{ "source", "scan", "--id", "dir1", "--full" })));
+    const older = try v3Arr(t, older_scan, "captures");
+    if (older.items.len != 1) return t.fail("older file was not captured exactly once", .{});
+    const older_cursor = try v3Str(t, try v3Obj(t, try v3Obj(t, older_scan, "review"), "retrieval"), "cursor");
+    if (!std.mem.eql(u8, older_cursor, cursor1)) return t.fail("cursor regressed from {s} to {s}", .{ cursor1, older_cursor });
 
     const scan2 = try v3Data(t, try v3OK(t, try r.run(&.{ "source", "scan", "--id", "dir1" })));
     const caps2 = try v3Arr(t, scan2, "captures");
@@ -864,21 +933,62 @@ fn exportV2(t: *T) !void {
         if (std.mem.eql(u8, entry.key_ptr.*, "links")) continue;
         try v1_tables.put(t.a, entry.key_ptr.*, entry.value_ptr.*);
     }
-    try v1_tables.put(t.a, "knowledge_records", .{ .array = std.json.Array.init(t.a) });
+    const legacy = try std.json.parseFromSlice(std.json.Value, t.a,
+        \\[
+        \\ {"id":"K-20240110-002","scope_id":"personal","kind":"fact","text":"Legacy successor\nLonger explanation","state":"current","review_state":"verified","source_refs":"[\"external-ref\"]","valid_from":"2024-01-09","reviewed_at":"2024-01-11T00:00:00Z","supersedes_id":"K-20240110-001","revision":2,"created_at":"2024-01-10T00:00:00Z"},
+        \\ {"id":"K-20240110-001","scope_id":"personal","kind":"fact","text":"Legacy predecessor","state":"superseded","review_state":"draft","source_refs":"[]","valid_from":null,"reviewed_at":null,"supersedes_id":null,"revision":1,"created_at":"2024-01-10T00:00:00Z"}
+        \\]
+    , .{});
+    try v1_tables.put(t.a, "knowledge_records", .{ .object = std.json.ObjectMap.empty });
     var v1_body = std.json.ObjectMap.empty;
     try v1_body.put(t.a, "format", .{ .string = "ztd-export" });
     try v1_body.put(t.a, "version", .{ .integer = 1 });
     try v1_body.put(t.a, "tables", .{ .object = v1_tables });
-    var v1_text: std.ArrayList(u8) = .empty;
-    try harness.writeJsonValue(&v1_text, t.a, .{ .object = v1_body }, 0);
-    const v1_path = try r.write("export_v1.json", v1_text.items);
-
     var v1_restore = try t.newRunner();
     errdefer v1_restore.deinit();
+
+    // Both shape and row errors must leave the target empty for a valid retry.
+    const bad_table = try r.write("invalid_legacy_table.json", try std.json.Stringify.valueAlloc(t.a, std.json.Value{ .object = v1_body }, .{}));
+    _ = try v3Fail(t, try v1_restore.run(&.{ "restore", "--from", bad_table }), "unsupported_format");
+    const legacy_rows = legacy.value.array.items;
+    v1_body.getPtr("tables").?.object.getPtr("knowledge_records").?.* = legacy.value;
+    const invalid_fields = [_]struct { key: []const u8, value: std.json.Value }{
+        .{ .key = "created_at", .value = .{ .integer = 7 } },
+        .{ .key = "created_at", .value = .{ .string = "" } },
+        .{ .key = "reviewed_at", .value = .{ .string = "not-a-timestamp" } },
+        .{ .key = "revision", .value = .{ .string = "3" } },
+    };
+    for (invalid_fields) |bad| {
+        const field = legacy_rows[1].object.getPtr(bad.key).?;
+        const saved = field.*;
+        field.* = bad.value;
+        const bad_row = try r.write("invalid_legacy_row.json", try std.json.Stringify.valueAlloc(t.a, std.json.Value{ .object = v1_body }, .{}));
+        _ = try v3Fail(t, try v1_restore.run(&.{ "restore", "--from", bad_row }), "unsupported_format");
+        field.* = saved;
+    }
+
+    const v1_path = try r.write("export_v1.json", try std.json.Stringify.valueAlloc(t.a, std.json.Value{ .object = v1_body }, .{}));
     const v1_data = try v3Data(t, try v3OK(t, try v1_restore.run(&.{ "restore", "--from", v1_path })));
     const v1_tables_out = try v3Obj(t, v1_data, "tables");
     const v1_got = try v3Num(t, v1_tables_out, "captures");
     if (v1_got != want_captures) return t.fail("v1 restore counted {d} captures, want {d}", .{ v1_got, want_captures });
+    const migrated = try v3Num(t, v1_tables_out, "documents");
+    if (migrated != 3) return t.fail("v1 restore counted {d} documents, want 3", .{migrated});
+    const hits = try v3DataArr(t, try v3OK(t, try v1_restore.run(&.{ "doc", "search", "--query", "successor", "--kind", "knowledge" })));
+    if (hits.items.len != 1 or hits.items[0] != .object) return t.fail("legacy successor missing from FTS", .{});
+    const doc = try v3Obj(t, hits.items[0].object, "document");
+    const want = [_][2][]const u8{
+        .{ "id", "K-20240110-002" },
+        .{ "title", "Legacy successor" },
+        .{ "status", "verified" },
+        .{ "created_at", "2024-01-10T00:00:00Z" },
+        .{ "updated_at", "2024-01-11T00:00:00Z" },
+        .{ "supersedes_id", "K-20240110-001" },
+    };
+    for (want) |pair| {
+        const actual = try v3Str(t, doc, pair[0]);
+        if (!std.mem.eql(u8, actual, pair[1])) return t.fail("legacy {s}: got {s}, want {s}", .{ pair[0], actual, pair[1] });
+    }
 
     T.done(&v1_restore);
     T.done(&restore);

@@ -1718,7 +1718,7 @@ fn docRelated(c: *Cli, args: []const []const u8) !void {
     const source = try core.getDocument(&r.st, c.arena, r.b, kind, slug, p.get("scope", ""));
     const all = try core.listDocuments(&r.st, c.arena, r.b, "");
     const rel = try doc.relatedDocuments(c.arena, all, source);
-    const edges = try core.externalEdges(&r.st, c.arena, source.id);
+    const edges = try core.externalEdges(&r.st, c.arena, r.b, source.id);
     var aw = Io.Writer.Allocating.init(c.arena);
     var o = try jsonw.Obj.init(&aw.writer);
     try doc.writeRelations(&o, rel);
@@ -1914,24 +1914,6 @@ fn sourceList(c: *Cli, args: []const []const u8) !void {
     try succeedData(c, "source list", aw.written());
 }
 
-fn parseRetrieval(v: ?std.json.Value) domain.SourceRetrieval {
-    var r = domain.SourceRetrieval{};
-    const value = v orelse return r;
-    if (jsonw.strField(value, "window")) |s| r.window = s;
-    if (jsonw.strField(value, "cursor")) |s| r.cursor = s;
-    if (jsonw.intField(value, "requested_limit")) |n| r.requested_limit = n;
-    if (jsonw.intField(value, "provider_returned_limit")) |n| r.provider_returned_limit = n;
-    if (jsonw.boolField(value, "complete_window")) |b| r.complete_window = b;
-    if (jsonw.boolField(value, "truncated")) |b| r.truncated = b;
-    if (jsonw.intField(value, "skipped")) |n| r.skipped = @intCast(@max(0, n));
-    if (jsonw.arrField(value, "failures")) |arr| {
-        const list = std.heap.page_allocator.alloc([]const u8, arr.len) catch unreachable;
-        for (arr, 0..) |f, i| list[i] = if (f == .string) f.string else "";
-        r.failures = list;
-    }
-    return r;
-}
-
 fn sourceReview(c: *Cli, args: []const []const u8) !void {
     const specs = [_]Spec{
         .{ .name = "scope", .value = true }, .{ .name = "source", .value = true },
@@ -1957,7 +1939,7 @@ fn sourceReview(c: *Cli, args: []const []const u8) !void {
     if (key.len == 0) key = try newKey(c, "source-review");
     var result_kind = jsonw.strField(batch, "result_kind") orelse "";
     if (result_kind.len == 0) result_kind = "reported";
-    const retrieval = parseRetrieval(jsonw.field(batch, "retrieval"));
+    const retrieval = try domain.SourceRetrieval.fromValue(c.arena, jsonw.field(batch, "retrieval"));
     var items: std.ArrayList(domain.SourceItem) = .empty;
     if (jsonw.arrField(batch, "items")) |list| {
         for (list) |it| {
@@ -2297,6 +2279,19 @@ fn cmdExport(c: *Cli, args: []const []const u8) !void {
     if (out.len == 0) return errors.invalid("--out is required", .{});
     var st = try openStore(c);
     defer st.close();
+    const db_path = Io.Dir.cwd().realPathFileAlloc(c.io, c.db, c.arena) catch |e|
+        return errors.fail(.io_error, "resolve database: {s}", .{@errorName(e)});
+    for ([_][]const u8{ "-wal", "-shm", "-journal" }) |suffix| {
+        if (out.len <= suffix.len or !std.ascii.eqlIgnoreCase(out[out.len - suffix.len ..], suffix)) continue;
+        // Resolve the database part of the name, even if its sidecar does not
+        // yet exist. The filesystem handles case and symlink aliases.
+        const base = Io.Dir.cwd().realPathFileAlloc(c.io, out[0 .. out.len - suffix.len], c.arena) catch |e| switch (e) {
+            error.FileNotFound => continue,
+            else => return errors.fail(.io_error, "resolve export destination: {s}", .{@errorName(e)}),
+        };
+        if (std.mem.eql(u8, base, db_path))
+            return errors.fail(.destination_not_empty, "export destination is reserved for the database", .{});
+    }
     try core.exportTo(&st, c.arena, c.io, out);
     try pathEnvelope(c, "export", out);
 }
@@ -2442,7 +2437,7 @@ fn cmdTrace(c: *Cli, args: []const []const u8) !void {
     if (p.positional.len != 1) return errors.invalid("usage: trace ID", .{});
     var r = try bound(c, &.{});
     defer r.st.close();
-    const t = try core.traceEntity(&r.st, c.arena, p.positional[0]);
+    const t = try core.traceEntity(&r.st, c.arena, r.b, p.positional[0]);
     var edges = t.edges;
     var omitted: i64 = 0;
     var data = try renderTrace(c.arena, t, edges, omitted);
