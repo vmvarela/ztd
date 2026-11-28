@@ -28,9 +28,11 @@ jobs:
       - name: Install scdoc
         run: sudo apt-get install -y scdoc
 
+      # Match the release artifacts: a native build links glibc and can die on
+      # other runners' CPUs or fail to start in Alpine.
       - name: Build
         run: |
-          zig build --release=fast
+          zig build --release=fast -Dtarget=x86_64-linux-musl
           cp zig-out/bin/ztd ztd
 
       - name: Build man page
