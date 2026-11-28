@@ -124,7 +124,11 @@ fn parseFlags(a: std.mem.Allocator, args: []const []const u8, specs: []const Spe
             i += 1;
             break;
         }
-        const name = std.mem.trimStart(u8, arg, "-");
+        const body = std.mem.trimStart(u8, arg, "-");
+        // Go's flag package also accepts --name=value.
+        const eq = std.mem.indexOfScalar(u8, body, '=');
+        const name = if (eq) |at| body[0..at] else body;
+        const inline_value = if (eq) |at| body[at + 1 ..] else null;
         var spec: ?Spec = null;
         for (specs) |s| if (std.mem.eql(u8, s.name, name)) {
             spec = s;
@@ -132,14 +136,25 @@ fn parseFlags(a: std.mem.Allocator, args: []const []const u8, specs: []const Spe
         const s = spec orelse return flagError("flag provided but not defined: -{s}", .{name});
         try parsed.seen.put(name, {});
         if (s.value) {
-            if (i + 1 >= args.len) return flagError("flag needs an argument: -{s}", .{name});
-            i += 1;
+            var value: []const u8 = undefined;
+            if (inline_value) |v| {
+                value = v;
+            } else {
+                if (i + 1 >= args.len) return flagError("flag needs an argument: -{s}", .{name});
+                i += 1;
+                value = args[i];
+            }
             if (s.multi) {
                 const entry = try parsed.multi.getOrPut(name);
                 if (!entry.found_existing) entry.value_ptr.* = std.ArrayList([]const u8).empty;
-                try entry.value_ptr.append(a, args[i]);
+                try entry.value_ptr.append(a, value);
             }
-            try parsed.values.put(name, args[i]);
+            try parsed.values.put(name, value);
+        } else if (inline_value) |v| {
+            if (!std.mem.eql(u8, v, "true") and !std.mem.eql(u8, v, "false")) {
+                return flagError("invalid value \"{s}\" for flag -{s}: parse error", .{ v, name });
+            }
+            try parsed.values.put(name, v);
         } else {
             try parsed.values.put(name, "true");
         }
@@ -171,7 +186,11 @@ pub fn run(init: std.process.Init, w: *Io.Writer, ew: *Io.Writer, args: []const 
             c.json = true;
             continue;
         }
-        if (std.mem.eql(u8, arg, "--db")) {
+        if (std.mem.eql(u8, arg, "--db") or std.mem.startsWith(u8, arg, "--db=")) {
+            if (std.mem.startsWith(u8, arg, "--db=")) {
+                c.db = arg["--db=".len..];
+                continue;
+            }
             if (i + 1 >= args.len) {
                 try failEnvelope(&c, "", .invalid_input, "--db needs a value");
                 return 1;
@@ -180,7 +199,11 @@ pub fn run(init: std.process.Init, w: *Io.Writer, ew: *Io.Writer, args: []const 
             c.db = args[i];
             continue;
         }
-        if (std.mem.eql(u8, arg, "--actor")) {
+        if (std.mem.eql(u8, arg, "--actor") or std.mem.startsWith(u8, arg, "--actor=")) {
+            if (std.mem.startsWith(u8, arg, "--actor=")) {
+                c.actor = arg["--actor=".len..];
+                continue;
+            }
             if (i + 1 >= args.len) {
                 try failEnvelope(&c, "", .invalid_input, "--actor needs a value");
                 return 1;
