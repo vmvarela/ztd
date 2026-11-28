@@ -3902,7 +3902,10 @@ fn parseDirectoryRoots(a: std.mem.Allocator, id: []const u8, connection_ref: []c
         if (!std.Io.Dir.path.isAbsolute(item.string)) {
             return errors.invalid("directory root {s} must be an absolute path", .{item.string});
         }
-        try roots.append(a, try dup(a, item.string));
+        // A trailing slash would make the containment test see "//file".
+        var root = item.string;
+        while (root.len > 1 and root[root.len - 1] == '/') root = root[0 .. root.len - 1];
+        try roots.append(a, try dup(a, root));
     }
     if (roots.items.len == 0) return errors.invalid("directory source {s} needs at least one root", .{id});
     return roots.items;
@@ -3922,6 +3925,7 @@ fn realpathAlloc(a: std.mem.Allocator, path: []const u8) ![]const u8 {
 
 fn insideRoot(path: []const u8, root: []const u8) bool {
     if (std.mem.eql(u8, path, root)) return true;
+    if (std.mem.eql(u8, root, "/")) return path.len > 0 and path[0] == '/';
     return std.mem.startsWith(u8, path, root) and path.len > root.len and path[root.len] == '/';
 }
 
@@ -3931,6 +3935,17 @@ fn readPrefix(a: std.mem.Allocator, io: std.Io, path: []const u8, limit: usize) 
     var buf: [4096]u8 = undefined;
     var fr = file.reader(io, &buf);
     return fr.interface.readAllocShort(a, limit);
+}
+
+/// Drops a partial UTF-8 sequence at the end, for reads cut at a byte limit.
+fn trimUtf8Tail(s: []const u8) []const u8 {
+    var n = s.len;
+    while (n > 0 and (s[n - 1] & 0xC0) == 0x80) n -= 1;
+    if (n == 0) return s[0..0];
+    const lead = s[n - 1];
+    const need: usize = if (lead < 0x80) 1 else if (lead >= 0xF0) 4 else if (lead >= 0xE0) 3 else if (lead >= 0xC0) 2 else 1;
+    if (n - 1 + need > s.len) n -= 1;
+    return s[0..n];
 }
 
 /// Walks a directory source and records one observed review. The cursor only
@@ -3991,11 +4006,8 @@ pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Bind
                 complete = false;
                 continue;
             }
-            if (items.items.len >= 500) {
-                truncated = true;
-                complete = false;
-                break;
-            }
+            const over_cap = items.items.len >= 500;
+            if (over_cap) truncated = true;
             const st = std.Io.Dir.statFile(dir, io, entry.path, .{}) catch {
                 try failures.append(a, try std.fmt.allocPrint(a, "path {s} cannot be read", .{full}));
                 complete = false;
@@ -4012,11 +4024,22 @@ pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Bind
                 complete = false;
                 continue;
             };
-            if (trimmed(text).len == 0) continue;
+            // One unreadable file is a failure for that file, never for the
+            // batch: a single .png must not make the source unusable.
+            if (!std.unicode.utf8ValidateSlice(text)) {
+                try failures.append(a, try std.fmt.allocPrint(a, "path {s} is not valid UTF-8", .{full}));
+                complete = false;
+                continue;
+            }
+            const tail = if (st.size > 64 * 1024) trimUtf8Tail(text) else text;
+            if (trimmed(tail).len == 0) continue;
+            // The window stays complete past the cap: the cursor must advance
+            // so the tail arrives on the next scan instead of never.
+            if (over_cap) continue;
             try items.append(a, .{
                 .external_id = real,
                 .external_revision = revision,
-                .original_text = text,
+                .original_text = tail,
                 .source_uri = try std.fmt.allocPrint(a, "file://{s}", .{real}),
                 .occurred_at = null,
                 .provider_metadata_summary = if (st.size > 64 * 1024)
