@@ -3282,7 +3282,6 @@ fn ftsQuery(a: std.mem.Allocator, query: []const u8) ![]const u8 {
     return aw.written();
 }
 
-
 pub const DocumentLogEntry = struct {
     seq: i64,
     event: []const u8,

@@ -93,7 +93,6 @@ pub const Db = struct {
         try self.execClassified("BEGIN IMMEDIATE");
     }
 
-    
     pub fn commit(self: Db) errors.Ztd!void {
         try self.execClassified("COMMIT");
     }
@@ -104,7 +103,6 @@ pub const Db = struct {
         _ = c.sqlite3_exec(self.handle, "ROLLBACK", null, null, null);
     }
 
-    
     /// Number of rows changed by the most recent INSERT/UPDATE/DELETE, used to
     /// detect a concurrent writer that invalidated a revision guard.
     pub fn changes(self: Db) i64 {
