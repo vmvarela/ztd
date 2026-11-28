@@ -166,9 +166,14 @@ pub fn normalize(a: std.mem.Allocator, s: []const u8, paths: []const []const u8,
     if (sys_tmp.len > 0) cur = try replaceAll(a, cur, sys_tmp, "<tmp>");
     cur = try replacePass(a, cur, matchTimestamp, "<ts>");
     cur = try replacePass(a, cur, matchAutoKey, "<key>");
+    // Two-letter prefixes first: SR- would otherwise match R- from index 1.
+    cur = try replacePass(a, cur, matchIdCP, "<cpid>");
+    cur = try replacePass(a, cur, matchIdSR, "<srid>");
     cur = try replacePass(a, cur, matchIdC, "<cid>");
     cur = try replacePass(a, cur, matchIdT, "<tid>");
     cur = try replacePass(a, cur, matchIdF, "<fid>");
+    cur = try replacePass(a, cur, matchIdG, "<gid>");
+    cur = try replacePass(a, cur, matchIdR, "<rid>");
     cur = try replacePass(a, cur, matchHash, "<hash>");
     cur = try replacePass(a, cur, matchWeek, "<week>");
     cur = try replacePass(a, cur, matchDate, "<date>");
@@ -183,6 +188,26 @@ fn matchIdT(s: []const u8, i: usize) ?usize {
 }
 fn matchIdF(s: []const u8, i: usize) ?usize {
     return matchPrefixedId(s, i, 'F');
+}
+fn matchIdG(s: []const u8, i: usize) ?usize {
+    return matchPrefixedId(s, i, 'G');
+}
+fn matchIdR(s: []const u8, i: usize) ?usize {
+    return matchPrefixedId(s, i, 'R');
+}
+/// Two-letter prefixes: CP- (checkpoint) and SR- (source review).
+fn matchIdTwo(s: []const u8, i: usize, lead: u8, second: u8) ?usize {
+    if (i + 2 >= s.len or s[i] != lead or s[i + 1] != second or s[i + 2] != '-') return null;
+    const p = digitsN(s, i + 3, 8) orelse return null;
+    if (p >= s.len or s[p] != '-') return null;
+    return digitsN(s, p + 1, 3);
+}
+
+fn matchIdCP(s: []const u8, i: usize) ?usize {
+    return matchIdTwo(s, i, 'C', 'P');
+}
+fn matchIdSR(s: []const u8, i: usize) ?usize {
+    return matchIdTwo(s, i, 'S', 'R');
 }
 
 // ------------------------------------------------------------ json writing

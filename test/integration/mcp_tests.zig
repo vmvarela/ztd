@@ -1020,10 +1020,11 @@ pub fn testMCPDocPut(ctx: *Ctx) anyerror!void {
     if (personal_events != 1 or !std.mem.eql(u8, first_personal_event, "created"))
         return ctx.fatal("personal doc log after retry = {d} entries (first \"{s}\"), want a single created event", .{ personal_events, first_personal_event });
 
-    // Same derived key (expected 0), different payload: idempotency_conflict.
-    const conflict = try call(ctx, cs, "doc_put", try docPutArgs(ctx, slug, "changed body", 0));
-    if (!conflict.is_error or !contains(conflict.text, "idempotency_conflict"))
-        return ctx.fatal("conflicting payload: want idempotency_conflict; content: {s}", .{conflict.text});
+    // A different payload with expected 0 is a new request, not a replay: the
+    // derived key carries the payload hash, so it reaches the revision guard.
+    const changed = try call(ctx, cs, "doc_put", try docPutArgs(ctx, slug, "changed body", 0));
+    if (!changed.is_error or !contains(changed.text, "stale_revision"))
+        return ctx.fatal("changed payload without revision: want stale_revision; content: {s}", .{changed.text});
 
     // update: the current revision advances the draft.
     const updateRes = try call(ctx, cs, "doc_put", try docPutArgs(ctx, slug, "second body", 1));

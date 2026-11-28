@@ -2977,11 +2977,13 @@ fn writeDocumentRequest(w: *std.Io.Writer, cmd: DocumentCmd) !void {
 pub fn putDocument(s: *Store, a: std.mem.Allocator, cmd: DocumentCmd, now: Timestamp) !domain.Document {
     try validateDocumentCmd(cmd);
     const scope = if (cmd.scope.len > 0) cmd.scope else cmd.binding.scopes[0];
-    const key = try std.fmt.allocPrint(a, "{s}|{s}|{s}|{d}", .{ scope, cmd.kind, cmd.slug, cmd.expected });
 
     var aw = std.Io.Writer.Allocating.init(a);
     try writeDocumentRequest(&aw.writer, cmd);
     const hash = sha256hex(aw.written());
+    // The key carries the payload hash: an unconditional put of the same slug
+    // is a new request, while an exact retry still replays.
+    const key = try std.fmt.allocPrint(a, "{s}|{s}|{s}|{d}|{s}", .{ scope, cmd.kind, cmd.slug, cmd.expected, &hash });
 
     try s.begin();
     errdefer s.rollback();

@@ -101,8 +101,10 @@ pub const Db = struct {
         try self.execClassified("COMMIT");
     }
 
+    /// Never reports: a rollback happens while an error is already being
+    /// propagated, and it must not overwrite that error's family and detail.
     pub fn rollback(self: Db) void {
-        _ = self.exec("ROLLBACK") catch {};
+        _ = c.sqlite3_exec(self.handle, "ROLLBACK", null, null, null);
     }
 
     pub fn lastInsertRowid(self: Db) i64 {

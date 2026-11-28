@@ -381,7 +381,7 @@
         "ok": true,
         "command": "goal set",
         "data": {
-          "id": "G-20261127-001",
+          "id": "<gid>",
           "profile_id": "personal",
           "kind": "primary",
           "start_on": "<date>",
@@ -399,7 +399,7 @@
           "profile": "personal",
           "date": "<date>",
           "goal": {
-            "id": "G-20261127-001",
+            "id": "<gid>",
             "profile_id": "personal",
             "kind": "primary",
             "start_on": "<date>",
@@ -473,7 +473,7 @@
         "ok": true,
         "command": "focus checkpoint",
         "data": {
-          "id": "CP-20261127-001",
+          "id": "<cpid>",
           "scope": "personal",
           "work_item_id": "<tid>",
           "result": "permit renewed",
@@ -503,7 +503,7 @@
         "ok": true,
         "command": "review",
         "data": {
-          "id": "R-20261127-001",
+          "id": "<rid>",
           "profile": "personal",
           "kind": "daily",
           "period": "<week>",
@@ -739,7 +739,7 @@
             }
           ],
           "review": {
-            "id": "SR-20261127-001",
+            "id": "<srid>",
             "source_id": "feed",
             "batch_id": "b1",
             "result_kind": "reported",
@@ -952,7 +952,7 @@
         "revision": "1",
         "scope_id": "personal",
         "source_id": "feed",
-        "source_review_id": "SR-20261127-001",
+        "source_review_id": "<srid>",
         "source_uri": "file:///notes/note-001.md"
       }
     ],
@@ -961,7 +961,7 @@
         "created_at": "<ts>",
         "evidence_json": "[]",
         "focus_id": "<fid>",
-        "id": "CP-20261127-001",
+        "id": "<cpid>",
         "next_action": "<null>",
         "result": "permit renewed",
         "revision": "1",
@@ -1010,7 +1010,7 @@
       {
         "created_at": "<ts>",
         "end_on": "<null>",
-        "id": "G-20261127-001",
+        "id": "<gid>",
         "kind": "primary",
         "profile_id": "personal",
         "start_on": "<date>",
@@ -1154,10 +1154,10 @@
       },
       {
         "created_at": "<ts>",
-        "entity_id": "G-20261127-001",
+        "entity_id": "<gid>",
         "entity_type": "goal",
         "event": "created",
-        "payload_json": "{\"id\":\"G-20261127-001\",\"profile_id\":\"personal\",\"kind\":\"primary\",\"start_on\":\"<date>\",\"statement\":\"Ship ztd v3\",\"status\":\"active\"}",
+        "payload_json": "{\"id\":\"<gid>\",\"profile_id\":\"personal\",\"kind\":\"primary\",\"start_on\":\"<date>\",\"statement\":\"Ship ztd v3\",\"status\":\"active\"}",
         "profile_id": "personal",
         "revision": "1",
         "scope_id": "<null>",
@@ -1187,10 +1187,10 @@
       },
       {
         "created_at": "<ts>",
-        "entity_id": "CP-20261127-001",
+        "entity_id": "<cpid>",
         "entity_type": "checkpoint",
         "event": "recorded",
-        "payload_json": "{\"id\":\"CP-20261127-001\",\"scope\":\"personal\",\"work_item_id\":\"<tid>\",\"result\":\"permit renewed\",\"created_at\":\"<ts>\",\"revision\":1}",
+        "payload_json": "{\"id\":\"<cpid>\",\"scope\":\"personal\",\"work_item_id\":\"<tid>\",\"result\":\"permit renewed\",\"created_at\":\"<ts>\",\"revision\":1}",
         "profile_id": "personal",
         "revision": "1",
         "scope_id": "personal",
@@ -1209,10 +1209,10 @@
       },
       {
         "created_at": "<ts>",
-        "entity_id": "R-20261127-001",
+        "entity_id": "<rid>",
         "entity_type": "review",
         "event": "recorded",
-        "payload_json": "{\"id\":\"R-20261127-001\",\"profile\":\"personal\",\"kind\":\"daily\",\"period\":\"<week>\",\"outcomes\":\"1 completed\",\"coverage\":\"0.5\",\"completion_state\":\"complete\",\"created_at\":\"<ts>\"}",
+        "payload_json": "{\"id\":\"<rid>\",\"profile\":\"personal\",\"kind\":\"daily\",\"period\":\"<week>\",\"outcomes\":\"1 completed\",\"coverage\":\"0.5\",\"completion_state\":\"complete\",\"created_at\":\"<ts>\"}",
         "profile_id": "personal",
         "revision": "1",
         "scope_id": "<null>",
@@ -1253,10 +1253,10 @@
       },
       {
         "created_at": "<ts>",
-        "entity_id": "SR-20261127-001",
+        "entity_id": "<srid>",
         "entity_type": "source_review",
         "event": "recorded",
-        "payload_json": "{\"id\":\"SR-20261127-001\",\"source_id\":\"feed\",\"batch_id\":\"b1\",\"result_kind\":\"reported\",\"coverage\":\"unverified\",\"retrieval\":{\"window\":\"<date>\",\"cursor\":\"\",\"requested_limit\":50,\"provider_returned_limit\":1,\"complete_window\":true,\"truncated\":false,\"failures\":[]},\"capture_ids\":[\"<cid>\"],\"created_at\":\"<ts>\"}",
+        "payload_json": "{\"id\":\"<srid>\",\"source_id\":\"feed\",\"batch_id\":\"b1\",\"result_kind\":\"reported\",\"coverage\":\"unverified\",\"retrieval\":{\"window\":\"<date>\",\"cursor\":\"\",\"requested_limit\":50,\"provider_returned_limit\":1,\"complete_window\":true,\"truncated\":false,\"failures\":[]},\"capture_ids\":[\"<cid>\"],\"created_at\":\"<ts>\"}",
         "profile_id": "<null>",
         "revision": "1",
         "scope_id": "personal",
@@ -1346,7 +1346,7 @@
         "created_at": "<ts>",
         "idempotency_key": "<key>",
         "request_hash": "<hash>",
-        "result_json": "{\"id\":\"G-20261127-001\",\"profile_id\":\"personal\",\"kind\":\"primary\",\"start_on\":\"<date>\",\"statement\":\"Ship ztd v3\",\"status\":\"active\"}"
+        "result_json": "{\"id\":\"<gid>\",\"profile_id\":\"personal\",\"kind\":\"primary\",\"start_on\":\"<date>\",\"statement\":\"Ship ztd v3\",\"status\":\"active\"}"
       },
       {
         "command": "commit_plan",
@@ -1367,7 +1367,7 @@
         "created_at": "<ts>",
         "idempotency_key": "<key>",
         "request_hash": "<hash>",
-        "result_json": "{\"id\":\"CP-20261127-001\",\"scope\":\"personal\",\"work_item_id\":\"<tid>\",\"result\":\"permit renewed\",\"created_at\":\"<ts>\",\"revision\":1}"
+        "result_json": "{\"id\":\"<cpid>\",\"scope\":\"personal\",\"work_item_id\":\"<tid>\",\"result\":\"permit renewed\",\"created_at\":\"<ts>\",\"revision\":1}"
       },
       {
         "command": "focus_finish",
@@ -1381,12 +1381,12 @@
         "created_at": "<ts>",
         "idempotency_key": "<key>",
         "request_hash": "<hash>",
-        "result_json": "{\"id\":\"R-20261127-001\",\"profile\":\"personal\",\"kind\":\"daily\",\"period\":\"<week>\",\"outcomes\":\"1 completed\",\"coverage\":\"0.5\",\"completion_state\":\"complete\",\"created_at\":\"<ts>\"}"
+        "result_json": "{\"id\":\"<rid>\",\"profile\":\"personal\",\"kind\":\"daily\",\"period\":\"<week>\",\"outcomes\":\"1 completed\",\"coverage\":\"0.5\",\"completion_state\":\"complete\",\"created_at\":\"<ts>\"}"
       },
       {
         "command": "doc put",
         "created_at": "<ts>",
-        "idempotency_key": "personal|knowledge|notes/architecture|0",
+        "idempotency_key": "personal|knowledge|notes/architecture|0|<hash>",
         "request_hash": "<hash>",
         "result_json": "{\"id\":\"doc:personal:knowledge:notes/architecture\",\"scope\":\"personal\",\"kind\":\"knowledge\",\"slug\":\"notes/architecture\",\"title\":\"Architecture\",\"body\":\"One binary over SQLite.\",\"status\":\"draft\",\"revision\":1,\"created_at\":\"<ts>\",\"updated_at\":\"<ts>\"}"
       },
@@ -1395,7 +1395,7 @@
         "created_at": "<ts>",
         "idempotency_key": "r1",
         "request_hash": "<hash>",
-        "result_json": "{\"review\":{\"id\":\"SR-20261127-001\",\"source_id\":\"feed\",\"batch_id\":\"b1\",\"result_kind\":\"reported\",\"coverage\":\"unverified\",\"retrieval\":{\"window\":\"<date>\",\"cursor\":\"\",\"requested_limit\":50,\"provider_returned_limit\":1,\"complete_window\":true,\"truncated\":false,\"failures\":[]},\"capture_ids\":[\"<cid>\"],\"created_at\":\"<ts>\"},\"captures\":[{\"id\":\"<cid>\",\"scope\":\"personal\",\"source_id\":\"feed\",\"external_id\":\"note-001\",\"external_revision\":\"1\",\"original_text\":\"renew the parking permit before the trip\",\"content_hash\":\"<hash>\",\"source_uri\":\"file:///notes/note-001.md\",\"captured_at\":\"<ts>\",\"processing_state\":\"pending\",\"revision\":1}]}"
+        "result_json": "{\"review\":{\"id\":\"<srid>\",\"source_id\":\"feed\",\"batch_id\":\"b1\",\"result_kind\":\"reported\",\"coverage\":\"unverified\",\"retrieval\":{\"window\":\"<date>\",\"cursor\":\"\",\"requested_limit\":50,\"provider_returned_limit\":1,\"complete_window\":true,\"truncated\":false,\"failures\":[]},\"capture_ids\":[\"<cid>\"],\"created_at\":\"<ts>\"},\"captures\":[{\"id\":\"<cid>\",\"scope\":\"personal\",\"source_id\":\"feed\",\"external_id\":\"note-001\",\"external_revision\":\"1\",\"original_text\":\"renew the parking permit before the trip\",\"content_hash\":\"<hash>\",\"source_uri\":\"file:///notes/note-001.md\",\"captured_at\":\"<ts>\",\"processing_state\":\"pending\",\"revision\":1}]}"
       }
     ],
     "import_runs": null,
@@ -1442,7 +1442,7 @@
         "completion_state": "complete",
         "coverage": "0.5",
         "created_at": "<ts>",
-        "id": "R-20261127-001",
+        "id": "<rid>",
         "kind": "daily",
         "metrics_json": "{}",
         "outcomes": "1 completed",
@@ -1475,7 +1475,7 @@
         "batch_id": "b1",
         "coverage_state": "unverified",
         "created_at": "<ts>",
-        "id": "SR-20261127-001",
+        "id": "<srid>",
         "idempotency_key": "r1",
         "request_hash": "<hash>",
         "result_kind": "reported",

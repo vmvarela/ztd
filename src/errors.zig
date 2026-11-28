@@ -35,19 +35,36 @@ pub const Ztd = error{Ztd};
 
 var family: Family = .io_error;
 var detail_buf: [4096]u8 = undefined;
-// Detail lengths are bounded by the buffer; a longer message is truncated at a
-// char boundary because it still has to be valid JSON.
+// A detail longer than the buffer keeps its prefix, cut on a char boundary so
+// the envelope stays valid JSON.
 var detail_len: usize = 0;
 
 /// Records family and detail, then returns the shared error.
 pub fn fail(f: Family, comptime fmt: []const u8, args: anytype) Ztd {
     family = f;
-    const printed = std.fmt.bufPrint(&detail_buf, fmt, args) catch blk: {
-        // bufPrint fails only when the message does not fit; keep the prefix.
-        break :blk detail_buf[0..0];
-    };
-    detail_len = printed.len;
+    var w = std.Io.Writer.fixed(&detail_buf);
+    w.print(fmt, args) catch {};
+    detail_len = charBoundary(w.buffered());
     return error.Ztd;
+}
+
+/// Length of the longest prefix that ends on a UTF-8 character boundary.
+fn charBoundary(s: []const u8) usize {
+    var n = s.len;
+    while (n > 0 and (s[n - 1] & 0xC0) == 0x80) n -= 1; // drop continuation bytes
+    if (n == 0) return 0;
+    const lead = s[n - 1];
+    const need: usize = if (lead < 0x80) 1 else if (lead >= 0xF0) 4 else if (lead >= 0xE0) 3 else if (lead >= 0xC0) 2 else 1;
+    if (n - 1 + need > s.len) return n - 1;
+    return n;
+}
+
+/// Copies the current detail out, for callers that format it again while it is
+/// still the live detail buffer.
+pub fn detailCopy(out: []u8) []const u8 {
+    const n = @min(detail_len, out.len);
+    @memcpy(out[0..n], detail_buf[0..n]);
+    return out[0..n];
 }
 
 pub fn invalid(comptime fmt: []const u8, args: anytype) Ztd {

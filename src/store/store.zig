@@ -73,10 +73,12 @@ pub const Store = struct {
         while (i < migrations.len) : (i += 1) {
             const n = i + 1;
             try self.db.begin();
-            errdefer self.db.rollback();
             self.db.exec(migrations[i].sql) catch |e| {
                 self.db.rollback();
-                return errors.fail(.db_incompatible, "migration {d} failed: {s}", .{ n, errors.detail() }) catch e;
+                // Copy the detail: fail() formats over the buffer it came from.
+                var tmp: [4096]u8 = undefined;
+                const detail = errors.detailCopy(&tmp);
+                return errors.fail(.db_incompatible, "migration {d} failed: {s}", .{ n, detail }) catch e;
             };
             if (migrations[i].step) |step| {
                 step(self) catch |e| {
@@ -262,6 +264,9 @@ fn insertKnowledgeDocument(s: *Store, row: *sqlite.Statement) errors.Ztd!void {
 /// 0010 step: consolidate knowledge_records into documents without losing a
 /// row, then drop the old table. Guards abort before any mutation.
 fn migrateKnowledge(s: *Store) errors.Ztd!void {
+    // knowledge rows may point at each other through supersedes_id, and the
+    // SELECT below has no order, so the FK has to be checked at commit.
+    try s.db.exec("PRAGMA defer_foreign_keys = ON");
     {
         var guard = try s.db.prepare(
             "SELECT k.id FROM knowledge_records k WHERE EXISTS (SELECT 1 FROM documents d WHERE d.id = k.id) " ++
