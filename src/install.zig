@@ -147,8 +147,8 @@ pub fn run(a: std.mem.Allocator, io: Io, cfg: Config) !Report {
 
     const manifest_path = try joinPath(a, cfg.root, manifest_name);
     var old_assets = std.StringHashMap([]const u8).init(a);
-    try readManifest(a, io, manifest_path, &old_assets, &conflicts);
-    const old_version: []const u8 = "";
+    var old_version: []const u8 = "";
+    try readManifest(a, io, manifest_path, &old_assets, &old_version, &conflicts);
 
     var actions: std.ArrayList(Action) = .empty;
     for (entries.items) |entry| {
@@ -269,6 +269,7 @@ fn readManifest(
     io: Io,
     path: []const u8,
     assets: *std.StringHashMap([]const u8),
+    version: *[]const u8,
     conflicts: *std.ArrayList([]const u8),
 ) !void {
     const st = try lstat(io, path);
@@ -287,6 +288,7 @@ fn readManifest(
     if (parsed.value != .object) return;
     const format = jsonw.intField(parsed.value, "format") orelse return;
     if (format != manifest_format) return;
+    if (jsonw.strField(parsed.value, "ztd_version")) |v| version.* = try a.dupe(u8, v);
     const list = jsonw.field(parsed.value, "assets") orelse return;
     if (list != .object) return;
     var it = list.object.iterator();
