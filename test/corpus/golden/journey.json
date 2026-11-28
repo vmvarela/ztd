@@ -432,16 +432,16 @@
         "ok": true,
         "command": "plan commit",
         "data": {
-          "id": "P-personal-daily-<week>",
+          "id": "P-personal-weekly-<week>",
           "profile": "personal",
-          "kind": "daily",
+          "kind": "weekly",
           "period": "<week>",
           "status": "committed",
           "revision": 1,
           "items": [
             {
               "work_item_id": "<tid>",
-              "role": "mit",
+              "role": "big_rock",
               "position": 0
             }
           ],
@@ -505,7 +505,7 @@
         "data": {
           "id": "<rid>",
           "profile": "personal",
-          "kind": "daily",
+          "kind": "weekly",
           "period": "<week>",
           "outcomes": "1 completed",
           "coverage": "0.5",
@@ -1165,10 +1165,10 @@
       },
       {
         "created_at": "<ts>",
-        "entity_id": "P-personal-daily-<week>",
+        "entity_id": "P-personal-weekly-<week>",
         "entity_type": "plan",
         "event": "committed",
-        "payload_json": "{\"id\":\"P-personal-daily-<week>\",\"profile\":\"personal\",\"kind\":\"daily\",\"period\":\"<week>\",\"status\":\"committed\",\"revision\":1,\"items\":[{\"work_item_id\":\"<tid>\",\"role\":\"mit\",\"position\":0}],\"created_at\":\"<ts>\",\"updated_at\":\"<ts>\"}",
+        "payload_json": "{\"id\":\"P-personal-weekly-<week>\",\"profile\":\"personal\",\"kind\":\"weekly\",\"period\":\"<week>\",\"status\":\"committed\",\"revision\":1,\"items\":[{\"work_item_id\":\"<tid>\",\"role\":\"big_rock\",\"position\":0}],\"created_at\":\"<ts>\",\"updated_at\":\"<ts>\"}",
         "profile_id": "personal",
         "revision": "1",
         "scope_id": "<null>",
@@ -1212,7 +1212,7 @@
         "entity_id": "<rid>",
         "entity_type": "review",
         "event": "recorded",
-        "payload_json": "{\"id\":\"<rid>\",\"profile\":\"personal\",\"kind\":\"daily\",\"period\":\"<week>\",\"outcomes\":\"1 completed\",\"coverage\":\"0.5\",\"completion_state\":\"complete\",\"created_at\":\"<ts>\"}",
+        "payload_json": "{\"id\":\"<rid>\",\"profile\":\"personal\",\"kind\":\"weekly\",\"period\":\"<week>\",\"outcomes\":\"1 completed\",\"coverage\":\"0.5\",\"completion_state\":\"complete\",\"created_at\":\"<ts>\"}",
         "profile_id": "personal",
         "revision": "1",
         "scope_id": "<null>",
@@ -1353,7 +1353,7 @@
         "created_at": "<ts>",
         "idempotency_key": "<key>",
         "request_hash": "<hash>",
-        "result_json": "{\"id\":\"P-personal-daily-<week>\",\"profile\":\"personal\",\"kind\":\"daily\",\"period\":\"<week>\",\"status\":\"committed\",\"revision\":1,\"items\":[{\"work_item_id\":\"<tid>\",\"role\":\"mit\",\"position\":0}],\"created_at\":\"<ts>\",\"updated_at\":\"<ts>\"}"
+        "result_json": "{\"id\":\"P-personal-weekly-<week>\",\"profile\":\"personal\",\"kind\":\"weekly\",\"period\":\"<week>\",\"status\":\"committed\",\"revision\":1,\"items\":[{\"work_item_id\":\"<tid>\",\"role\":\"big_rock\",\"position\":0}],\"created_at\":\"<ts>\",\"updated_at\":\"<ts>\"}"
       },
       {
         "command": "focus_start",
@@ -1381,7 +1381,7 @@
         "created_at": "<ts>",
         "idempotency_key": "<key>",
         "request_hash": "<hash>",
-        "result_json": "{\"id\":\"<rid>\",\"profile\":\"personal\",\"kind\":\"daily\",\"period\":\"<week>\",\"outcomes\":\"1 completed\",\"coverage\":\"0.5\",\"completion_state\":\"complete\",\"created_at\":\"<ts>\"}"
+        "result_json": "{\"id\":\"<rid>\",\"profile\":\"personal\",\"kind\":\"weekly\",\"period\":\"<week>\",\"outcomes\":\"1 completed\",\"coverage\":\"0.5\",\"completion_state\":\"complete\",\"created_at\":\"<ts>\"}"
       },
       {
         "command": "doc put",
@@ -1402,17 +1402,17 @@
     "legacy_records": null,
     "plan_items": [
       {
-        "plan_id": "P-personal-daily-<week>",
+        "plan_id": "P-personal-weekly-<week>",
         "position": "0",
-        "role": "mit",
+        "role": "big_rock",
         "work_item_id": "<tid>"
       }
     ],
     "plans": [
       {
         "created_at": "<ts>",
-        "id": "P-personal-daily-<week>",
-        "kind": "daily",
+        "id": "P-personal-weekly-<week>",
+        "kind": "weekly",
         "period": "<week>",
         "profile_id": "personal",
         "revision": "1",
@@ -1443,7 +1443,7 @@
         "coverage": "0.5",
         "created_at": "<ts>",
         "id": "<rid>",
-        "kind": "daily",
+        "kind": "weekly",
         "metrics_json": "{}",
         "outcomes": "1 completed",
         "period": "<week>",

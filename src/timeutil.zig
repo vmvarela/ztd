@@ -110,23 +110,52 @@ pub fn localDate(t: Timestamp, buf: *[10]u8) []const u8 {
 pub fn parseTime(s: []const u8) !Timestamp {
     const fmt = std.fmt;
     if (s.len < 20) return error.BadTimestamp;
+    if (s[4] != '-' or s[7] != '-' or s[10] != 'T' or s[13] != ':' or s[16] != ':') return error.BadTimestamp;
     const year = fmt.parseInt(i32, s[0..4], 10) catch return error.BadTimestamp;
     const month = fmt.parseInt(u8, s[5..7], 10) catch return error.BadTimestamp;
     const day = fmt.parseInt(u8, s[8..10], 10) catch return error.BadTimestamp;
     const hour = fmt.parseInt(u8, s[11..13], 10) catch return error.BadTimestamp;
     const minute = fmt.parseInt(u8, s[14..16], 10) catch return error.BadTimestamp;
     const second = fmt.parseInt(u8, s[17..19], 10) catch return error.BadTimestamp;
-    if (s[19] != 'Z' and s[19] != 'z') return error.BadTimestamp;
+    if (!validFields(year, month, day, hour, minute, second)) return error.BadTimestamp;
+    // Anything between the seconds and the Z is a fraction to drop.
+    var i: usize = 19;
+    if (i < s.len and s[i] == '.') {
+        i += 1;
+        const start = i;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') i += 1;
+        if (i == start) return error.BadTimestamp;
+    }
+    if (i >= s.len or (s[i] != 'Z' and s[i] != 'z')) return error.BadTimestamp;
+    if (i + 1 != s.len) return error.BadTimestamp;
     return daysFromCivil(year, month, day) * 86400 +
         @as(i64, hour) * 3600 + @as(i64, minute) * 60 + second;
 }
 
 pub fn parseDate(s: []const u8) !Timestamp {
     if (s.len != 10) return error.BadTimestamp;
+    if (s[4] != '-' or s[7] != '-') return error.BadTimestamp;
     const year = std.fmt.parseInt(i32, s[0..4], 10) catch return error.BadTimestamp;
     const month = std.fmt.parseInt(u8, s[5..7], 10) catch return error.BadTimestamp;
     const day = std.fmt.parseInt(u8, s[8..10], 10) catch return error.BadTimestamp;
+    // daysFromCivil normalizes an impossible date silently; refuse it instead.
+    if (!validFields(year, month, day, 0, 0, 0)) return error.BadTimestamp;
     return daysFromCivil(year, month, day) * 86400;
+}
+
+fn daysInMonth(year: i32, month: u8) u8 {
+    return switch (month) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => if (@mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0)) 29 else 28,
+        else => 0,
+    };
+}
+
+fn validFields(year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8) bool {
+    if (month < 1 or month > 12) return false;
+    if (day < 1 or day > daysInMonth(year, month)) return false;
+    return hour <= 23 and minute <= 59 and second <= 59;
 }
 
 /// ISO-8601 week and week-year: 2026-W48.

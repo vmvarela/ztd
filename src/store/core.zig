@@ -1874,6 +1874,17 @@ pub fn commitPlan(s: *Store, a: std.mem.Allocator, cmd: CommitPlanCmd, decision:
         return errors.invalid("plan kind must be daily or weekly", .{});
     }
     if (cmd.period.len == 0) return errors.invalid("period is required", .{});
+    // A plan nothing can look up is worse than a rejection.
+    if (std.mem.eql(u8, cmd.kind, "daily")) {
+        _ = timeutil.parseDate(cmd.period) catch
+            return errors.invalid("period must be a real YYYY-MM-DD date, got \"{s}\"", .{cmd.period});
+    } else {
+        if (cmd.period.len != 8 or cmd.period[4] != '-' or cmd.period[5] != 'W' or
+            std.fmt.parseInt(u8, cmd.period[6..8], 10) == error.InvalidCharacter)
+        {
+            return errors.invalid("period must be YYYY-Www, got \"{s}\"", .{cmd.period});
+        }
+    }
     var aw = std.Io.Writer.Allocating.init(a);
     try writeCommitPlanRequest(&aw.writer, cmd);
     const hash = sha256hex(aw.written());
@@ -2371,6 +2382,8 @@ pub fn recordReview(s: *Store, a: std.mem.Allocator, cmd: ReviewCmd, derive: boo
         std.mem.eql(u8, cmd.kind, "monthly") or std.mem.eql(u8, cmd.kind, "yearly");
     if (!kind_ok) return errors.invalid("unknown review kind \"{s}\"", .{cmd.kind});
     if (cmd.period.len == 0) return errors.invalid("period is required", .{});
+    // Validate the label once, so --derive cannot be the only thing that cares.
+    _ = try periodRange(a, cmd.kind, cmd.period);
     if (cmd.outcomes.len == 0) return errors.invalid("outcomes are required", .{});
     if (cmd.coverage.len == 0) return errors.invalid("coverage is required", .{});
     var aw = std.Io.Writer.Allocating.init(a);
@@ -5107,6 +5120,7 @@ fn periodRange(a: std.mem.Allocator, kind: []const u8, period: []const u8) !Peri
             return errors.invalid("period must be YYYY-Www for weekly reviews", .{});
         const week = std.fmt.parseInt(i64, period[6..8], 10) catch
             return errors.invalid("period must be YYYY-Www for weekly reviews", .{});
+        if (week < 1 or week > 53) return errors.invalid("period must be YYYY-Www for weekly reviews", .{});
         // ISO week 1 is the week holding January 4th.
         const jan4 = timeutil.daysFromCivil(year, 1, 4);
         const monday_offset = @mod(jan4 + 3, 7);
@@ -5118,6 +5132,7 @@ fn periodRange(a: std.mem.Allocator, kind: []const u8, period: []const u8) !Peri
             return errors.invalid("period must be YYYY-MM for monthly reviews", .{});
         const month = std.fmt.parseInt(u8, period[5..7], 10) catch
             return errors.invalid("period must be YYYY-MM for monthly reviews", .{});
+        if (month < 1 or month > 12) return errors.invalid("period must be YYYY-MM for monthly reviews", .{});
         start_days = timeutil.daysFromCivil(year, month, 1);
         end_days = if (month == 12)
             timeutil.daysFromCivil(year + 1, 1, 1)

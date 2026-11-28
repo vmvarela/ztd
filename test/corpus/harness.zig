@@ -642,7 +642,9 @@ pub const Runner = struct {
             .envelope = null,
             .stderr_text = stderr_norm,
             .raw = null,
-            .argv = args,
+            // Copy: callers build args in a temporary list, and a diff needs
+            // them after the call returns.
+            .argv = try self.a.dupe([]const u8, args),
         };
 
         const trimmed = trimAsciiWs(res.stdout);

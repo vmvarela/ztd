@@ -154,14 +154,14 @@ fn journeySteps(r: *harness.Runner) anyerror!void {
     _ = try r.run(&.{ "move", "--field", "energy:low", item, "next" });
     _ = try r.run(&.{ "goal", "set", "--statement", "Ship ztd v3" });
     _ = try r.run(&.{"prepare"});
-    const item_mit = try std.fmt.allocPrint(a, "{s}:mit", .{item});
-    _ = try r.run(&.{ "plan", "commit", "--period", "2026-W48", "--item", item_mit });
+    const item_rock = try std.fmt.allocPrint(a, "{s}:big_rock", .{item});
+    _ = try r.run(&.{ "plan", "commit", "--kind", "weekly", "--period", "2026-W48", "--item", item_rock });
 
     const focus_path = [_][]const u8{ "data", "focus", "id" };
     const focus = (try r.run(&.{ "focus", "start", item })).value(a, &focus_path);
     _ = try r.run(&.{ "focus", "checkpoint", "--result", "permit renewed", item });
     _ = try r.run(&.{ "focus", "finish", focus });
-    _ = try r.run(&.{ "review", "daily", "--period", "2026-W48", "--outcomes", "1 completed", "--coverage", "0.5" });
+    _ = try r.run(&.{ "review", "weekly", "--period", "2026-W48", "--outcomes", "1 completed", "--coverage", "0.5" });
 
     _ = try r.run(&.{ "doc", "put", "--kind", "knowledge", "--slug", "notes/architecture", "--title", "Architecture", "--body", "One binary over SQLite." });
     _ = try r.run(&.{ "doc", "get", "--kind", "knowledge", "--slug", "notes/architecture" });
