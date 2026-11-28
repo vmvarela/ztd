@@ -44,7 +44,7 @@ journey() {
 	"$bin" --db "$db" project add alpha --desired-outcome "Baseline recorded" >/dev/null
 	"$bin" --db "$db" goal set --statement "Ship v3" >/dev/null
 	"$bin" --db "$db" routine add --id weekly-review --cadence weekly:mon >/dev/null
-	"$bin" --db "$db" review daily --period "2026-W48" --outcomes "2 completed" --coverage "0.8" >/dev/null
+	"$bin" --db "$db" review daily --period "2026-11-27" --outcomes "2 completed" --coverage "0.8" >/dev/null
 	"$bin" --db "$db" focus start "$item2" >/dev/null
 	sqlite3 "$db" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null
 	echo $(( $(size "$db") + $( [ -f "$db-wal" ] && size "$db-wal" || echo 0 ) ))

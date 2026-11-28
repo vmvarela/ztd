@@ -551,6 +551,8 @@ pub const SourceRetrieval = struct {
     provider_returned_limit: i64 = 0,
     complete_window: bool = false,
     truncated: bool = false,
+    /// Files the connector recognised but did not ingest (binary content).
+    skipped: usize = 0,
     failures: ?[]const []const u8 = null,
 
     pub fn write(self: SourceRetrieval, o: *json.Obj) !void {
@@ -560,6 +562,7 @@ pub const SourceRetrieval = struct {
         try o.int("provider_returned_limit", self.provider_returned_limit);
         try o.boolean("complete_window", self.complete_window);
         try o.boolean("truncated", self.truncated);
+        if (self.skipped > 0) try o.int("skipped", @intCast(self.skipped));
         if (self.failures) |list| {
             var arr = try o.arr("failures");
             for (list) |f| try arr.str(f);

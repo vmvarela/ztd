@@ -49,19 +49,17 @@ pub fn fail(f: Family, comptime fmt: []const u8, args: anytype) Ztd {
 }
 
 /// The longest prefix of `s` of at most `max` bytes that ends on a UTF-8
-/// character boundary. A complete character at the cut is kept whole; an
-/// incomplete sequence at the end of the input is dropped.
+/// character boundary. Stops at the first byte that does not start a complete,
+/// valid sequence, so the result is always valid UTF-8.
 pub fn utf8Prefix(s: []const u8, max: usize) []const u8 {
-    var n = @min(s.len, max);
-    while (n > 0 and n < s.len and (s[n] & 0xC0) == 0x80) n -= 1;
-    if (n < s.len) return s[0..n];
-    var i = n;
-    while (i > 0 and (s[i - 1] & 0xC0) == 0x80) i -= 1;
-    if (i == 0) return s[0..0];
-    const lead = s[i - 1];
-    const need: usize = if (lead < 0x80) 1 else if (lead & 0xF8 == 0xF0) 4 else if (lead & 0xF0 == 0xE0) 3 else if (lead & 0xE0 == 0xC0) 2 else 1;
-    if (i - 1 + need > s.len) return s[0 .. i - 1];
-    return s;
+    var i: usize = 0;
+    while (i < s.len) {
+        const len = std.unicode.utf8ByteSequenceLength(s[i]) catch return s[0..i];
+        if (i + len > s.len or i + len > max) return s[0..i];
+        if (!std.unicode.utf8ValidateSlice(s[i .. i + len])) return s[0..i];
+        i += len;
+    }
+    return s[0..i];
 }
 
 /// Copies the current detail out, for callers that format it again while it is
@@ -113,4 +111,10 @@ test "utf8Prefix keeps a complete character and drops an incomplete one" {
     try std.testing.expectEqualStrings("ab", utf8Prefix("ab\xC3", 10)); // truncated read
     try std.testing.expectEqualStrings("", utf8Prefix("é", 1));
     try std.testing.expectEqualStrings("abc", utf8Prefix("abc", 10));
+    // Invalid input never yields a dangling lead byte.
+    try std.testing.expectEqualStrings("a", utf8Prefix("a\xC3\xC3bc", 2));
+    try std.testing.expectEqualStrings("", utf8Prefix("\xC3", 1));
+    try std.testing.expectEqualStrings("", utf8Prefix("", 10));
+    try std.testing.expectEqualStrings("", utf8Prefix("café", 0));
+    try std.testing.expectEqualStrings("😀", utf8Prefix("😀x", 4));
 }

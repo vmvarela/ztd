@@ -643,6 +643,27 @@ pub fn lookupIdemStmt(
     return try dup(a, stmt.text(1));
 }
 
+/// Looks a stored result up under a key whose hash was not part of the key.
+/// A mismatch means a different request, so it returns null instead of failing;
+/// callers treat that as "no replay" and continue with the write.
+fn lookupLegacyIdem(
+    s: *Store,
+    a: std.mem.Allocator,
+    command: []const u8,
+    key: []const u8,
+    hash: *const [64]u8,
+) !?[]const u8 {
+    var stmt = try s.db.prepare(
+        "SELECT request_hash, result_json FROM idempotency_records WHERE command = ? AND idempotency_key = ?",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, command);
+    try stmt.bindText(2, key);
+    if (!try stmt.step()) return null;
+    if (!std.mem.eql(u8, stmt.text(0), hash)) return null;
+    return try dup(a, stmt.text(1));
+}
+
 pub fn writeIdem(
     s: *Store,
     a: std.mem.Allocator,
@@ -2646,7 +2667,39 @@ pub fn completeRoutine(s: *Store, a: std.mem.Allocator, b: domain.Binding, id: [
 
 // ---- check ----
 
-pub const CheckReport = struct {
+/// Validates the `id kind period` row `runCheck` reads back for plans and
+/// reviews, so a period an older build stored is reported instead of ignored.
+fn checkStoredPeriod(run: *CheckRun, noun: []const u8, row: []const u8) !void {
+    var it = std.mem.splitScalar(u8, row, ' ');
+    const id = it.next() orelse row;
+    const kind = it.next() orelse "";
+    const period = it.next() orelse "";
+    if (periodValidFor(kind, period)) return;
+    try run.fail("{s} {s} has an invalid {s} period {s}", .{ noun, id, kind, period });
+}
+
+fn periodValidFor(kind: []const u8, period: []const u8) bool {
+    if (std.mem.eql(u8, kind, "daily")) {
+        _ = timeutil.parseDate(period) catch return false;
+        return true;
+    }
+    if (std.mem.eql(u8, kind, "weekly")) return validWeekPeriod(period);
+    if (std.mem.eql(u8, kind, "monthly")) {
+        if (period.len != 7 or period[4] != '-') return false;
+        for (period[0..4]) |ch| if (!std.ascii.isDigit(ch)) return false;
+        for (period[5..7]) |ch| if (!std.ascii.isDigit(ch)) return false;
+        const month = std.fmt.parseInt(u8, period[5..7], 10) catch return false;
+        return month >= 1 and month <= 12;
+    }
+    if (std.mem.eql(u8, kind, "yearly")) {
+        if (period.len != 4) return false;
+        for (period) |ch| if (!std.ascii.isDigit(ch)) return false;
+        return true;
+    }
+    return false;
+}
+
+const CheckReport = struct {
     ok: bool,
     errors: []const []const u8,
 };
@@ -2794,6 +2847,13 @@ pub fn runCheck(s: *Store, a: std.mem.Allocator, b: ?domain.Binding) !CheckRepor
             try run.fail("plan {s} references work item {s} outside the profile scopes", .{ stmt.text(1), stmt.text(0) });
         }
     }
+
+    // 10b. Periodos guardados: a label written by an older build must not
+    // survive unreadable (2026-W99, 2026-W+1) and hide from every lookup.
+    for (try run.collect(try cat(a, "SELECT id || ' ' || kind || ' ' || period FROM plans WHERE 1 = 1", plan_sql), null, profile)) |row|
+        try checkStoredPeriod(&run, "plan", row);
+    for (try run.collect(try cat(a, "SELECT id || ' ' || kind || ' ' || period FROM reviews WHERE 1 = 1", plan_sql), null, profile)) |row|
+        try checkStoredPeriod(&run, "review", row);
 
     // 11. Invariantes de recorrido.
     for (try run.collect("SELECT actor_id FROM focus_sessions WHERE ended_at IS NULL GROUP BY actor_id HAVING count(*) > 1", null, null)) |id|
@@ -3012,10 +3072,11 @@ pub fn putDocument(s: *Store, a: std.mem.Allocator, cmd: DocumentCmd, now: Times
         try s.commit();
         return doc;
     }
-    // Releases before the hash was part of the key stored it without it; a retry
-    // of a write that succeeded then must replay instead of bumping the revision.
+    // Releases before the hash was part of the key stored it without it. Only
+    // an exact retry replays; a different body under the same key is a new
+    // write, not the conflict an unconditional put would otherwise be.
     const legacy_key = try std.fmt.allocPrint(a, "{s}|{s}|{s}|{d}", .{ scope, cmd.kind, cmd.slug, cmd.expected });
-    if (try lookupIdemStmt(s, a, "doc put", legacy_key, &hash)) |stored| {
+    if (try lookupLegacyIdem(s, a, "doc put", legacy_key, &hash)) |stored| {
         const doc = try docFromStored(a, stored);
         try s.commit();
         return doc;
@@ -3914,6 +3975,20 @@ fn readPrefix(a: std.mem.Allocator, io: std.Io, path: []const u8, limit: usize) 
     return fr.interface.readAllocShort(a, limit);
 }
 
+/// True when this source already has a capture for that file revision. Reads
+/// the unique index instead of preloading the whole history of the source.
+fn alreadyCaptured(s: *Store, scope: []const u8, source: []const u8, external_id: []const u8, revision: []const u8) !bool {
+    var q = try s.db.prepare(
+        "SELECT 1 FROM captures WHERE scope_id = ? AND source_id = ? AND external_id = ? AND external_revision = ? LIMIT 1",
+    );
+    defer q.finalize();
+    try q.bindText(1, scope);
+    try q.bindText(2, source);
+    try q.bindText(3, external_id);
+    try q.bindText(4, revision);
+    return try q.step();
+}
+
 /// Walks a directory source and records one observed review. The cursor only
 /// moves when the window is complete: every root resolved and listed, no read
 /// failures, nothing truncated. A suspicious path (a symlink leaving its root)
@@ -3927,26 +4002,10 @@ pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Bind
 
     var items: std.ArrayList(domain.SourceItem) = .empty;
     var failures: std.ArrayList([]const u8) = .empty;
-    var seen = std.StringHashMap(void).init(a);
     var complete = true;
     var truncated = false;
+    var skipped: usize = 0;
     var max_mtime: Timestamp = 0;
-
-    // Files this source already ingested are skipped before the per-scan cap,
-    // so a tree larger than the cap drains across scans instead of re-reading
-    // the same head forever.
-    {
-        var q = try s.db.prepare(
-            "SELECT external_id, external_revision FROM captures WHERE scope_id = ? AND source_id = ? AND external_id IS NOT NULL",
-        );
-        defer q.finalize();
-        try q.bindText(1, src.scope);
-        try q.bindText(2, src.id);
-        while (try q.step()) {
-            const key = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ q.text(0), q.text(1) });
-            try seen.put(key, {});
-        }
-    }
 
     for (roots) |root| {
         const real_root = realpathAlloc(a, root) catch {
@@ -3996,11 +4055,10 @@ pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Bind
             if (st.kind == .directory) continue;
             const seconds = st.mtime.toSeconds();
             const revision = try std.fmt.allocPrint(a, "{d}:{d}", .{ seconds, st.size });
-            // `seen` starts with the files this source already ingested, so the
-            // cap below counts new items and a rescan drains the tail.
-            const dedupe_key = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ real, revision });
-            if (seen.contains(dedupe_key)) continue;
-            try seen.put(dedupe_key, {});
+            // Files this source already ingested are skipped before the cap, so
+            // a tree larger than the cap drains across scans instead of
+            // re-reading the same head forever.
+            if (try alreadyCaptured(s, src.scope, src.id, real, revision)) continue;
             if (items.items.len >= 500) {
                 truncated = true;
                 continue;
@@ -4010,10 +4068,15 @@ pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Bind
                 complete = false;
                 continue;
             };
+            // Trim before validating: the cut can split a character, and that
+            // repaired tail is what decides whether the file is text at all.
+            const tail = if (st.size > 64 * 1024) errors.utf8Prefix(text, text.len) else text;
             // A binary file in an approved tree is simply not a capture: skip it
             // without failing the window, or one .png freezes the cursor forever.
-            if (!std.unicode.utf8ValidateSlice(text)) continue;
-            const tail = if (st.size > 64 * 1024) errors.utf8Prefix(text, text.len) else text;
+            if (!std.unicode.utf8ValidateSlice(tail)) {
+                skipped += 1;
+                continue;
+            }
             if (trimmed(tail).len == 0) continue;
             try items.append(a, .{
                 .external_id = real,
@@ -4056,6 +4119,7 @@ pub fn scanDirectory(s: *Store, a: std.mem.Allocator, io: std.Io, b: domain.Bind
             .provider_returned_limit = @intCast(items.items.len),
             .complete_window = complete,
             .truncated = truncated,
+            .skipped = skipped,
             .failures = if (failures.items.len > 0) failures.items else null,
         },
         .items = items.items,
@@ -5128,6 +5192,9 @@ fn isoWeeks(year: i32) u8 {
 /// the year has 53 weeks, and 2025-W53 would otherwise alias 2026-W01.
 fn validWeekPeriod(period: []const u8) bool {
     if (period.len != 8 or period[4] != '-' or period[5] != 'W') return false;
+    // Digits only: parseInt would otherwise accept "2026-W+1" as week 1.
+    for (period[0..4]) |ch| if (!std.ascii.isDigit(ch)) return false;
+    for (period[6..8]) |ch| if (!std.ascii.isDigit(ch)) return false;
     const year = std.fmt.parseInt(i32, period[0..4], 10) catch return false;
     const week = std.fmt.parseInt(u8, period[6..8], 10) catch return false;
     if (week < 1 or week > isoWeeks(year)) return false;

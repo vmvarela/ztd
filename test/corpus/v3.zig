@@ -739,6 +739,12 @@ fn directoryConnector(t: *T) !void {
     harness.mkdirs(t.io, tree) catch |e| return t.fail("mkdir {s}: {s}", .{ tree, @errorName(e) });
     try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = try std.fmt.allocPrint(t.a, "{s}/a.md", .{tree}), .data = "alpha note\n" });
     try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = try std.fmt.allocPrint(t.a, "{s}/b.md", .{tree}), .data = "beta note\n" });
+    // A text file whose 64 KiB cut lands inside a character must still be a
+    // capture: the tail is trimmed before the UTF-8 check, not after.
+    var straddle: std.ArrayList(u8) = .empty;
+    try straddle.appendNTimes(t.a, 'a', 65535);
+    try straddle.appendSlice(t.a, "é tail\n");
+    try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = try std.fmt.allocPrint(t.a, "{s}/c.md", .{tree}), .data = straddle.items });
     const outside = try r.path("outside.md");
     try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = outside, .data = "outside note\n" });
 
@@ -756,7 +762,7 @@ fn directoryConnector(t: *T) !void {
     // at 1024 bytes and would only show the first capture of the two.
     const scan1 = try v3Data(t, try v3OK(t, try r.run(&.{ "source", "scan", "--id", "dir1", "--full" })));
     const caps1 = try v3Arr(t, scan1, "captures");
-    if (caps1.items.len != 2) return t.fail("first scan observed {d} captures, want 2", .{caps1.items.len});
+    if (caps1.items.len != 3) return t.fail("first scan observed {d} captures, want 3", .{caps1.items.len});
     const rev1 = try v3Obj(t, scan1, "review");
     const kind1 = try v3Str(t, rev1, "result_kind");
     if (!std.mem.eql(u8, kind1, "observed")) return t.fail("result_kind \"{s}\", want observed", .{kind1});

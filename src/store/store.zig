@@ -372,4 +372,18 @@ test "an existing v7 database upgrades in place with its rows" {
     try std.testing.expect(try q.step());
     try std.testing.expectEqualStrings("", q.text(0));
     q.finalize();
+
+    // 0009 rebuilds `sources`; the review that hangs off it must survive, or a
+    // DROP with a cascade would silently erase every batch of every source.
+    q = try s.db.prepare("SELECT count(*) FROM source_reviews WHERE source_id = 'feed'");
+    try std.testing.expect(try q.step());
+    try std.testing.expectEqual(@as(i64, 1), q.int(0));
+    q.finalize();
+
+    // 0010 copies both knowledge rows; losing the superseded one would leave
+    // K2 pointing at a document that no longer exists.
+    q = try s.db.prepare("SELECT title FROM documents WHERE id = 'K1'");
+    try std.testing.expect(try q.step());
+    try std.testing.expectEqualStrings("Revisar café", q.text(0));
+    q.finalize();
 }
